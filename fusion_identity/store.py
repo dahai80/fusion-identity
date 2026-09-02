@@ -40,6 +40,8 @@ DEFAULT_QUOTA = {
     "concurrent": 4,
     "storage_mb": 10240,
     "allowed_models": [],
+    "allowed_modules": [],
+    "default_priority": 0,
 }
 
 LEGACY_SALT = "fusion-identity"
@@ -166,6 +168,7 @@ class InMemoryStore:
         self._usage: list[dict[str, Any]] = []
         self._idps: dict[str, dict[str, Any]] = {}
         self._mfa: dict[tuple[str, str], dict[str, Any]] = {}
+        self._lease_log: list[dict[str, Any]] = []
         logger.info(
             "InMemoryStore initialized (roles seeded=%d) — NOT for production", len(self._roles)
         )
@@ -352,6 +355,23 @@ class InMemoryStore:
 
     async def list_members(self, tenant_id: str) -> list[dict[str, Any]]:
         return [dict(m) for (tid, _), m in self._members.items() if tid == tenant_id]
+
+    async def log_lease(
+        self, tenant_id: str, lease_id: str, action: str, reason: str | None = None
+    ) -> None:
+        rec = {
+            "tenant_id": tenant_id,
+            "lease_id": lease_id,
+            "action": action,
+            "reason": reason,
+            "created_at": _now(),
+        }
+        self._lease_log.append(rec)
+        logger.debug("log_lease: tenant=%s lease=%s action=%s", tenant_id, lease_id, action)
+
+    async def list_lease_log(self, tenant_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        rows = [r for r in self._lease_log if r["tenant_id"] == tenant_id]
+        return list(reversed(rows[-limit:]))
 
     async def count_members_by_role(self, tenant_id: str, role: str) -> int:
         return sum(

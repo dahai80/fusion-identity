@@ -17,6 +17,10 @@ router = APIRouter(prefix="/scim/v2", tags=["scim"])
 async def list_users(
     request: Request,
     tenant_id: str = Query(..., alias="tenantId"),
+    start_index: int = Query(default=1, alias="startIndex", ge=1),
+    count: int = Query(default=100, alias="count", ge=1, le=1000),
+    filter_: str | None = Query(default=None, alias="filter"),
+    sort_by: str | None = Query(default=None, alias="sortBy"),
     _: None = Depends(require_service_token),
 ) -> dict[str, Any]:
     store = request.app.state.store
@@ -35,12 +39,41 @@ async def list_users(
                 "tenant_id": tenant_id,
             }
         )
-    logger.info("scim list_users: tenant=%s count=%d", tenant_id, len(resources))
+    resources = _apply_scim_filter(resources, filter_)
+    if sort_by:
+        resources.sort(key=lambda r: str(r.get(sort_by, "")))
+    total = len(resources)
+    page = resources[start_index - 1 : start_index - 1 + count]
+    logger.info(
+        "scim list_users: tenant=%s total=%d page=%d filter=%s sortBy=%s",
+        tenant_id,
+        total,
+        len(page),
+        filter_,
+        sort_by,
+    )
     return {
         "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
-        "totalResults": len(resources),
-        "Resources": resources,
+        "totalResults": total,
+        "startIndex": start_index,
+        "itemsPerPage": len(page),
+        "Resources": page,
     }
+
+
+def _apply_scim_filter(
+    resources: list[dict[str, Any]], filter_expr: str | None
+) -> list[dict[str, Any]]:
+    if not filter_expr:
+        return resources
+    import re
+
+    m = re.match(r'(\w+)\s+eq\s+"?([^"]+)"?', filter_expr.strip())
+    if not m:
+        logger.warning("scim filter unsupported: %s", filter_expr)
+        return resources
+    attr, val = m.group(1), m.group(2)
+    return [r for r in resources if str(r.get(attr, "")) == val]
 
 
 @router.post("/Users")
@@ -159,3 +192,71 @@ async def delete_user(
         tenant_id, user_id, None, None, "scim.user.delete", "user", {"user_id": user_id}
     )
     return {"deleted": True, "id": user_id}
+
+
+_SCIM_GROUP_ROLES = ["tenant_admin", "operator", "member", "viewer"]
+
+
+@router.get("/Groups")
+async def list_groups(
+    request: Request,
+    tenant_id: str = Query(..., alias="tenantId"),
+    start_index: int = Query(default=1, alias="startIndex", ge=1),
+    count: int = Query(default=100, alias="count", ge=1, le=1000),
+    filter_: str | None = Query(default=None, alias="filter"),
+    _: None = Depends(require_service_token),
+) -> dict[str, Any]:
+    store = request.app.state.store
+    members = await store.list_members(tenant_id)
+    by_role: dict[str, list[str]] = {r: [] for r in _SCIM_GROUP_ROLES}
+    for m in members:
+        role = m.get("role", "member")
+        if role in by_role:
+            by_role[role].append(m["user_id"])
+    resources = [
+        {
+            "id": f"{tenant_id}:{role}",
+            "displayName": f"{tenant_id} {role}",
+            "members": [{"value": uid, "$ref": f"/scim/v2/Users/{uid}"} for uid in uids],
+        }
+        for role, uids in by_role.items()
+        if uids
+    ]
+    if filter_:
+        import re
+
+        m = re.match(r'(\w+)\s+eq\s+"?([^"]+)"?', filter_.strip())
+        if m:
+            attr, val = m.group(1), m.group(2)
+            resources = [r for r in resources if str(r.get(attr, "")) == val]
+        else:
+            logger.warning("scim groups filter unsupported: %s", filter_)
+    total = len(resources)
+    page = resources[start_index - 1 : start_index - 1 + count]
+    logger.info("scim list_groups: tenant=%s total=%d", tenant_id, total)
+    return {
+        "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+        "totalResults": total,
+        "startIndex": start_index,
+        "itemsPerPage": len(page),
+        "Resources": page,
+    }
+
+
+@router.get("/Groups/{group_id}")
+async def get_group(
+    request: Request,
+    group_id: str,
+    tenant_id: str = Query(..., alias="tenantId"),
+    _: None = Depends(require_service_token),
+) -> dict[str, Any]:
+    store = request.app.state.store
+    members = await store.list_members(tenant_id)
+    role = group_id.split(":")[-1] if ":" in group_id else group_id
+    uids = [m["user_id"] for m in members if m.get("role") == role]
+    logger.info("scim get_group: tenant=%s group=%s members=%d", tenant_id, group_id, len(uids))
+    return {
+        "id": group_id,
+        "displayName": f"{tenant_id} {role}",
+        "members": [{"value": uid, "$ref": f"/scim/v2/Users/{uid}"} for uid in uids],
+    }

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from fusion_identity.deps import get_store, require_tenant_admin_of
+from fusion_identity.deps import get_store, invalidate_tenant_cache, require_tenant_admin_of
 from fusion_identity.models import TenantUpdate
 from fusion_identity.store import InMemoryStore
 
@@ -38,6 +38,7 @@ async def get_tenant(
 async def update_tenant(
     tenant_id: str,
     body: TenantUpdate,
+    request: Request,
     store: InMemoryStore = Depends(get_store),
     _claims: dict = Depends(_self),
 ) -> dict[str, Any]:
@@ -57,4 +58,5 @@ async def update_tenant(
             "tenant",
             {"status": fields["status"]},
         )
+    await invalidate_tenant_cache(request, tenant_id)
     return t

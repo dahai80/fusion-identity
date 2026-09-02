@@ -73,7 +73,7 @@ def test_admin_usage_today(client: TestClient):
     assert "concurrency" in body
     assert body["concurrency"]["max_limit"] >= 0
     assert "tokens" in body
-    assert body["tokens"]["total"] >= 500
+    assert body["tokens"]["total_today"] >= 500
     assert body["tokens"]["daily_limit"] > 0
     assert "usage_percentage" in body["tokens"]
 

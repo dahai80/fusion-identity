@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from fusion_identity.deps import get_store, require_tenant_admin_of
+from fusion_identity.deps import get_store, invalidate_tenant_cache, require_tenant_admin_of
 from fusion_identity.models import QuotaUpdate
 from fusion_identity.store import InMemoryStore
 
@@ -28,6 +28,7 @@ async def get_quota(
 async def put_quota(
     tenant_id: str,
     body: QuotaUpdate,
+    request: Request,
     store: InMemoryStore = Depends(get_store),
     _claims: dict = Depends(_admin),
 ) -> dict[str, Any]:
@@ -37,4 +38,5 @@ async def put_quota(
     q = await store.put_quota(tenant_id, **fields)
     if not q:
         raise HTTPException(status_code=404, detail="tenant not found")
+    await invalidate_tenant_cache(request, tenant_id)
     return q

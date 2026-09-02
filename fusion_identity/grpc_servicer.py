@@ -34,6 +34,7 @@ _ERROR_HTTP_STATUS = {
     pb.AuthErrorCode.MODEL_UNAUTHORIZED: 403,
     pb.AuthErrorCode.CONCURRENCY_LIMIT_EXCEEDED: 429,
     pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED: 429,
+    pb.AuthErrorCode.RATE_LIMIT_EXCEEDED: 429,
 }
 
 
@@ -100,6 +101,7 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                 "allowed_models": quota.get("allowed_models", []),
                 "max_concurrency": int(quota.get("concurrent", 2) or 2),
                 "daily_token_limit": int(quota.get("tpm", 50000) or 50000),
+                "rpm_limit": int(quota.get("rpm", 0) or 0),
                 "default_priority": quota.get("default_priority", 0),
             }
             if self._cache is not None:
@@ -127,6 +129,16 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                 f"unauthorized model: {request.target_model}",
             )
 
+        rpm_limit = int(tenant_info.get("rpm_limit", 0) or 0)
+        if rpm_limit > 0 and self._cache is not None:
+            rpm_ok, rpm_remaining = await self._cache.check_rpm(tenant_id, rpm_limit)
+            if not rpm_ok:
+                logger.info("grpc authorize refuse rpm tenant=%s limit=%s", tenant_id, rpm_limit)
+                return _refuse(
+                    pb.AuthErrorCode.RATE_LIMIT_EXCEEDED,
+                    f"rpm limit ({rpm_limit}/min) exceeded",
+                )
+
         daily_limit = int(tenant_info.get("daily_token_limit", 50000) or 50000)
         if self._cache is not None:
             quota_ok, remaining = await self._cache.check_daily_quota(tenant_id, daily_limit)
@@ -142,6 +154,7 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                 pb.AuthErrorCode.CONCURRENCY_LIMIT_EXCEEDED,
                 f"concurrency limit ({max_concurrency}) reached",
             )
+        await self._store.log_lease(tenant_id, lease_id, "acquire", "grpc_authorize")
         active = await self._concurrency.active_count(tenant_id)
         mc.set_active_concurrency(tenant_id, active)
 
@@ -174,6 +187,9 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
     async def ReleaseLease(self, request, context):
         ok = await self._concurrency.release(request.lease_id, request.reason or "released")
         if ok:
+            await self._store.log_lease(
+                request.tenant_id, request.lease_id, "release", request.reason or "released"
+            )
             active = await self._concurrency.active_count(request.tenant_id)
             mc.set_active_concurrency(request.tenant_id, active)
         logger.info(
@@ -191,6 +207,9 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
             await self._cache.record_token_usage(request.tenant_id, total_tokens)
         if request.lease_id:
             await self._concurrency.release(request.lease_id, "usage_reported")
+            await self._store.log_lease(
+                request.tenant_id, request.lease_id, "release", "usage_reported"
+            )
             active = await self._concurrency.active_count(request.tenant_id)
             mc.set_active_concurrency(request.tenant_id, active)
         daily_limit = _daily_limit_for(await self._store.get_quota(request.tenant_id))

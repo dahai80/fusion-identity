@@ -683,6 +683,26 @@ class PgStore:
         )
         return bool(val)
 
+    async def log_lease(
+        self, tenant_id: str, lease_id: str, action: str, reason: str | None = None
+    ) -> None:
+        await self.execute(
+            "INSERT INTO lease_log(tenant_id, lease_id, action, reason) VALUES ($1,$2,$3,$4)",
+            tenant_id,
+            lease_id,
+            action,
+            reason,
+        )
+        logger.debug("log_lease: tenant=%s lease=%s action=%s", tenant_id, lease_id, action)
+
+    async def list_lease_log(self, tenant_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT * FROM lease_log WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2",
+            tenant_id,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
 
 def _decode_scopes(row: dict[str, Any]) -> dict[str, Any]:
     r = dict(row)
