@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 async def _build_redis(settings: Settings) -> Any:
+    # F13: when redis_url is set the operator intends the quota/concurrency
+    # plane to be active. A connection failure must fail-closed (refuse to
+    # start) rather than silently degrading to "no concurrency limits, no
+    # quota cache". Only an explicitly unset redis_url is a valid opt-out.
     if not settings.redis_url:
         logger.info("build_app: redis disabled (FUSION_IDENTITY_REDIS_URL unset)")
         return None
@@ -26,8 +30,10 @@ async def _build_redis(settings: Settings) -> Any:
         logger.info("build_app: redis connected url=%s", settings.redis_url)
         return client
     except Exception as exc:
-        logger.error("build_app: redis connect failed (%s) — gRPC hot path disabled", exc)
-        return None
+        logger.error("build_app: redis connect failed (%s) — refusing to start", exc)
+        raise RuntimeError(
+            f"redis connect failed but FUSION_IDENTITY_REDIS_URL is set: {exc}"
+        ) from exc
 
 
 PREFIX_EXEMPT = ("/api/v1/auth/oidc/",)
@@ -68,9 +74,42 @@ class _OidcContextMiddleware:
         await self._app(scope, receive, send)
 
 
+class _SecurityHeadersMiddleware:
+    # P1-6: attach baseline security response headers to every HTTP response.
+    # No X-Content-Type-Options/ nosniff on the HTML /docs routes left a
+    # content-sniffing surface; HSTS + X-Frame-Options harden the service
+    # regardless of upstream proxy. This is ASGI, not a FastAPI BaseHTTPMiddleware,
+    # to avoid the known request-body buffering overhead.
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+
+        async def _send(message):
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers") or [])
+                for name, val in (
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"x-frame-options", b"DENY"),
+                    (b"strict-transport-security", b"max-age=31536000; includeSubDomains"),
+                    (b"x-xss-protection", b"0"),
+                    (b"referrer-policy", b"no-referrer"),
+                ):
+                    if not any(k.lower() == name for k, _ in headers):
+                        headers.append((name, val))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self._app(scope, receive, _send)
+
+
 TENANT_EXEMPT = frozenset(
     {
         "/health",
+        "/ready",
         "/docs",
         "/openapi.json",
         "/redoc",
@@ -88,15 +127,20 @@ TENANT_EXEMPT = frozenset(
 
 def _build_store(settings: Settings) -> Any:
     url = settings.database_url
+    # F14: when use_pgstore=True the operator intends production persistence.
+    # A PgStore init failure must refuse to start, not silently fall back to
+    # InMemoryStore (which would lose all tenant data on restart and has no
+    # consistency across workers). Only use_pgstore=False opts into InMemory.
     if settings.use_pgstore and url:
-        try:
-            from fusion_identity.db import PgStore
+        from fusion_identity.db import PgStore
 
-            store = PgStore(url)
-            logger.info("build_app: store=PgStore url=%s (production)", _safe_url(url))
-            return store
-        except Exception as exc:
-            logger.error("build_app: PgStore init failed (%s), fallback to InMemoryStore", exc)
+        store = PgStore(url, pool_max=settings.db_pool_max)
+        logger.info(
+            "build_app: store=PgStore url=%s pool_max=%s (production)",
+            _safe_url(url),
+            settings.db_pool_max,
+        )
+        return store
     logger.warning("build_app: store=InMemoryStore (NOT for production)")
     return InMemoryStore()
 
@@ -107,7 +151,9 @@ def _build_auth_service(settings: Settings, store: Any) -> AuthService:
         from fusion_identity.jwks import KeyRing
 
         key_ring = KeyRing.rs256(
-            settings.jwt_private_key_pem, public_keys_pem=settings.jwt_public_keys
+            settings.jwt_private_key_pem,
+            public_keys_pem=settings.jwt_public_keys,
+            persist_path=settings.jwt_keyring_path,
         )
         logger.info("build_app: KeyRing RS256 kid=%s", key_ring.kid)
     return AuthService(
@@ -138,6 +184,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.api_keys import router as api_keys_router
     from fusion_identity.routes.audit import router as audit_router
     from fusion_identity.routes.auth import router as auth_router
+    from fusion_identity.routes.health import router as health_router
     from fusion_identity.routes.idps import router as idps_router
     from fusion_identity.routes.jwks import router as jwks_router
     from fusion_identity.routes.members import router as members_router
@@ -150,6 +197,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.usage import router as usage_router
 
     app.include_router(auth_router)
+    app.include_router(health_router)
     app.include_router(tenants_router)
     app.include_router(members_router)
     app.include_router(api_keys_router)
@@ -183,6 +231,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
         app, exempt_paths=TENANT_EXEMPT, verify_jwt=_verify_jwt, require_jwt=False
     )
     app.add_middleware(_OidcContextMiddleware)
+    app.add_middleware(_SecurityHeadersMiddleware)
     logger.info("build_app: tenant-identity service wired, port=%s", settings.port)
 
     @app.on_event("startup")
@@ -198,17 +247,18 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
 
             app.state.cache = IdentityCache(redis)
             app.state.concurrency = ConcurrencyManager(redis, settings.lease_ttl_seconds)
+            await app.state.cache.init_scripts()
             await app.state.concurrency.init_scripts()
         if run_bootstrap:
-            try:
-                await bootstrap(
-                    app.state.store,
-                    settings.bootstrap_admin_user,
-                    settings.bootstrap_admin_pass,
-                    settings.bootstrap_tenants,
-                )
-            except RuntimeError as exc:
-                logger.warning("bootstrap skipped: %s", exc)
+            # F15: bootstrap establishes the first admin — a failure must
+            # fail-closed (refuse to start), not be swallowed. A silently
+            # started service with no admin locks operators out.
+            await bootstrap(
+                app.state.store,
+                settings.bootstrap_admin_user,
+                settings.bootstrap_admin_pass,
+                settings.bootstrap_tenants,
+            )
         if settings.grpc_port > 0 and app.state.concurrency is not None:
             try:
                 from fusion_identity.grpc_server import serve as serve_grpc
@@ -218,7 +268,13 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
                 )
                 logger.info("build_app: grpc listening on %s:%s", settings.host, settings.grpc_port)
             except Exception as exc:
-                logger.error("build_app: grpc start failed (%s)", exc)
+                # P0-2: fail-closed — gRPC is the authorization control plane.
+                # A swallowed start failure leaves HTTP healthy (200) while every
+                # AuthorizeAndAcquire dead-ends, causing a silent gateway
+                # meltdown. Re-raise so the service refuses to come up, consistent
+                # with F13 (redis) / F14 (store) fail-closed semantics.
+                logger.error("build_app: grpc start failed, aborting startup (%s)", exc)
+                raise
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:

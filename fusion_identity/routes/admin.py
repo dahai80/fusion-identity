@@ -167,10 +167,18 @@ async def _revoke_tenant_api_key(
         raise HTTPException(status_code=404, detail="api key already revoked")
     cache = get_cache(request)
     if cache is not None and match.get("key_hash"):
+        # P2-11: fail-closed — match the api_keys route behavior. A swallowed
+        # cache-invalidate failure leaves the revoked key live for up to TTL.
         try:
             await cache.invalidate_api_key_by_hash(match["key_hash"])
         except Exception as exc:
-            logger.warning("admin_revoke_api_key: cache invalidate err=%s", exc)
+            logger.error("admin_revoke_api_key: cache invalidate failed (fail-closed): %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "api key revoked but cache invalidation failed — key may remain valid up to TTL"
+                ),
+            ) from exc
     logger.warning("admin_revoke_api_key: tenant=%s key=%s", tenant_id, key_id)
 
 
@@ -213,9 +221,9 @@ async def admin_usage_today(
     total_tokens = by_metric.get("tokens", 0)
     token_total = total_tokens + prompt + completion
     quota = await store.get_quota(tenant_id) or {}
-    daily_limit = int(quota.get("tpm", 50000) or 50000)
+    daily_limit = int(quota.get("tpm", 50000)) if quota.get("tpm") is not None else 50000
     usage_pct = round(token_total / daily_limit * 100, 2) if daily_limit > 0 else 0.0
-    max_limit = int(quota.get("concurrent", 0) or 0)
+    max_limit = int(quota.get("concurrent", 0)) if quota.get("concurrent") is not None else 0
     current_active = 0
     concurrency = request.app.state.concurrency
     if concurrency is not None:

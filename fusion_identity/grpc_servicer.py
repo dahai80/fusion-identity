@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
 from typing import Any
+
+import grpc
 
 from fusion_identity import metrics_collector as mc
 from fusion_identity.grpc import identity_pb2 as pb
@@ -13,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOKENS = 4096
 _TIER_PRIORITY = {"enterprise": 3, "pro": 2, "standard": 2, "team": 2, "free": 1}
+_MODULE_WHITELIST = {"code", "agent", "kb", "bench", "sim", "unknown"}
+_MODEL_WHITELIST_THRESHOLD = 64
 
 
 def _priority_from(quota: dict[str, Any] | None, tier: str) -> int:
@@ -21,10 +26,28 @@ def _priority_from(quota: dict[str, Any] | None, tier: str) -> int:
     return _TIER_PRIORITY.get(tier, 2)
 
 
+def _quota_int(quota: dict[str, Any] | None, key: str, default: int) -> int:
+    # P0-3: distinguish "absent" (use default) from "present including 0".
+    # `int(x or default)` swallows a legitimate 0 into the default, turning a
+    # stop-inference quota (concurrent=0 / tpm=0) into the default budget.
+    if not quota or key not in quota or quota[key] is None:
+        return default
+    return int(quota[key])
+
+
 def _daily_limit_for(quota: dict[str, Any] | None) -> int:
-    if not quota:
-        return 50000
-    return int(quota.get("tpm", 50000) or 50000)
+    return _quota_int(quota, "tpm", 50000)
+
+
+def _sanitize_label(value: str, fallback: str) -> str:
+    if not value:
+        return fallback
+    if value in _MODULE_WHITELIST:
+        return value
+    cleaned = value.replace("-", "").replace("_", "")
+    if len(value) <= _MODEL_WHITELIST_THRESHOLD and cleaned.isalnum():
+        return value
+    return "other"
 
 
 _ERROR_HTTP_STATUS = {
@@ -51,6 +74,10 @@ def _refuse(code: int, msg: str) -> pb.AuthorizeAndAcquireResponse:
     )
 
 
+def _lease_belongs(lease_id: str, tenant_id: str) -> bool:
+    return bool(lease_id) and lease_id.startswith(f"{tenant_id}:")
+
+
 class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
     def __init__(self, store: Any, cache: Any, concurrency: Any) -> None:
         self._store = store
@@ -64,8 +91,16 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
             tid = resp.tenant_context.tenant_id if resp.tenant_context.tenant_id else "unknown"
             result = "allowed" if resp.is_allowed else pb.AuthErrorCode.Name(resp.error_code)
             status_code = 200 if resp.is_allowed else _error_http_status(resp.error_code)
-            mc.record_auth(tid, request.target_module or "unknown", result, status_code)
+            mc.record_auth(
+                tid, _sanitize_label(request.target_module, "unknown"), result, status_code
+            )
             return resp
+        except Exception as exc:
+            # P2-9: surface a distinct gRPC status instead of UNKNOWN. A transient
+            # store/redis fault must read UNAVAILABLE (caller may retry) not a
+            # generic UNKNOWN. Fail-closed: never authorize on an unexpected error.
+            logger.error("grpc AuthorizeAndAcquire unhandled: %s", exc, exc_info=True)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, f"authorize failed: {exc}")
         finally:
             cost_ms = (time.perf_counter() - start) * 1000
             mc.observe_rpc("AuthorizeAndAcquire", cost_ms / 1000)
@@ -80,7 +115,14 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
 
         tenant_info = None
         if self._cache is not None:
-            tenant_info = await self._cache.get_tenant_by_api_key(api_key)
+            # P1-7: a redis hiccup must not take the whole authorize path down —
+            # the store is the source of truth. On a cache read error, fall back
+            # to the store lookup below rather than propagating UNAVAILABLE.
+            try:
+                tenant_info = await self._cache.get_tenant_by_api_key(api_key)
+            except Exception as exc:
+                logger.warning("grpc authorize: cache read failed, falling back to store: %s", exc)
+                tenant_info = None
 
         if tenant_info is None:
             key_hash = hashlib.sha256(api_key.encode()).hexdigest()
@@ -88,10 +130,13 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
             if not key_record:
                 return _refuse(pb.AuthErrorCode.INVALID_API_KEY, "invalid or revoked api key")
             tenant_id = key_record["tenant_id"]
-            tenant = await self._store.get_tenant(tenant_id)
+            tenant, quota = await asyncio.gather(
+                self._store.get_tenant(tenant_id),
+                self._store.get_quota(tenant_id),
+            )
             if not tenant:
                 return _refuse(pb.AuthErrorCode.INVALID_API_KEY, "tenant missing for key")
-            quota = await self._store.get_quota(tenant_id) or {}
+            quota = quota or {}
             tenant_info = {
                 "tenant_id": tenant_id,
                 "tenant_name": tenant.get("display_name", tenant_id),
@@ -99,13 +144,18 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                 "is_active": tenant.get("status", "active") == "active",
                 "allowed_modules": quota.get("allowed_modules", []),
                 "allowed_models": quota.get("allowed_models", []),
-                "max_concurrency": int(quota.get("concurrent", 2) or 2),
-                "daily_token_limit": int(quota.get("tpm", 50000) or 50000),
-                "rpm_limit": int(quota.get("rpm", 0) or 0),
+                "max_concurrency": _quota_int(quota, "concurrent", 2),
+                "daily_token_limit": _quota_int(quota, "tpm", 50000),
+                "rpm_limit": _quota_int(quota, "rpm", 0),
                 "default_priority": quota.get("default_priority", 0),
             }
             if self._cache is not None:
-                await self._cache.set_api_key(api_key, tenant_info, ttl=300)
+                # P1-7: a cache write failure is non-fatal — the store lookup
+                # already succeeded and authorized this request.
+                try:
+                    await self._cache.set_api_key(api_key, tenant_info, ttl=300)
+                except Exception as exc:
+                    logger.warning("grpc authorize: cache write failed (non-fatal): %s", exc)
 
         if not tenant_info.get("is_active", True):
             return _refuse(pb.AuthErrorCode.TENANT_DISABLED, "tenant disabled")
@@ -129,34 +179,44 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                 f"unauthorized model: {request.target_model}",
             )
 
-        rpm_limit = int(tenant_info.get("rpm_limit", 0) or 0)
-        if rpm_limit > 0 and self._cache is not None:
-            rpm_ok, rpm_remaining = await self._cache.check_rpm(tenant_id, rpm_limit)
-            if not rpm_ok:
-                logger.info("grpc authorize refuse rpm tenant=%s limit=%s", tenant_id, rpm_limit)
-                return _refuse(
-                    pb.AuthErrorCode.RATE_LIMIT_EXCEEDED,
-                    f"rpm limit ({rpm_limit}/min) exceeded",
-                )
-
-        daily_limit = int(tenant_info.get("daily_token_limit", 50000) or 50000)
+        daily_limit = int(tenant_info.get("daily_token_limit", 50000))
+        if daily_limit <= 0:
+            # P0-3: tpm=0 means no daily budget at all — deny before reserving.
+            return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, "daily token quota set to 0")
         if self._cache is not None:
-            quota_ok, remaining = await self._cache.check_daily_quota(tenant_id, daily_limit)
+            quota_ok, remaining = await self._cache.reserve_daily_quota(tenant_id, daily_limit)
         else:
             quota_ok, remaining = True, daily_limit
         if not quota_ok:
             return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, "daily token quota exceeded")
 
-        max_concurrency = int(tenant_info.get("max_concurrency", 2) or 2)
-        lease_id = await self._concurrency.try_acquire(tenant_id, max_concurrency)
-        if not lease_id:
+        max_concurrency = int(tenant_info.get("max_concurrency", 2))
+        acquired = await self._concurrency.try_acquire(tenant_id, max_concurrency)
+        if not acquired:
+            if self._cache is not None:
+                await self._cache.refund_daily_quota(tenant_id, 0)
             return _refuse(
                 pb.AuthErrorCode.CONCURRENCY_LIMIT_EXCEEDED,
                 f"concurrency limit ({max_concurrency}) reached",
             )
+        lease_id, active = acquired
         await self._store.log_lease(tenant_id, lease_id, "acquire", "grpc_authorize")
-        active = await self._concurrency.active_count(tenant_id)
         mc.set_active_concurrency(tenant_id, active)
+
+        # RPM counted only after all gates pass (L3 fix) — downstream failures
+        # must not burn the per-minute budget.
+        rpm_limit = int(tenant_info.get("rpm_limit", 0))
+        if rpm_limit > 0 and self._cache is not None:
+            rpm_ok, _ = await self._cache.check_rpm(tenant_id, rpm_limit)
+            if not rpm_ok:
+                await self._concurrency.release(tenant_id, lease_id, "rpm_exceeded")
+                await self._cache.refund_daily_quota(tenant_id, 0)
+                await self._store.log_lease(tenant_id, lease_id, "release", "rpm_exceeded")
+                logger.info("grpc authorize refuse rpm tenant=%s limit=%s", tenant_id, rpm_limit)
+                return _refuse(
+                    pb.AuthErrorCode.RATE_LIMIT_EXCEEDED,
+                    f"rpm limit ({rpm_limit}/min) exceeded",
+                )
 
         priority = _priority_from(
             {"default_priority": tenant_info.get("default_priority")},
@@ -185,12 +245,21 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
         )
 
     async def ReleaseLease(self, request, context):
-        ok = await self._concurrency.release(request.lease_id, request.reason or "released")
+        if not _lease_belongs(request.lease_id, request.tenant_id):
+            logger.warning(
+                "grpc release rejected: lease=%s not owned by tenant=%s",
+                request.lease_id,
+                request.tenant_id,
+            )
+            return pb.ReleaseLeaseResponse(success=False)
+        active = await self._concurrency.release(
+            request.tenant_id, request.lease_id, request.reason or "released"
+        )
+        ok = active >= 0
         if ok:
             await self._store.log_lease(
                 request.tenant_id, request.lease_id, "release", request.reason or "released"
             )
-            active = await self._concurrency.active_count(request.tenant_id)
             mc.set_active_concurrency(request.tenant_id, active)
         logger.info(
             "grpc release lease=%s tenant=%s reason=%s ok=%s",
@@ -202,16 +271,39 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
         return pb.ReleaseLeaseResponse(success=ok)
 
     async def ReportUsage(self, request, context):
-        total_tokens = int(request.prompt_tokens) + int(request.completion_tokens)
-        if self._cache is not None and total_tokens > 0:
-            await self._cache.record_token_usage(request.tenant_id, total_tokens)
-        if request.lease_id:
-            await self._concurrency.release(request.lease_id, "usage_reported")
-            await self._store.log_lease(
-                request.tenant_id, request.lease_id, "release", "usage_reported"
+        if request.lease_id and not _lease_belongs(request.lease_id, request.tenant_id):
+            logger.warning(
+                "grpc usage rejected: lease=%s not owned by tenant=%s",
+                request.lease_id,
+                request.tenant_id,
             )
-            active = await self._concurrency.active_count(request.tenant_id)
-            mc.set_active_concurrency(request.tenant_id, active)
+            return pb.ReportUsageResponse(success=False, remaining_daily_quota=0)
+        total_tokens = int(request.prompt_tokens) + int(request.completion_tokens)
+        ledger_ok = True
+        if total_tokens > 0:
+            try:
+                await self._store.record_usage(
+                    request.tenant_id,
+                    metric="tokens",
+                    value=total_tokens,
+                    source="grpc",
+                    model=request.model_name or None,
+                    user_id=None,
+                )
+            except Exception as exc:
+                logger.error("grpc ReportUsage ledger write failed: %s", exc)
+                ledger_ok = False
+        if self._cache is not None and total_tokens > 0 and ledger_ok:
+            await self._cache.record_token_usage(request.tenant_id, total_tokens)
+        if request.lease_id and request.release_after:
+            active = await self._concurrency.release(
+                request.tenant_id, request.lease_id, "usage_reported"
+            )
+            if active >= 0:
+                await self._store.log_lease(
+                    request.tenant_id, request.lease_id, "release", "usage_reported"
+                )
+                mc.set_active_concurrency(request.tenant_id, active)
         daily_limit = _daily_limit_for(await self._store.get_quota(request.tenant_id))
         remaining = (
             await self._cache.remaining_quota(request.tenant_id, daily_limit)
@@ -220,25 +312,18 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
         )
         if total_tokens > 0:
             mc.record_tokens(
-                request.tenant_id, request.model_name or "unknown", total_tokens, "grpc"
+                request.tenant_id,
+                _sanitize_label(request.model_name, "unknown"),
+                total_tokens,
+                "grpc",
             )
         mc.set_quota_remaining(request.tenant_id, remaining)
-        try:
-            await self._store.record_usage(
-                request.tenant_id,
-                metric="tokens",
-                value=total_tokens,
-                source="grpc",
-                model=request.model_name or None,
-                user_id=None,
-            )
-        except Exception as exc:
-            logger.warning("grpc ReportUsage ledger write failed: %s", exc)
         logger.info(
-            "grpc usage tenant=%s model=%s tokens=%s remaining=%s",
+            "grpc usage tenant=%s model=%s tokens=%s remaining=%s ledger_ok=%s",
             request.tenant_id,
             request.model_name,
             total_tokens,
             remaining,
+            ledger_ok,
         )
-        return pb.ReportUsageResponse(success=True, remaining_daily_quota=remaining)
+        return pb.ReportUsageResponse(success=ledger_ok, remaining_daily_quota=remaining)

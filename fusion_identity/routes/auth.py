@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from fusion_identity import metrics_collector as mc
 from fusion_identity.auth import AuthService
 from fusion_identity.deps import get_auth_service, require_bearer, require_service_token
+from fusion_identity.jwt_utils import JwtError
 from fusion_identity.models import (
     LoginRequest,
     LogoutRequest,
@@ -16,6 +20,8 @@ from fusion_identity.models import (
 )
 from fusion_identity.ratelimit import check_login_rate
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
@@ -25,8 +31,16 @@ async def login(
     request: Request,
     svc: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
-    check_login_rate(request, req.tenant_id)
-    return await svc.login(req)
+    check_login_rate(request, req.tenant_id, req.username)
+    try:
+        resp = await svc.login(req)
+        # P3-1: the auth_requests_total counter only recorded gRPC authorize
+        # calls; HTTP logins were invisible to monitoring. Record here too.
+        mc.record_auth(req.tenant_id, "http", "login_ok", 200)
+        return resp
+    except HTTPException as exc:
+        mc.record_auth(req.tenant_id, "http", "login_fail", exc.status_code)
+        raise
 
 
 @router.get("/verify", response_model=VerifyResponse, dependencies=[Depends(require_service_token)])
@@ -34,7 +48,11 @@ async def verify(
     token: str,
     svc: AuthService = Depends(get_auth_service),
 ) -> VerifyResponse:
-    return await svc.verify(VerifyRequest(token=token))
+    try:
+        return await svc.verify(VerifyRequest(token=token))
+    except JwtError as exc:
+        logger.info("verify GET: rejected token: %s", exc)
+        raise HTTPException(status_code=401, detail="invalid token") from exc
 
 
 @router.post(
@@ -43,7 +61,11 @@ async def verify(
 async def verify_post(
     req: VerifyRequest, svc: AuthService = Depends(get_auth_service)
 ) -> VerifyResponse:
-    return await svc.verify(req)
+    try:
+        return await svc.verify(req)
+    except JwtError as exc:
+        logger.info("verify POST: rejected token: %s", exc)
+        raise HTTPException(status_code=401, detail="invalid token") from exc
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -95,15 +117,22 @@ async def introspect(
 ) -> dict:
     import json
 
+    # L18: cap the raw request body up front so neither the form nor the JSON
+    # branch can be forced to buffer an unbounded payload on this
+    # service-token endpoint.
+    raw = await request.body()
+    if len(raw) > 32768:
+        raise HTTPException(status_code=413, detail="introspect body too large")
     body: dict = {}
     ctype = (request.headers.get("content-type") or "").lower()
     if "application/x-www-form-urlencoded" in ctype:
         form = await request.form()
         token = form.get("token") or ""
     else:
-        raw = (await request.body()).decode()
+        # decode defensively so a non-UTF-8 payload cannot crash with a 500
+        text = raw.decode("utf-8", errors="replace")
         try:
-            body = json.loads(raw or "{}")
+            body = json.loads(text or "{}")
         except json.JSONDecodeError:
             body = {}
         token = body.get("token") or ""

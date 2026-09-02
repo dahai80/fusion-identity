@@ -9,6 +9,9 @@ import jwt
 
 logger = logging.getLogger(__name__)
 
+# M4: do NOT use this as a verify default — accepting both algs lets an RS256
+# token fall through an HS256 issuer (or vice-versa). Callers must pass the
+# single configured algorithm explicitly.
 ALGORITHMS = ["HS256", "RS256"]
 
 
@@ -79,12 +82,27 @@ def verify_token(
     algorithms: list[str] | None = None,
     kid: str | None = None,
 ) -> dict[str, Any]:
-    algos = algorithms or ALGORITHMS
+    # M4: algorithms is REQUIRED — no silent default to accept both HS256 and
+    # RS256. A missing list is a programming error, fail loudly.
+    if not algorithms:
+        logger.error("verify_token: called without explicit algorithms (M4 footgun)")
+        raise JwtError("verify_token requires explicit algorithms")
+    # P2-4: explicitly reject alg=none — do not rely solely on PyJWT's default
+    # of refusing "none" when an HMAC/RSA key is present. Defense in depth: if
+    # algorithms were ever built from token-controlled input, this guard still
+    # blocks the unauthenticated-token bypass.
+    try:
+        header = jwt.get_unverified_header(token)
+    except Exception as exc:
+        raise JwtError(f"invalid token header: {exc}") from exc
+    if header.get("alg") == "none":
+        logger.warning("verify_token: rejected alg=none (P2-4)")
+        raise JwtError("algorithm 'none' is not allowed")
     try:
         claims = jwt.decode(
             token,
             signing_key,
-            algorithms=algos,
+            algorithms=algorithms,
             issuer=issuer,
             audience=audience,
             options={"require": ["exp", "iat", "iss", "aud", "jti", "sub", "tid"]},

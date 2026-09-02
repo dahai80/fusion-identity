@@ -31,8 +31,13 @@ RUN pip install --no-cache-dir \
     rm -rf /wheels
 
 EXPOSE 11470 50051
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11470/health').status==200 else 1)"
 
-# Fail-closed: service refuses to boot without JWT_KEY + SERVICE_TOKEN (env at run time).
+# P1-8: run as a non-root user so an RCE does not immediately yield root.
+RUN groupadd --system appuser && useradd --system --gid appuser --no-create-home appuser
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11470/ready').status==200 else 1)"
+
+# Fail-closed: service refuses to boot without JWT_KEY + SERVICE_TOKEN + KEK (env at run time).
 CMD ["sh", "-c", "exec python -m fusion_identity.app"]

@@ -65,10 +65,11 @@ def test_introspect_revoked(client: TestClient, admin_token: str) -> None:
         options={"verify_signature": False},
     )
     store = client.app.state.store
+    # expires_at far in the future so P7 expiry-sweep keeps the entry revoked.
     store._revoked_jtis[claims["jti"]] = {
         "jti": claims["jti"],
         "tenant_id": "default",
-        "expires_at": 0,
+        "expires_at": 9999999999.0,
     }
     resp = client.post(
         "/api/v1/auth/introspect",

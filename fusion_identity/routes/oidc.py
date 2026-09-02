@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import time
 from collections import OrderedDict
@@ -23,6 +24,10 @@ _STATES: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _STATES_MAX = 1024
 _STATES_TTL = 600
 
+# M11: a username persisted from IdP email/sub must not carry control chars or
+# whitespace that enable log injection or break downstream JWT sub/audit.
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9._@\-]{1,128}$")
+
 
 def _purge_states() -> None:
     now = time.time()
@@ -39,6 +44,13 @@ def _put_state(state: str, info: dict[str, Any]) -> None:
         _STATES.popitem(last=False)
 
 
+def _sanitize_username(raw: str) -> str:
+    cleaned = (raw or "").strip()
+    if not _USERNAME_RE.match(cleaned):
+        raise HTTPException(status_code=400, detail="invalid username from idp")
+    return cleaned
+
+
 @router.get("/{idp_id}/login")
 async def oidc_login(idp_id: str, request: Request) -> RedirectResponse:
     store = request.app.state.store
@@ -48,17 +60,33 @@ async def oidc_login(idp_id: str, request: Request) -> RedirectResponse:
     if not idp.get("issuer_url"):
         raise HTTPException(status_code=400, detail="idp missing issuer_url")
     state = secrets.token_hex(8)
-    _put_state(state, {"idp_id": idp_id, "tenant_id": idp["tenant_id"]})
+    # F3: PKCE — store a code_verifier, send a code_challenge so the token
+    # exchange is bound to this login initiation (CSRF + login-fixation defense
+    # alongside the mandatory state check).
+    code_verifier = secrets.token_urlsafe(48)
+    _put_state(
+        state, {"idp_id": idp_id, "tenant_id": idp["tenant_id"], "code_verifier": code_verifier}
+    )
     params = {
         "response_type": "code",
         "client_id": idp.get("client_id") or "",
         "redirect_uri": _redirect_uri(request, idp_id),
         "scope": idp.get("scopes") or "openid profile email",
         "state": state,
+        "code_challenge": _pkce_challenge(code_verifier),
+        "code_challenge_method": "S256",
     }
     authorize = idp["issuer_url"].rstrip("/") + "/authorize?" + urlencode(params)
     logger.info("oidc_login: idp=%s redirect state=%s", idp_id, state)
     return RedirectResponse(url=authorize, status_code=302)
+
+
+def _pkce_challenge(verifier: str) -> str:
+    import base64
+    import hashlib
+
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 @router.post("/{idp_id}/callback")
@@ -68,10 +96,20 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
     if idp is None:
         raise HTTPException(status_code=404, detail="idp not found")
     tenant_id = idp["tenant_id"]
-    if req.state and req.state in _STATES:
-        st = _STATES.pop(req.state)
-        if st["idp_id"] != idp_id:
-            raise HTTPException(status_code=400, detail="state mismatch")
+    # F3: state is MANDATORY — an omitted or unknown state means the auth-code
+    # was not initiated by us (CSRF / login-fixation). Reject rather than skip.
+    # P6: also reject expired states (purge first so stale entries are gone).
+    if not req.state:
+        raise HTTPException(status_code=400, detail="missing state (csrf protection required)")
+    _purge_states()
+    st = _STATES.pop(req.state, None)
+    if st is None:
+        raise HTTPException(status_code=400, detail="unknown or expired state")
+    if time.time() - st.get("ts", 0) > _STATES_TTL:
+        raise HTTPException(status_code=400, detail="state expired")
+    if st.get("idp_id") != idp_id:
+        raise HTTPException(status_code=400, detail="state mismatch")
+    code_verifier = st.get("code_verifier")
     kek = get_settings(request).kek
     client_secret = (
         decrypt_secret(idp["client_secret_enc"], kek) if idp["client_secret_enc"] else None
@@ -86,6 +124,9 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
     }
     if client_secret:
         data["client_secret"] = client_secret
+    # F3: PKCE — prove the callback belongs to the login that started it.
+    if code_verifier:
+        data["code_verifier"] = code_verifier
     async with httpx.AsyncClient(timeout=10) as cx:
         tresp = await cx.post(token_url, data=data)
         if tresp.status_code != 200:
@@ -102,7 +143,8 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
     sub = userinfo.get("sub") or userinfo.get("email")
     if not sub:
         raise HTTPException(status_code=502, detail="idp userinfo missing sub/email")
-    username = userinfo.get("email") or sub
+    # M11: sanitize before persisting as username / JWT sub.
+    username = _sanitize_username(userinfo.get("email") or sub)
     user = await store.get_user_by_username(username)
     if user is None:
         if not idp.get("auto_provision"):
@@ -112,13 +154,20 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
             uid, username, secrets.token_hex(16), must_change_password=False
         )
         logger.warning("oidc_callback: auto-provisioned user=%s tenant=%s", uid, tenant_id)
+        # L22: a newly provisioned user has no membership yet — add it.
+        await store.add_member(tenant_id, uid, "member")
     else:
+        # L22: do NOT auto-add an existing (possibly cross-tenant) user as a
+        # member of this tenant. Only users this tenant already knows keep
+        # their role; a global username reuse must not grant membership.
         uid = user["user_id"]
     role = await store.get_member_role(tenant_id, uid)
     if role is None:
-        await store.add_member(tenant_id, uid, "member")
-        role = "member"
-        logger.info("oidc_callback: added membership user=%s tenant=%s", uid, tenant_id)
+        # Existing user with no prior membership is NOT auto-granted one —
+        # operator must explicitly add them. Fail-closed.
+        raise HTTPException(
+            status_code=403, detail="user not a member of this tenant; add membership first"
+        )
     svc = request.app.state.auth_service
     from fusion_identity.auth import _role_scopes
 
@@ -130,7 +179,7 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
         tid=tenant_id,
         role=role,
         scopes=scopes,
-        signing_key=svc._signing_key,
+        signing_key=svc._signing_key(),
         issuer=svc._issuer,
         audience=svc._audience,
         ttl_seconds=svc._ttl,
@@ -143,7 +192,7 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
         tid=tenant_id,
         role=role,
         scopes=scopes,
-        signing_key=svc._signing_key,
+        signing_key=svc._signing_key(),
         issuer=svc._issuer,
         audience=svc._audience,
         ttl_seconds=svc._refresh_ttl,
@@ -151,11 +200,10 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
         algorithm=svc._algorithm,
         kid=svc._kid,
     )
-    import time
-
     await store.insert_refresh_token(
         rjti, secrets.token_hex(8), tenant_id, uid, expires_at=time.time() + svc._refresh_ttl
     )
+    await store.record_issued_jti(jti, tenant_id, uid)
     await store.append_audit(
         tenant_id, uid, jti, role, "auth.oidc_login", "session", {"idp": idp_id}
     )

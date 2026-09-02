@@ -37,8 +37,14 @@ async def verify_mfa(
     uid = claims["sub"]
     try:
         res = await svc.verify_mfa(uid, req)
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except HTTPException as exc:
+        # M10: verify_mfa raises HTTPException for genuine auth denials (bad
+        # code, not enrolled). Re-raise those as 401. Anything else is an
+        # internal fault and must NOT be masked as auth failure — let it
+        # propagate so the error handler reports a real 500.
+        if exc.status_code == 401:
+            raise
+        raise HTTPException(status_code=401, detail="mfa verification failed") from exc
     await request.app.state.store.append_audit(
         claims["tid"],
         uid,

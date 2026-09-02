@@ -19,6 +19,14 @@ if [ -z "${FUSION_IDENTITY_SERVICE_TOKEN:-}" ]; then
     echo "ERROR: FUSION_IDENTITY_SERVICE_TOKEN unset — verify endpoint would be unprotected" >&2
     exit 2
 fi
+if [ -z "${FUSION_IDENTITY_KEK:-}" ]; then
+    echo "ERROR: FUSION_IDENTITY_KEK unset — must not reuse JWT signing key (fail-closed)" >&2
+    exit 2
+fi
+if [ "${FUSION_IDENTITY_KEK}" = "${FUSION_IDENTITY_JWT_KEY}" ]; then
+    echo "ERROR: FUSION_IDENTITY_KEK equals FUSION_IDENTITY_JWT_KEY — key isolation required" >&2
+    exit 2
+fi
 
 mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
 

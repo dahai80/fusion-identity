@@ -110,6 +110,7 @@ class IdentityClient:
         completion_tokens: int,
         execution_time_ms: int = 0,
         status: int = 1,
+        release_after: bool = False,
     ) -> pb.ReportUsageResponse | None:
         if self._stub is None:
             await self.connect()
@@ -122,6 +123,7 @@ class IdentityClient:
             completion_tokens=completion_tokens,
             execution_time_ms=execution_time_ms,
             status=status,
+            release_after=release_after,
         )
         try:
             return await self._stub.ReportUsage(req, timeout=self._deadline)

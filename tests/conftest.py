@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 TEST_JWT_KEY = "test-signing-key-please-not-prod"
 TEST_SERVICE_TOKEN = "test-service-token"
+# F16: KEK must differ from the JWT signing key.
+TEST_KEK = "test-kek-material-distinct-from-jwt-key"
 
 
 def _settings() -> Settings:
@@ -38,11 +40,14 @@ def _settings() -> Settings:
         jwt_algorithm="HS256",
         jwt_private_key_pem=None,
         jwt_public_keys=None,
-        kek=TEST_JWT_KEY,
+        kek=TEST_KEK,
         mfa_enforce_admin=False,
         redis_url="",
         grpc_port=0,
         lease_ttl_seconds=120,
+        trusted_proxies=frozenset(),
+        jwt_keyring_path="",
+        db_pool_max=8,
     )
 
 

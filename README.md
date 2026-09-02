@@ -30,24 +30,29 @@ cd /Users/dahai/fusion
 source .venv/bin/activate
 pip install -e fusion-identity
 
-# fail-closed: both env vars are REQUIRED
+# fail-closed: these env vars are REQUIRED
 export FUSION_IDENTITY_JWT_KEY="$(openssl rand -hex 32)"
 export FUSION_IDENTITY_SERVICE_TOKEN="$(openssl rand -hex 24)"
+export FUSION_IDENTITY_KEK="$(openssl rand -hex 32)"   # must differ from JWT_KEY
 export FUSION_BOOTSTRAP_ADMIN_USER=admin
 export FUSION_BOOTSTRAP_ADMIN_PASS=adminpass
 
 ./fusion-identity/start.sh start
 curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-identity",...}
+curl -s http://127.0.0.1:11470/ready    # readiness probe: store + redis; 503 on failure
 ```
 
 Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic reaches it via the gateway).
+
+`/health` is a static liveness check (process alive); `/ready` is a real readiness probe that hits the store and Redis and returns `503` when a dependency is down, so orchestrators stop routing traffic.
 
 ## Environment
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
-| `FUSION_IDENTITY_JWT_KEY` | **yes** | — | HS256 signing key. Service refuses to start without it. |
-| `FUSION_IDENTITY_SERVICE_TOKEN` | **yes** | — | Shared token gating `/verify` and JWKS rotation. |
+| `FUSION_IDENTITY_JWT_KEY` | **yes** | — | HS256 signing key (>= 32 bytes). Service refuses to start without it. |
+| `FUSION_IDENTITY_SERVICE_TOKEN` | **yes** | — | Shared token (>= 24 bytes) gating `/verify` and JWKS rotation. |
+| `FUSION_IDENTITY_KEK` | **yes** | — | Key-encryption key for IdP `client_secret` + TOTP secrets (AES-256-GCM, HKDF-SHA256 derived). Must be set explicitly and must differ from `FUSION_IDENTITY_JWT_KEY` (key isolation). |
 | `FUSION_IDENTITY_JWT_ALGORITHM` | no | `HS256` | JWT signing algorithm — `HS256` or `RS256`. |
 | `FUSION_IDENTITY_JWT_PRIVATE_KEY_PEM` | no | — | RS256 private key PEM (generated at startup if unset). |
 | `FUSION_IDENTITY_HOST` | no | `127.0.0.1` | Bind address. |
@@ -64,11 +69,12 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_LOG_JSON` | no | `0` | Emit structured JSON logs with `tenant_id`/`user_id` from the tenant context. |
 | `FUSION_IDENTITY_LOGIN_RATE_LIMIT` | no | `10` | Max logins per IP per window. `0` = unlimited. |
 | `FUSION_IDENTITY_LOGIN_RATE_WINDOW` | no | `60` | Rate-limit window, seconds. |
-| `FUSION_IDENTITY_KEK` | no | = `FUSION_IDENTITY_JWT_KEY` | Key-encryption key for IdP `client_secret` + TOTP secrets (AES-GCM). Separate from the JWT signing key in production. |
+| `FUSION_IDENTITY_KEK` | **yes** | — | (See required env above.) Key-encryption key for IdP `client_secret` + TOTP secrets (AES-256-GCM). Must not equal the JWT signing key. |
 | `FUSION_IDENTITY_MFA_ENFORCE_ADMIN` | no | `0` | When `1`, `tenant_admin` logins are rejected until the admin has an enabled TOTP factor (AAL2 enforcement). |
 | `FUSION_IDENTITY_REDIS_URL` | no | — (disabled) | Redis URL for the identity hot cache + concurrency lease store, e.g. `redis://127.0.0.1:6379/0`. When unset, the cache/concurrency/gRPC plane is disabled (REST-only mode). |
 | `FUSION_IDENTITY_GRPC_PORT` | no | `0` (disabled) | gRPC `IdentityService` port (PRD §3.1). Enabled only when `>0` AND a Redis URL is set. Default `50051` in compose. |
 | `FUSION_IDENTITY_LEASE_TTL` | no | `120` | Concurrency lease TTL in seconds (Redis-backed atomic locks). |
+| `FUSION_IDENTITY_DB_POOL_MAX` | no | `8` | Postgres connection pool max size (`PgStore` only). Size to expected HTTP+gRPC concurrency; production suggests 20-50. |
 
 Without `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS`, bootstrap is skipped when the tenant table is empty — the operator must seed the first admin out-of-band (fail-closed).
 
@@ -162,7 +168,7 @@ Inbound user provisioning for downstream services / IdP connectors. Service-toke
 | GET | `/Users?tenantId=` | service token | SCIM ListResponse of tenant members |
 | POST | `/Users?tenantId=` | service token | create user + auto-add as `member`; `{userName,displayName,active}` |
 | GET | `/Users/{id}?tenantId=` | service token | get one user (must be a tenant member) |
-| PATCH | `/Users/{id}?tenantId=` | service token | patch `{displayName?,userName?,active?}` (active=false disables) |
+| PATCH | `/Users/{id}?tenantId=` | service token | RFC 7644 `Operations` array (`[{op,path,value}]`, replace/add/remove on `displayName`/`active`; `userName` read-only). Legacy flat-resource `{displayName?,active?}` also accepted. |
 | DELETE | `/Users/{id}?tenantId=` | service token | remove membership + disable user |
 
 SCIM `/Users` GET supports `startIndex`, `count`, `filter` (`attr eq "val"` subset), and `sortBy` query params; the ListResponse includes `totalResults`, `startIndex`, and `itemsPerPage`. `/Groups` maps the four unified roles to SCIM groups:
@@ -249,6 +255,7 @@ ruff check . && ruff format --check .
 docker build -f deploy/Dockerfile -t fusion-identity:0.1.0 .
 docker run -p 11470:11470 -p 50051:50051 \
   -e FUSION_IDENTITY_JWT_KEY=... -e FUSION_IDENTITY_SERVICE_TOKEN=... \
+  -e FUSION_IDENTITY_KEK=... \
   -e FUSION_IDENTITY_REDIS_URL=redis://host.docker.internal:6379/0 \
   -e FUSION_IDENTITY_GRPC_PORT=50051 \
   fusion-identity:0.1.0
@@ -259,6 +266,7 @@ docker run -p 11470:11470 -p 50051:50051 \
 ```bash
 export FUSION_IDENTITY_JWT_KEY="$(openssl rand -hex 32)"
 export FUSION_IDENTITY_SERVICE_TOKEN="$(openssl rand -hex 24)"
+export FUSION_IDENTITY_KEK="$(openssl rand -hex 32)"
 ./start.sh compose up        # builds + starts redis + identity (gRPC on 50051)
 ./start.sh compose down
 ./start.sh compose logs

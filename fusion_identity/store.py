@@ -10,6 +10,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# P1-2: bounds so the default InMemoryStore does not leak memory unbounded on a
+# long-running non-PgStore deployment. _issued_jtis are swept by TTL; the list
+# stores are capped (oldest evicted) since they are append-only event logs.
+_ISSUED_JTI_DEFAULT_TTL = 8 * 3600
+_USAGE_CAP = 100000
+_LEASE_LOG_CAP = 50000
+_AUDIT_CAP = 100000
+
 ROLES_SEED = {
     "tenant_admin": {
         "display_name": "Tenant Admin",
@@ -163,12 +171,16 @@ class InMemoryStore:
         self._audit: list[dict[str, Any]] = []
         self._revoked_jtis: dict[str, dict[str, Any]] = {}
         self._refresh_tokens: dict[str, dict[str, Any]] = {}
+        self._issued_jtis: dict[str, tuple[str, str, float]] = {}
         self._roles = {k: dict(v) for k, v in ROLES_SEED.items()}
         self._seq_audit = 0
         self._usage: list[dict[str, Any]] = []
         self._idps: dict[str, dict[str, Any]] = {}
         self._mfa: dict[tuple[str, str], dict[str, Any]] = {}
         self._lease_log: list[dict[str, Any]] = []
+        # P1-2: per-tenant tail chain_hash so append_audit is O(1), not an O(n)
+        # reverse scan every append (which made the whole audit append O(n²)).
+        self._audit_tail_hash: dict[str, str] = {}
         logger.info(
             "InMemoryStore initialized (roles seeded=%d) — NOT for production", len(self._roles)
         )
@@ -367,6 +379,9 @@ class InMemoryStore:
             "created_at": _now(),
         }
         self._lease_log.append(rec)
+        # P1-2: cap the lease log; oldest evicted from the front.
+        if len(self._lease_log) > _LEASE_LOG_CAP:
+            self._lease_log = self._lease_log[-_LEASE_LOG_CAP:]
         logger.debug("log_lease: tenant=%s lease=%s action=%s", tenant_id, lease_id, action)
 
     async def list_lease_log(self, tenant_id: str, limit: int = 100) -> list[dict[str, Any]]:
@@ -459,8 +474,14 @@ class InMemoryStore:
         detail: Any,
     ) -> dict[str, Any]:
         self._seq_audit += 1
-        ts = _now()
-        prev_hash = self._audit[-1]["chain_hash"] if self._audit else "genesis"
+        # F11: round to microsecond precision so verify_audit_chain re-reads an
+        # identical ts (PgStore stores TIMESTAMPTZ at microsecond precision).
+        ts = round(_now(), 6)
+        # F12: prev_hash is per-tenant (last record of the SAME tenant), not the
+        # global last record — matches PgStore WHERE tenant_id=$1 ordering.
+        # P1-2: O(1) lookup via a per-tenant tail-hash index instead of an O(n)
+        # reverse scan every append (which made audit append O(n²) over time).
+        prev_hash = self._audit_tail_hash.get(tenant_id, "genesis")
         fields = _audit_fields(tenant_id, user_id, jti, role, action, resource, detail, ts)
         chain = _chain_hash(prev_hash, fields)
         record = {
@@ -471,6 +492,12 @@ class InMemoryStore:
             "prev_hash": prev_hash,
         }
         self._audit.append(record)
+        self._audit_tail_hash[tenant_id] = chain
+        # P1-2: cap the audit log; evict oldest from the front. The tail index
+        # points at each tenant's MOST RECENT record, which is never the evicted
+        # front record, so the per-tenant chain stays intact.
+        if len(self._audit) > _AUDIT_CAP:
+            self._audit = self._audit[-_AUDIT_CAP:]
         return dict(record)
 
     async def list_audit(
@@ -490,11 +517,12 @@ class InMemoryStore:
                 continue
             if until is not None and a["ts"] > until:
                 continue
-            if cursor is not None and a["id"] <= cursor:
+            if cursor is not None and a["id"] >= cursor:
                 continue
             rows.append(dict(a))
-        rows.sort(key=lambda r: r["id"])
-        return rows[-limit:] if limit < len(rows) else rows
+        # F19: newest-first (DESC by id) to match PgStore list_audit.
+        rows.sort(key=lambda r: r["id"], reverse=True)
+        return rows[:limit]
 
     async def verify_audit_chain(self, tenant_id: str) -> dict[str, Any]:
         rows = [a for a in self._audit if a["tenant_id"] == tenant_id]
@@ -539,6 +567,12 @@ class InMemoryStore:
         logger.info("revoke_jti: %s reason=%s", jti, reason)
 
     async def is_jti_revoked(self, jti: str) -> bool:
+        # P7: sweep expired jti entries so _revoked_jtis does not grow unbounded.
+        now = _now()
+        expired = [j for j, r in self._revoked_jtis.items() if r["expires_at"] < now]
+        for j in expired:
+            self._revoked_jtis.pop(j, None)
+            logger.debug("sweep revoked jti expired: %s", j)
         return jti in self._revoked_jtis
 
     async def insert_refresh_token(
@@ -570,7 +604,10 @@ class InMemoryStore:
 
     async def rotate_refresh_token(self, old_jti: str, new_jti: str) -> bool:
         r = self._refresh_tokens.get(old_jti)
-        if not r:
+        # F7 CAS: only an 'active' token can rotate. A 'rotated'/'revoked'
+        # token means a concurrent refresh already won — return False so the
+        # caller enters the reuse path (revoke family + refuse).
+        if not r or r["status"] != "active":
             return False
         r["status"] = "rotated"
         r["replaced_by"] = new_jti
@@ -582,6 +619,56 @@ class InMemoryStore:
             if r["family_id"] == family_id and r["status"] != "revoked":
                 r["status"] = "revoked"
                 count += 1
+        return count
+
+    async def record_issued_jti(self, jti: str, tenant_id: str, user_id: str) -> None:
+        # F4: record the (tenant, user) that an issued access-token jti belongs
+        # to, so /revoke can assert ownership before revoking an active token.
+        # P1-2: store an expiry so _issued_jtis can be swept (it grew unbounded
+        # before — asymmetric with the swept _revoked_jtis). TTL defaults to the
+        # max access-token lifetime; the store has no settings handle, so a
+        # module default is used (operators on PgStore are unaffected).
+        self._sweep_issued_jtis()
+        self._issued_jtis[jti] = (tenant_id, user_id, _now() + _ISSUED_JTI_DEFAULT_TTL)
+
+    def _sweep_issued_jtis(self) -> None:
+        # P1-2: opportunistic sweep of expired issued-jti entries.
+        now = _now()
+        expired = [j for j, rec in self._issued_jtis.items() if rec[2] < now]
+        for j in expired:
+            self._issued_jtis.pop(j, None)
+            logger.debug("sweep issued jti expired: %s", j)
+
+    async def get_jti_owner(self, jti: str) -> tuple[str, str | None] | None:
+        # F4: resolve which tenant/user owns a jti. Order: revoked-jti ledger
+        # (post-revoke), issued-jti ledger (active access tokens), then active
+        # refresh tokens. Returns (tenant_id, user_id) or None if unknown.
+        rec = self._revoked_jtis.get(jti)
+        if rec and rec.get("tenant_id"):
+            return rec["tenant_id"], rec.get("user_id")
+        # P3-4: only an unexpired issued jti counts as an active owner.
+        issued = self._issued_jtis.get(jti)
+        if issued is not None and issued[2] >= _now():
+            return issued[0], issued[1]
+        for r in self._refresh_tokens.values():
+            if r["jti"] == jti:
+                return r["tenant_id"], r["user_id"]
+        return None
+
+    async def revoke_user_sessions(self, user_id: str) -> int:
+        # L10: revoke every active refresh token family for a user (password
+        # change / forced logout). Access-token jtis are short-lived and
+        # validated against membership on every call, so revoking refresh
+        # families + recording the user's sessions as revoked is sufficient.
+        count = 0
+        seen_families: set[str] = set()
+        for r in self._refresh_tokens.values():
+            if r["user_id"] == user_id and r["status"] != "revoked":
+                if r["family_id"] not in seen_families:
+                    seen_families.add(r["family_id"])
+                r["status"] = "revoked"
+                count += 1
+        logger.info("revoke_user_sessions: user=%s revoked=%d refresh tokens", user_id, count)
         return count
 
     async def record_usage(
@@ -604,6 +691,11 @@ class InMemoryStore:
             "ts": ts,
         }
         self._usage.append(rec)
+        # P1-2: cap usage log so a long-running InMemoryStore does not grow
+        # unbounded. aggregate_usage scans the full list, so the cap also bounds
+        # that scan. Oldest rows evicted from the front.
+        if len(self._usage) > _USAGE_CAP:
+            self._usage = self._usage[-_USAGE_CAP:]
         logger.info(
             "record_usage: tenant=%s metric=%s value=%d source=%s model=%s",
             tenant_id,
@@ -743,10 +835,6 @@ class InMemoryStore:
         del self._mfa[key]
         logger.info("delete_mfa: user=%s method=%s", user_id, method)
         return True
-
-    def get_mfa_sync(self, user_id: str, method: str) -> dict[str, Any] | None:
-        r = self._mfa.get((user_id, method))
-        return dict(r) if r else None
 
 
 def _now() -> float:
