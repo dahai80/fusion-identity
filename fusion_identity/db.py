@@ -616,8 +616,9 @@ class PgStore:
         return [dict(r) for r in rows]
 
     async def delete_idp(self, idp_id: str) -> bool:
-        val = await self.fetchval("DELETE FROM identity_providers WHERE idp_id=$1", idp_id)
-        return bool(val)
+        status = await self.execute("DELETE FROM identity_providers WHERE idp_id=$1", idp_id)
+        logger.info("delete_idp: %s status=%s", idp_id, status)
+        return status.startswith("DELETE") and not status.endswith(" 0")
 
     async def update_idp(self, idp_id: str, **fields: Any) -> dict[str, Any] | None:
         allowed = (

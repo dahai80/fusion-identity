@@ -1,4 +1,22 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: "${FUSION_IDENTITY_PG_PASSWORD:-pgpassword}"
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "fusion_tenant"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
@@ -16,11 +34,15 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
       FUSION_IDENTITY_HOST: "0.0.0.0"
       FUSION_IDENTITY_PORT: "11470"
+      FUSION_IDENTITY_DATABASE_URL: "postgresql://postgres:${FUSION_IDENTITY_PG_PASSWORD:-pgpassword}@postgres:5432/fusion_tenant"
+      FUSION_IDENTITY_USE_PGSTORE: "1"
       FUSION_IDENTITY_REDIS_URL: "redis://redis:6379/0"
       FUSION_IDENTITY_GRPC_PORT: "50051"
       FUSION_IDENTITY_LEASE_TTL: "120"
@@ -38,3 +60,6 @@ services:
       retries: 5
       start_period: 8s
     restart: unless-stopped
+
+volumes:
+  pgdata:
