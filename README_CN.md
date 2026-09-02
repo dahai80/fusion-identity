@@ -9,7 +9,7 @@ Fusion 生态的租户身份服务 —— 全生态**唯一 JWT 签发方**与**
 - **JWT 签发** —— `HS256` access + refresh token。Claims：`sub`、`tid`、`tenant`、`role`、`scope`、`iat`、`exp`、`iss`、`aud`、`jti`。签发方 `fusion-identity`，受众 `fusion-cluster`。
 - **租户注册表** —— 租户 CRUD（`tenant_id`、`display_name`、`plan`、`status`）。
 - **成员 + RBAC** —— 4 个统一角色：`tenant_admin` / `operator` / `member` / `viewer`。每次受保护调用都从 `tenant_members` 重新校验角色（token 中的 role 仅为参考，非不可变）。
-- **配额** —— 每租户 `rpm` / `tpm` / `concurrent` / `storage_mb` / `allowed_models`，热更新（无需重启）。
+- **配额** —— 每租户 `rpm` / `tpm` / `concurrent` / `storage_mb` / `allowed_models` / `allowed_modules` / `default_priority`，热更新（无需重启）。
 - **API 密钥** —— 每租户 scoped key，存储用 SHA-256 哈希。
 - **审计日志** —— 仅追加、哈希链、仅可自查（租户 A 的 admin 不能读租户 B 的审计）。
 - **Token 校验端点** —— 服务间 `POST /api/v1/auth/verify`，由共享的**服务令牌**（`FUSION_IDENTITY_SERVICE_TOKEN`）门控。下游服务调用它校验 bearer token。

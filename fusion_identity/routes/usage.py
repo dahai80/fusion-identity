@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
 
 from fusion_identity.deps import get_store, require_service_token, require_tenant_admin_of
 from fusion_identity.models import UsageEmit, UsageRecord
@@ -83,8 +87,9 @@ async def export_tenant(
     tenant_id: str,
     request: Request,
     store: InMemoryStore = Depends(get_store),
+    format: str = Query(default="json", pattern="^(json|csv)$"),
     _claims: dict = Depends(_admin),
-) -> dict[str, Any]:
+) -> Any:
     t = await store.get_tenant(tenant_id)
     if not t:
         raise HTTPException(status_code=404, detail="tenant not found")
@@ -96,7 +101,7 @@ async def export_tenant(
     api_keys = await store.list_api_keys(tenant_id)
     quota = await store.get_quota(tenant_id) or {}
     usage = await store.aggregate_usage(tenant_id)
-    logger.info("export_tenant: tenant=%s by=%s", tenant_id, _claims.get("sub"))
+    logger.info("export_tenant: tenant=%s by=%s format=%s", tenant_id, _claims.get("sub"), format)
     await store.append_audit(
         tenant_id,
         _claims.get("sub"),
@@ -104,9 +109,9 @@ async def export_tenant(
         _claims.get("role"),
         "tenant.export",
         "tenant",
-        {"members": len(safe_members), "api_keys": len(api_keys)},
+        {"members": len(safe_members), "api_keys": len(api_keys), "format": format},
     )
-    return {
+    payload = {
         "tenant": {
             "tenant_id": t["tenant_id"],
             "display_name": t["display_name"],
@@ -118,3 +123,31 @@ async def export_tenant(
         "quota": quota,
         "usage": usage,
     }
+    if format == "csv":
+        return _export_csv(tenant_id, payload)
+    return payload
+
+
+def _export_csv(tenant_id: str, payload: dict[str, Any]) -> PlainTextResponse:
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["section", "tenant_id", "field", "value"])
+    for key in ("tenant_id", "display_name", "plan", "status"):
+        writer.writerow(["tenant", tenant_id, key, payload["tenant"].get(key, "")])
+    for m in payload["members"]:
+        for k, v in m.items():
+            writer.writerow(["member", tenant_id, k, v])
+    for ak in payload["api_keys"]:
+        for k, v in ak.items():
+            writer.writerow(["api_key", tenant_id, k, v])
+    for k, v in payload["quota"].items():
+        val = json.dumps(v, default=str) if isinstance(v, (list, dict)) else v
+        writer.writerow(["quota", tenant_id, k, val])
+    for u in payload["usage"]:
+        for k, v in u.items():
+            writer.writerow(["usage", tenant_id, k, v])
+    return PlainTextResponse(
+        content=out.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=tenant_{tenant_id}_export.csv"},
+    )

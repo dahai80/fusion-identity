@@ -79,6 +79,8 @@ CREATE TABLE quotas (
     concurrent      INT NOT NULL DEFAULT 4,
     storage_mb      INT NOT NULL DEFAULT 10240,
     allowed_models  JSONB NOT NULL DEFAULT '[]',
+    allowed_modules JSONB NOT NULL DEFAULT '[]',
+    default_priority INT NOT NULL DEFAULT 0,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -191,3 +193,16 @@ CREATE TABLE user_mfa (
     enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
     PRIMARY KEY (user_id, method)
 );
+
+-- lease_log (§5.2, N2 concurrency audit — Redis authoritative, this is ledger)
+CREATE TABLE lease_log (
+    id         BIGSERIAL PRIMARY KEY,
+    tenant_id  TEXT        NOT NULL,
+    lease_id   TEXT        NOT NULL,
+    action     TEXT        NOT NULL,
+    reason     TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT lease_action_chk CHECK (action IN ('acquire','release','expire'))
+);
+CREATE INDEX lease_log_tenant_idx ON lease_log(tenant_id, created_at DESC);
+CREATE INDEX lease_log_lease_idx  ON lease_log(lease_id);

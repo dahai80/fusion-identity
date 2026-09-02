@@ -7,7 +7,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from fusion_identity.deps import get_store, require_service_token
+from fusion_identity.deps import (
+    get_cache,
+    get_store,
+    invalidate_tenant_cache,
+    require_service_token,
+)
 from fusion_identity.store import InMemoryStore, StoreConflict
 
 logger = logging.getLogger(__name__)
@@ -69,6 +74,7 @@ async def admin_list_tenants(
 @router.post("/tenants", status_code=201)
 async def admin_create_tenant(
     body: AdminTenantCreate,
+    request: Request,
     store: InMemoryStore = Depends(get_store),
 ) -> dict[str, Any]:
     try:
@@ -80,6 +86,7 @@ async def admin_create_tenant(
     quota_fields = _quota_fields(body)
     if quota_fields:
         await store.put_quota(body.tenant_id, **quota_fields)
+    await invalidate_tenant_cache(request, body.tenant_id)
     logger.info("admin_create_tenant: %s plan=%s", body.tenant_id, body.plan)
     return t
 
@@ -88,6 +95,7 @@ async def admin_create_tenant(
 async def admin_update_tenant(
     tenant_id: str,
     body: AdminTenantUpdate,
+    request: Request,
     store: InMemoryStore = Depends(get_store),
 ) -> dict[str, Any]:
     t = await store.get_tenant(tenant_id)
@@ -105,6 +113,7 @@ async def admin_update_tenant(
     quota_fields = _quota_fields(body)
     if quota_fields:
         await store.put_quota(tenant_id, **quota_fields)
+    await invalidate_tenant_cache(request, tenant_id)
     logger.info("admin_update_tenant: %s", tenant_id)
     return t
 
@@ -146,13 +155,22 @@ async def admin_create_api_key_alias(
     return await admin_create_api_key(tenant_id, body, store)
 
 
-async def _revoke_tenant_api_key(store: InMemoryStore, tenant_id: str, key_id: str) -> None:
+async def _revoke_tenant_api_key(
+    request: Request, store: InMemoryStore, tenant_id: str, key_id: str
+) -> None:
     keys = await store.list_api_keys(tenant_id)
-    if not any(k["key_id"] == key_id for k in keys):
+    match = next((k for k in keys if k["key_id"] == key_id), None)
+    if match is None:
         raise HTTPException(status_code=404, detail="api key not found in tenant")
     ok = await store.revoke_api_key(key_id)
     if not ok:
         raise HTTPException(status_code=404, detail="api key already revoked")
+    cache = get_cache(request)
+    if cache is not None and match.get("key_hash"):
+        try:
+            await cache.invalidate_api_key_by_hash(match["key_hash"])
+        except Exception as exc:
+            logger.warning("admin_revoke_api_key: cache invalidate err=%s", exc)
     logger.warning("admin_revoke_api_key: tenant=%s key=%s", tenant_id, key_id)
 
 
@@ -160,9 +178,10 @@ async def _revoke_tenant_api_key(store: InMemoryStore, tenant_id: str, key_id: s
 async def admin_revoke_api_key(
     tenant_id: str,
     key_id: str,
+    request: Request,
     store: InMemoryStore = Depends(get_store),
 ) -> dict[str, Any]:
-    await _revoke_tenant_api_key(store, tenant_id, key_id)
+    await _revoke_tenant_api_key(request, store, tenant_id, key_id)
     return {"revoked": True, "key_id": key_id}
 
 
@@ -170,9 +189,10 @@ async def admin_revoke_api_key(
 async def admin_revoke_api_key_alias(
     tenant_id: str,
     key_id: str,
+    request: Request,
     store: InMemoryStore = Depends(get_store),
 ) -> dict[str, Any]:
-    await _revoke_tenant_api_key(store, tenant_id, key_id)
+    await _revoke_tenant_api_key(request, store, tenant_id, key_id)
     return {"revoked": True, "key_id": key_id}
 
 
@@ -215,9 +235,9 @@ async def admin_usage_today(
         "window": "24h",
         "concurrency": {"current_active": current_active, "max_limit": max_limit},
         "tokens": {
-            "prompt": prompt,
-            "completion": completion,
-            "total": token_total,
+            "prompt_tokens_today": prompt,
+            "completion_tokens_today": completion,
+            "total_today": token_total,
             "daily_limit": daily_limit,
             "usage_percentage": usage_pct,
         },

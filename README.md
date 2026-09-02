@@ -123,7 +123,7 @@ Members: add-or-create (`POST .../members`, new users get `must_change_password=
 | POST | `/usage` | service token | emit a usage metric `{metric,value,source,model?,user_id?}` (downstream services report rpm/tpm/tokens) |
 | GET | `/usage` | tenant_admin | aggregated usage (`since`/`until`/`metric` query params) |
 | GET | `/config` | tenant_admin | non-sensitive tenant config (display_name, plan, status, quota) |
-| GET | `/export` | tenant_admin | full tenant export (members without secrets, api-keys, quota, usage); audited as `tenant.export` |
+| GET | `/export` | tenant_admin | full tenant export (members without secrets, api-keys, quota, usage); audited as `tenant.export`. `?format=csv` returns a CSV attachment (default `json`) |
 
 ### JWKS (`/.well-known/jwks.json`)
 
@@ -165,6 +165,13 @@ Inbound user provisioning for downstream services / IdP connectors. Service-toke
 | PATCH | `/Users/{id}?tenantId=` | service token | patch `{displayName?,userName?,active?}` (active=false disables) |
 | DELETE | `/Users/{id}?tenantId=` | service token | remove membership + disable user |
 
+SCIM `/Users` GET supports `startIndex`, `count`, `filter` (`attr eq "val"` subset), and `sortBy` query params; the ListResponse includes `totalResults`, `startIndex`, and `itemsPerPage`. `/Groups` maps the four unified roles to SCIM groups:
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| GET | `/Groups?tenantId=` | service token | SCIM ListResponse of role-based groups (`tenant_admin`/`operator`/`member`/`viewer`), each with its member list; supports `startIndex`/`count`/`filter` |
+| GET | `/Groups/{group_id}?tenantId=` | service token | one role-group with its members |
+
 ## gRPC IdentityService (PRD §3.1)
 
 The high-throughput authorization plane for inference gateways. Enabled when `FUSION_IDENTITY_GRPC_PORT>0` and `FUSION_IDENTITY_REDIS_URL` is set. Serves `fusion.identity.v1.IdentityService` on `127.0.0.1:<port>` with a gRPC health check (`grpc.health.v1`).
@@ -173,7 +180,7 @@ Proto: [`fusion_identity/grpc/identity.proto`](fusion_identity/grpc/identity.pro
 
 | RPC | Notes |
 |---|---|
-| `AuthorizeAndAcquire` | validate `api_key` → tenant context, module/model allowlist, daily quota, then atomically acquire a concurrency **lease** (Redis Lua). Returns `is_allowed`, `TenantContext` (incl. `priority`), `lease_id`, `max_allowed_tokens`. Refusal codes: `INVALID_API_KEY` / `TENANT_DISABLED` / `MODULE_UNAUTHORIZED` / `MODEL_UNAUTHORIZED` / `CONCURRENCY_LIMIT_EXCEEDED` / `DAILY_QUOTA_EXCEEDED`. |
+| `AuthorizeAndAcquire` | validate `api_key` → tenant context, module/model allowlist, RPM rate limit, daily quota, then atomically acquire a concurrency **lease** (Redis Lua). Returns `is_allowed`, `TenantContext` (incl. `priority`), `lease_id`, `max_allowed_tokens`. Refusal codes: `INVALID_API_KEY` / `TENANT_DISABLED` / `MODULE_UNAUTHORIZED` / `MODEL_UNAUTHORIZED` / `CONCURRENCY_LIMIT_EXCEEDED` / `DAILY_QUOTA_EXCEEDED` / `RATE_LIMIT_EXCEEDED`. |
 | `ReleaseLease` | release a lease (decrement concurrency counter). |
 | `ReportUsage` | record token usage (daily quota counter), release the lease, append to the usage ledger (non-blocking). |
 
@@ -186,6 +193,13 @@ Priority is derived from `quotas.default_priority` (settable via the admin/quota
 - `IdentityClient` — long-lived gRPC channel, 10 ms default deadline, async `authorize_and_acquire` / `release_lease` / `report_usage` / `health`.
 - `lease_guard` — `asynccontextmanager` that acquires a lease, yields the response, and always releases on exit; raises `LeaseDenied` on refusal.
 - `KV_PREFIX = "fusion:identity:"` — shared Redis key namespace for cross-service coordination.
+
+### Cache invalidation (PRD §2.6 — config changes take effect in seconds)
+
+When Redis is enabled, mutations invalidate the affected cache keys so downstream reads pick up changes within the key TTL (≤300 s):
+- tenant create/update, quota update, admin tenant create/update → `invalidate_tenant(tid)`.
+- API key revoke (tenant + admin) → `invalidate_api_key_by_hash(key_hash)`.
+RPM enforcement uses a 60 s sliding window (`rpm:{tid}`); a quota `rpm=0` disables it (fail-open when Redis is unset, matching the daily-quota pattern).
 
 ## Admin plane (`/api/v1/admin`)
 
@@ -201,7 +215,7 @@ Service-token gated cross-tenant management (operator/gateway use). Requests mus
 | POST | `/tenants/{tenant_id}/keys` | alias of the above (PRD §3.2 `/keys` path) |
 | DELETE | `/tenants/{tenant_id}/api-keys/{key_id}` | revoke a tenant's API key (404 if not in tenant) |
 | DELETE | `/tenants/{tenant_id}/keys/{key_id}` | alias of the above (PRD §3.2 `/keys` path) |
-| GET | `/tenants/{tenant_id}/usage/today` | 24h usage: `concurrency{current_active,max_limit}` + `tokens{prompt,completion,total,daily_limit,usage_percentage}` |
+| GET | `/tenants/{tenant_id}/usage/today` | 24h usage: `concurrency{current_active,max_limit}` + `tokens{prompt_tokens_today,completion_tokens_today,total_today,daily_limit,usage_percentage}` |
 
 Quotas now also support `default_priority` and `allowed_modules` via `PUT /api/v1/tenants/{tenant_id}/quotas`.
 
@@ -217,7 +231,7 @@ Quotas now also support `default_priority` and `allowed_modules` via `PUT /api/v
 
 ## Database
 
-Postgres DB `fusion_tenant`. Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 12 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `audit_log`, `migration_orphans`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence.
+Postgres DB `fusion_tenant`. Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 15 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative).
 
 An `InMemoryStore` ships for tests and bootstrap; `build_app()` uses it when `FUSION_IDENTITY_USE_PGSTORE` is unset. Production sets that env and injects a `PgStore`, which runs idempotent migrations from [`migrations/`](migrations/) on startup (`ensure_schema`).
 

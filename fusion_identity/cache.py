@@ -46,6 +46,10 @@ class IdentityCache:
     async def invalidate_api_key(self, api_key: str) -> None:
         await self._redis.delete(self._api_key_key(api_key))
 
+    async def invalidate_api_key_by_hash(self, key_hash: str) -> None:
+        await self._redis.delete(f"apikey:{key_hash}")
+        logger.info("cache: invalidated apikey hash=%s", key_hash[:12])
+
     async def get_tenant(self, tenant_id: str) -> dict[str, Any] | None:
         raw = await self._redis.get(self._tenant_key(tenant_id))
         if not raw:
@@ -80,3 +84,30 @@ class IdentityCache:
     async def remaining_quota(self, tenant_id: str, daily_limit: int) -> int:
         used = int(await self._redis.get(self._quota_key(tenant_id)) or 0)
         return max(0, daily_limit - used)
+
+    def _rpm_key(self, tenant_id: str) -> str:
+        return f"rpm:{tenant_id}"
+
+    async def check_rpm(self, tenant_id: str, rpm_limit: int) -> tuple[bool, int]:
+        if rpm_limit <= 0:
+            return True, rpm_limit
+        key = self._rpm_key(tenant_id)
+        pipe = self._redis.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, 60)
+        results = await pipe.execute()
+        count = int(results[0] or 1)
+        remaining = max(0, rpm_limit - count)
+        ok = count <= rpm_limit
+        logger.debug(
+            "cache: rpm check tenant=%s count=%s limit=%s ok=%s",
+            tenant_id,
+            count,
+            rpm_limit,
+            ok,
+        )
+        return ok, remaining
+
+    async def reset_rpm(self, tenant_id: str) -> None:
+        await self._redis.delete(self._rpm_key(tenant_id))
+        logger.debug("cache: reset rpm tenant=%s", tenant_id)

@@ -102,3 +102,17 @@ async def require_bearer(
         raise HTTPException(status_code=401, detail="missing token")
     svc = get_auth_service(request)
     return await svc.resolve_bearer_claims(authorization)
+
+
+def get_cache(request: Request):
+    return getattr(request.app.state, "cache", None)
+
+
+async def invalidate_tenant_cache(request: Request, tenant_id: str) -> None:
+    cache = get_cache(request)
+    if cache is None:
+        return
+    try:
+        await cache.invalidate_tenant(tenant_id)
+    except Exception as exc:
+        logger.warning("invalidate_tenant_cache: tenant=%s err=%s", tenant_id, exc)
