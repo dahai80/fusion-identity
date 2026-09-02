@@ -81,12 +81,15 @@ async def require_service_token(
     request: Request,
     authorization: str = Header(default=""),
 ) -> None:
+    from fusion_identity.jwt_utils import JwtError, extract_bearer
+
     settings = get_settings(request)
     if not authorization:
         raise HTTPException(status_code=401, detail="missing token")
-    token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    if not token:
-        raise HTTPException(status_code=401, detail="invalid bearer token")
+    try:
+        token = extract_bearer(authorization)
+    except JwtError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     if not hmac.compare_digest(token, settings.service_token):
         logger.warning("require_service_token: mismatch (fail-closed)")
         raise HTTPException(status_code=401, detail="invalid service token")

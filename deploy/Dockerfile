@@ -25,10 +25,12 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir \
     fastapi>=0.110 uvicorn>=0.29 pydantic>=2.6 asyncpg>=0.29 pyjwt>=2.8 \
+    redis>=5 grpcio>=1.62 grpcio-health-checking>=1.62 protobuf>=4.25 \
+    prometheus-client>=0.20 \
     /wheels/fusion_identity-*.whl && \
     rm -rf /wheels
 
-EXPOSE 11470
+EXPOSE 11470 50051
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11470/health').status==200 else 1)"
 

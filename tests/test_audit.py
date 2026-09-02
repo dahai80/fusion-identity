@@ -28,11 +28,6 @@ def test_audit_records_login(client: TestClient):
 
 def test_audit_self_query_only(client: TestClient):
     admin_token = _admin(client)
-    client.post(
-        "/api/v1/tenants",
-        json={"tenant_id": "other", "display_name": "Other"},
-        headers=_hdr(admin_token),
-    )
 
     resp = client.get("/api/v1/tenants/other/audit", headers=_hdr(admin_token, tenant="default"))
     assert resp.status_code == 403, resp.text

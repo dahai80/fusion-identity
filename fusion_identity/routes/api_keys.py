@@ -28,9 +28,22 @@ async def create_api_key(
     store: InMemoryStore = Depends(get_store),
     _claims: dict = Depends(_admin),
 ) -> ApiKeyResponse:
-    raw, rec = await store.create_api_key(tenant_id, None, body.scopes)
+    raw, rec = await store.create_api_key(tenant_id, _claims.get("sub"), body.scopes)
+    await store.append_audit(
+        tenant_id,
+        _claims.get("sub"),
+        None,
+        _claims.get("role"),
+        "apikey.create",
+        "api_key",
+        {"key_id": rec["key_id"]},
+    )
     return ApiKeyResponse(
-        key_id=rec["key_id"], raw_key=raw, prefix=rec["prefix"], scopes=rec["scopes"]
+        key_id=rec["key_id"],
+        raw_key=raw,
+        prefix=rec["prefix"],
+        scopes=rec["scopes"],
+        user_id=rec.get("user_id"),
     )
 
 
@@ -45,4 +58,13 @@ async def revoke_api_key(
     if not rec:
         raise HTTPException(status_code=404, detail="api key not found")
     ok = await store.revoke_api_key(key_id)
+    await store.append_audit(
+        tenant_id,
+        _claims.get("sub"),
+        None,
+        _claims.get("role"),
+        "apikey.revoke",
+        "api_key",
+        {"key_id": key_id},
+    )
     return {"revoked": ok}

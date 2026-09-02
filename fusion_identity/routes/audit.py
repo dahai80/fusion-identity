@@ -17,7 +17,25 @@ async def list_audit(
     store: InMemoryStore = Depends(get_store),
     _claims: dict = Depends(_admin),
     limit: int = 100,
+    since: float | None = None,
+    until: float | None = None,
+    cursor: int | None = None,
 ) -> list[dict[str, Any]]:
     if limit < 1 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit must be 1..1000")
-    return await store.list_audit(tenant_id, limit=limit)
+    return await store.list_audit(
+        tenant_id,
+        limit=limit,
+        since=since,
+        until=until,
+        cursor=cursor,
+    )
+
+
+@router.get("/verify")
+async def verify_audit(
+    tenant_id: str,
+    store: InMemoryStore = Depends(get_store),
+    _claims: dict = Depends(_admin),
+) -> dict[str, Any]:
+    return await store.verify_audit_chain(tenant_id)

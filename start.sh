@@ -85,11 +85,34 @@ log() {
     fi
 }
 
+compose() {
+    local compose_file
+    compose_file="$(cd "$(dirname "$0")" && pwd)/deploy/docker-compose.yml"
+    case "${2:-up}" in
+        up)
+            _log "compose up (redis + identity)"
+            docker compose -f "$compose_file" up -d --build
+            ;;
+        down)
+            _log "compose down"
+            docker compose -f "$compose_file" down
+            ;;
+        logs)
+            docker compose -f "$compose_file" logs -f
+            ;;
+        *)
+            echo "Usage: $0 compose {up|down|logs}" >&2
+            exit 64
+            ;;
+    esac
+}
+
 case "${1:-status}" in
     start) start ;;
     stop) stop ;;
     restart) stop; start ;;
     status) status ;;
     log) log "${2:-}" "${3:-}" ;;
-    *) echo "Usage: $0 {start|stop|restart|status|log [-f]|}" >&2; exit 64 ;;
+    compose) compose "$@" ;;
+    *) echo "Usage: $0 {start|stop|restart|status|log [-f]|compose {up|down|logs}}" >&2; exit 64 ;;
 esac

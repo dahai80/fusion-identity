@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
+import time
 from typing import Any
+
+from fusion_identity.store import StoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -9,8 +13,6 @@ try:
     import asyncpg
 except ImportError:
     asyncpg = None
-
-_SCHEMA_FILE = "deploy/sql/schema.sql"
 
 
 class StoreError(RuntimeError):
@@ -35,6 +37,9 @@ class PgStore:
             self._pool = None
             logger.info("pgstore: pool closed")
 
+    async def _acquire(self):
+        return self._pool.acquire()
+
     async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(sql, *args)
@@ -54,11 +59,644 @@ class PgStore:
             return await conn.execute(sql, *args)
 
     async def ensure_schema(self) -> None:
-        logger.warning(
-            "pgstore.ensure_schema: DDL file %s must be applied by operator/CI; "
-            "skipping in-process DDL (Appendix A.1)",
-            _SCHEMA_FILE,
+        from fusion_identity.migrations import run_migrations
+
+        if self._pool is None:
+            logger.warning("pgstore.ensure_schema: pool not ready, skip migrations")
+            return
+        applied = await run_migrations(self._pool)
+        logger.info("pgstore.ensure_schema: migrations applied=%s", applied)
+
+    async def is_empty_tenants(self) -> bool:
+        return await self.fetchval("SELECT COUNT(*) = 0 FROM tenants WHERE status <> 'deleted'")
+
+    async def create_tenant(
+        self, tenant_id: str, display_name: str, plan: str = "team"
+    ) -> dict[str, Any]:
+        try:
+            row = await self.fetchrow(
+                "INSERT INTO tenants(tenant_id, display_name, plan) VALUES ($1,$2,$3) RETURNING *",
+                tenant_id,
+                display_name,
+                plan,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise StoreConflict(f"tenant {tenant_id} exists") from exc
+        await self.fetchrow(
+            "INSERT INTO quotas(tenant_id) VALUES ($1) ON CONFLICT DO NOTHING", tenant_id
         )
+        return row
+
+    async def get_tenant(self, tenant_id: str) -> dict[str, Any] | None:
+        return await self.fetchrow("SELECT * FROM tenants WHERE tenant_id=$1", tenant_id)
+
+    async def get_tenant_status(self, tenant_id: str) -> str | None:
+        return await self.fetchval("SELECT status FROM tenants WHERE tenant_id=$1", tenant_id)
+
+    async def list_tenants(self) -> list[dict[str, Any]]:
+        return await self.fetch(
+            "SELECT * FROM tenants WHERE status <> 'deleted' ORDER BY created_at"
+        )
+
+    async def list_tenants_for(self, tenant_id: str) -> list[dict[str, Any]]:
+        return await self.fetch(
+            "SELECT * FROM tenants WHERE tenant_id=$1 AND status <> 'deleted'", tenant_id
+        )
+
+    async def update_tenant(self, tenant_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = ("display_name", "status", "plan")
+        sets = [
+            f"{k}=${i + 2}" for i, k in enumerate(allowed) if k in fields and fields[k] is not None
+        ]
+        if not sets:
+            return await self.get_tenant(tenant_id)
+        params: list[Any] = [tenant_id] + [
+            fields[k] for k in allowed if k in fields and fields[k] is not None
+        ]
+        sql = (
+            f"UPDATE tenants SET {', '.join(sets)}, "
+            "disabled_at=CASE WHEN $2='disabled' THEN COALESCE(disabled_at, now()) "
+            "ELSE NULL END WHERE tenant_id=$1 RETURNING *"
+        )
+        return await self.fetchrow(sql, *params)
+
+    async def delete_tenant(self, tenant_id: str) -> bool:
+        val = await self.fetchval(
+            "UPDATE tenants SET status='deleted', deleted_at=now() "
+            "WHERE tenant_id=$1 AND status<>'deleted' RETURNING tenant_id",
+            tenant_id,
+        )
+        if val is None:
+            return False
+        await self.execute(
+            "UPDATE api_keys SET revoked_at=now() WHERE tenant_id=$1 AND revoked_at IS NULL",
+            tenant_id,
+        )
+        await self.execute(
+            "UPDATE refresh_tokens SET status='revoked' WHERE tenant_id=$1 AND status<>'revoked'",
+            tenant_id,
+        )
+        await self.execute("DELETE FROM tenant_members WHERE tenant_id=$1", tenant_id)
+        logger.info("delete_tenant: cascaded tenant=%s", tenant_id)
+        return True
+
+    async def create_user(
+        self,
+        user_id: str,
+        username: str,
+        password: str,
+        email: str | None = None,
+        *,
+        must_change_password: bool = False,
+    ) -> dict[str, Any]:
+        from fusion_identity.store import hash_password
+
+        pw_hash, salt, algo = hash_password(password)
+        try:
+            return await self.fetchrow(
+                "INSERT INTO users(user_id, username, email, password_hash_v, "
+                "salt, password_algo, must_change_password) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+                user_id,
+                username,
+                email,
+                pw_hash,
+                salt,
+                algo,
+                must_change_password,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise StoreConflict(f"user {user_id} exists") from exc
+
+    async def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        return await self.fetchrow("SELECT * FROM users WHERE username=$1", username)
+
+    async def get_user(self, user_id: str) -> dict[str, Any] | None:
+        return await self.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+
+    async def get_user_status(self, user_id: str) -> str | None:
+        return await self.fetchval("SELECT status FROM users WHERE user_id=$1", user_id)
+
+    async def update_user(self, user_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = (
+            "password_hash",
+            "password_hash_v",
+            "salt",
+            "password_algo",
+            "status",
+            "failed_attempts",
+            "locked_until",
+            "must_change_password",
+            "last_login_at",
+        )
+        sets = []
+        params: list[Any] = [user_id]
+        idx = 2
+        for k in allowed:
+            if k in fields and fields[k] is not None:
+                sets.append(f"{k}=${idx}")
+                params.append(fields[k])
+                idx += 1
+        if not sets:
+            return await self.get_user(user_id)
+        sql = f"UPDATE users SET {', '.join(sets)} WHERE user_id=$1 RETURNING *"
+        return await self.fetchrow(sql, *params)
+
+    async def add_member(
+        self,
+        tenant_id: str,
+        user_id: str,
+        role: str,
+        added_by: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            return await self.fetchrow(
+                "INSERT INTO tenant_members(tenant_id, user_id, role, added_by) "
+                "VALUES ($1,$2,$3,$4) RETURNING *",
+                tenant_id,
+                user_id,
+                role,
+                added_by,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise StoreConflict(f"member {user_id} already in {tenant_id}") from exc
+
+    async def get_member(self, tenant_id: str, user_id: str) -> dict[str, Any] | None:
+        return await self.fetchrow(
+            "SELECT * FROM tenant_members WHERE tenant_id=$1 AND user_id=$2", tenant_id, user_id
+        )
+
+    async def get_member_role(self, tenant_id: str, user_id: str) -> str | None:
+        return await self.fetchval(
+            "SELECT role FROM tenant_members WHERE tenant_id=$1 AND user_id=$2", tenant_id, user_id
+        )
+
+    async def update_member_role(
+        self,
+        tenant_id: str,
+        user_id: str,
+        role: str,
+    ) -> dict[str, Any] | None:
+        return await self.fetchrow(
+            "UPDATE tenant_members SET role=$3 WHERE tenant_id=$1 AND user_id=$2 RETURNING *",
+            tenant_id,
+            user_id,
+            role,
+        )
+
+    async def list_members(self, tenant_id: str) -> list[dict[str, Any]]:
+        return await self.fetch(
+            "SELECT * FROM tenant_members WHERE tenant_id=$1 ORDER BY joined_at", tenant_id
+        )
+
+    async def count_members_by_role(self, tenant_id: str, role: str) -> int:
+        return await self.fetchval(
+            "SELECT COUNT(*) FROM tenant_members WHERE tenant_id=$1 AND role=$2", tenant_id, role
+        )
+
+    async def remove_member(self, tenant_id: str, user_id: str) -> bool:
+        val = await self.fetchval(
+            "DELETE FROM tenant_members WHERE tenant_id=$1 AND user_id=$2 RETURNING user_id",
+            tenant_id,
+            user_id,
+        )
+        return val is not None
+
+    async def create_api_key(
+        self,
+        tenant_id: str,
+        user_id: str | None,
+        scopes: list[str],
+    ) -> tuple[str, dict[str, Any]]:
+        import secrets as _s
+
+        from fusion_identity.store import sha256_hash
+
+        raw = "fmu_" + _s.token_urlsafe(24)
+        key_id = "key_" + _s.token_hex(6)
+        row = await self.fetchrow(
+            "INSERT INTO api_keys(key_id, tenant_id, user_id, key_hash, prefix, scopes) "
+            "VALUES ($1,$2,$3,$4,$5,$6::jsonb) RETURNING *",
+            key_id,
+            tenant_id,
+            user_id,
+            sha256_hash(raw),
+            raw[:8] + "****",
+            json.dumps(scopes),
+        )
+        return raw, row
+
+    async def get_api_key_by_hash(self, key_hash: str) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            "SELECT * FROM api_keys WHERE key_hash=$1 AND revoked_at IS NULL", key_hash
+        )
+        return _decode_scopes(row) if row else None
+
+    async def list_api_keys(self, tenant_id: str) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT * FROM api_keys WHERE tenant_id=$1 AND revoked_at IS NULL ORDER BY created_at",
+            tenant_id,
+        )
+        return [_decode_scopes(r) for r in rows]
+
+    async def revoke_api_key(self, key_id: str) -> bool:
+        val = await self.fetchval(
+            "UPDATE api_keys SET revoked_at=now() WHERE key_id=$1 "
+            "AND revoked_at IS NULL RETURNING key_id",
+            key_id,
+        )
+        return val is not None
+
+    async def get_quota(self, tenant_id: str) -> dict[str, Any] | None:
+        row = await self.fetchrow("SELECT * FROM quotas WHERE tenant_id=$1", tenant_id)
+        return _decode_quota(row) if row else None
+
+    async def put_quota(self, tenant_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = (
+            "rpm",
+            "tpm",
+            "concurrent",
+            "storage_mb",
+            "allowed_models",
+            "allowed_modules",
+            "default_priority",
+        )
+        sets = ["updated_at=now()"]
+        params: list[Any] = [tenant_id]
+        idx = 2
+        for k in allowed:
+            if k in fields and fields[k] is not None:
+                if k in ("allowed_models", "allowed_modules"):
+                    sets.append(f"{k}=${idx}::jsonb")
+                    params.append(json.dumps(fields[k]))
+                else:
+                    sets.append(f"{k}=${idx}")
+                    params.append(fields[k])
+                idx += 1
+        sql = f"UPDATE quotas SET {', '.join(sets)} WHERE tenant_id=$1 RETURNING *"
+        row = await self.fetchrow(sql, *params)
+        return _decode_quota(row) if row else None
+
+    async def append_audit(
+        self,
+        tenant_id: str,
+        user_id: str | None,
+        jti: str | None,
+        role: str | None,
+        action: str,
+        resource: str | None,
+        detail: Any,
+    ) -> dict[str, Any]:
+        from fusion_identity.store import _audit_fields, _chain_hash
+
+        async with self._pool.acquire() as conn:
+            prev = (
+                await conn.fetchval(
+                    "SELECT chain_hash FROM audit_log WHERE tenant_id=$1 ORDER BY seq DESC LIMIT 1",
+                    tenant_id,
+                )
+                or "genesis"
+            )
+            seq = await conn.fetchval("SELECT nextval('audit_seq_seq')")
+            ts = time.time()
+            fields = _audit_fields(tenant_id, user_id, jti, role, action, resource, detail, ts)
+            chain = _chain_hash(prev, fields)
+            row = await conn.fetchrow(
+                "INSERT INTO audit_log(seq, tenant_id, user_id, jti, role, action, "
+                "resource, detail, chain_hash, prev_hash) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10) RETURNING *",
+                seq,
+                tenant_id,
+                user_id,
+                jti,
+                role,
+                action,
+                resource,
+                json.dumps(detail, default=str),
+                chain,
+                prev,
+            )
+            return dict(row)
+
+    async def list_audit(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+        since: float | None = None,
+        until: float | None = None,
+        cursor: int | None = None,
+    ) -> list[dict[str, Any]]:
+        conds = ["tenant_id=$1"]
+        params: list[Any] = [tenant_id]
+        idx = 2
+        if since is not None:
+            conds.append(f"ts >= to_timestamp(${idx})")
+            params.append(since)
+            idx += 1
+        if until is not None:
+            conds.append(f"ts <= to_timestamp(${idx})")
+            params.append(until)
+            idx += 1
+        if cursor is not None:
+            conds.append(f"id > ${idx}")
+            params.append(cursor)
+            idx += 1
+        params.append(limit)
+        sql = f"SELECT * FROM audit_log WHERE {' AND '.join(conds)} ORDER BY id ASC LIMIT ${idx}"
+        return await self.fetch(sql, *params)
+
+    async def verify_audit_chain(self, tenant_id: str) -> dict[str, Any]:
+        import hmac as _hmac
+
+        from fusion_identity.store import _audit_fields, _chain_hash
+
+        rows = await self.fetch(
+            "SELECT * FROM audit_log WHERE tenant_id=$1 ORDER BY id ASC", tenant_id
+        )
+        prev = "genesis"
+        for a in rows:
+            expected = _chain_hash(
+                prev,
+                _audit_fields(
+                    a["tenant_id"],
+                    a["user_id"],
+                    a["jti"],
+                    a["role"],
+                    a["action"],
+                    a["resource"],
+                    a["detail"],
+                    a["ts"].timestamp(),
+                ),
+            )
+            if not _hmac.compare_digest(expected, a["chain_hash"]):
+                return {"valid": False, "broken_at": a["id"]}
+            prev = a["chain_hash"]
+        return {"valid": True, "broken_at": None}
+
+    async def revoke_jti(
+        self,
+        jti: str,
+        *,
+        tenant_id: str = "",
+        user_id: str | None = None,
+        reason: str = "admin_revoke",
+        expires_at: float | None = None,
+    ) -> None:
+        await self.execute(
+            "INSERT INTO revoked_jtis(jti, tenant_id, user_id, reason, expires_at) "
+            "VALUES ($1,$2,$3,$4,to_timestamp($5)) ON CONFLICT (jti) DO NOTHING",
+            jti,
+            tenant_id,
+            user_id,
+            reason,
+            expires_at or (time.time() + 86400),
+        )
+
+    async def is_jti_revoked(self, jti: str) -> bool:
+        return await self.fetchval("SELECT EXISTS(SELECT 1 FROM revoked_jtis WHERE jti=$1)", jti)
+
+    async def insert_refresh_token(
+        self,
+        jti: str,
+        family_id: str,
+        tenant_id: str,
+        user_id: str,
+        expires_at: float,
+        replaced_by: str | None = None,
+        status: str = "active",
+    ) -> dict[str, Any]:
+        return await self.fetchrow(
+            "INSERT INTO refresh_tokens(jti, family_id, tenant_id, user_id, status, "
+            "expires_at, replaced_by) "
+            "VALUES ($1,$2,$3,$4,$5,to_timestamp($6),$7) RETURNING *",
+            jti,
+            family_id,
+            tenant_id,
+            user_id,
+            status,
+            expires_at,
+            replaced_by,
+        )
+
+    async def get_refresh_token(self, jti: str) -> dict[str, Any] | None:
+        row = await self.fetchrow("SELECT * FROM refresh_tokens WHERE jti=$1", jti)
+        if row:
+            row = dict(row)
+            if row.get("expires_at"):
+                row["expires_at"] = row["expires_at"].timestamp()
+        return row
+
+    async def rotate_refresh_token(self, old_jti: str, new_jti: str) -> bool:
+        val = await self.fetchval(
+            "UPDATE refresh_tokens SET status='rotated', replaced_by=$2 "
+            "WHERE jti=$1 AND status='active' RETURNING jti",
+            old_jti,
+            new_jti,
+        )
+        return val is not None
+
+    async def revoke_refresh_family(self, family_id: str) -> int:
+        return await self.fetchval(
+            "WITH u AS (UPDATE refresh_tokens SET status='revoked' "
+            "WHERE family_id=$1 AND status<>'revoked' RETURNING 1) "
+            "SELECT COUNT(*) FROM u",
+            family_id,
+        )
+
+    async def record_usage(
+        self,
+        tenant_id: str,
+        user_id: str | None,
+        metric: str,
+        value: int,
+        source: str,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        await self.execute(
+            "INSERT INTO usage_ledger"
+            "(tenant_id, user_id, metric, value, source, model, bucket_hour) "
+            "VALUES ($1,$2,$3,$4,$5,$6, date_trunc('hour', now())) "
+            "ON CONFLICT (tenant_id, bucket_hour, metric, source) "
+            "DO UPDATE SET value=usage_ledger.value+EXCLUDED.value",
+            tenant_id,
+            user_id,
+            metric,
+            value,
+            source,
+            model,
+        )
+        return {"tenant_id": tenant_id, "metric": metric, "value": value, "source": source}
+
+    async def aggregate_usage(
+        self,
+        tenant_id: str,
+        since: float | None = None,
+        until: float | None = None,
+        metric: str | None = None,
+    ) -> list[dict[str, Any]]:
+        conds = ["tenant_id=$1"]
+        params: list[Any] = [tenant_id]
+        idx = 2
+        if since is not None:
+            conds.append(f"bucket_hour >= to_timestamp(${idx})")
+            params.append(since)
+            idx += 1
+        if until is not None:
+            conds.append(f"bucket_hour <= to_timestamp(${idx})")
+            params.append(until)
+            idx += 1
+        if metric is not None:
+            conds.append(f"metric=${idx}")
+            params.append(metric)
+            idx += 1
+        return await self.fetch(
+            f"SELECT tenant_id, bucket_hour, metric, source, sum(value) as value "
+            f"FROM usage_ledger WHERE {' AND '.join(conds)} "
+            "GROUP BY tenant_id, bucket_hour, metric, source "
+            "ORDER BY bucket_hour ASC",
+            *params,
+        )
+
+    async def stats(self) -> dict[str, Any]:
+        counts = {
+            "tenants": "SELECT count(*) FROM tenants WHERE status <> 'deleted'",
+            "users": "SELECT count(*) FROM users",
+            "members": "SELECT count(*) FROM tenant_members",
+            "api_keys": "SELECT count(*) FROM api_keys WHERE revoked_at IS NULL",
+            "audit_records": "SELECT count(*) FROM audit_log",
+            "revoked_jtis": "SELECT count(*) FROM revoked_jtis",
+            "refresh_tokens": "SELECT count(*) FROM refresh_tokens WHERE status='active'",
+            "idps": "SELECT count(*) FROM identity_providers",
+            "mfa": "SELECT count(*) FROM user_mfa",
+        }
+        out: dict[str, Any] = {}
+        for key, sql in counts.items():
+            out[key] = await self.fetchval(sql)
+        return out
+
+    async def create_idp(
+        self,
+        idp_id: str,
+        tenant_id: str,
+        *,
+        type: str = "oidc",
+        issuer_url: str | None = None,
+        client_id: str | None = None,
+        client_secret_enc: str | None = None,
+        scopes: str | None = None,
+        auto_provision: bool = False,
+    ) -> dict[str, Any]:
+        row = await self.fetchrow(
+            """INSERT INTO identity_providers
+               (idp_id, tenant_id, type, issuer_url, client_id, client_secret_enc,
+                scopes, auto_provision)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+               RETURNING *""",
+            idp_id,
+            tenant_id,
+            type,
+            issuer_url,
+            client_id,
+            client_secret_enc,
+            scopes,
+            auto_provision,
+        )
+        logger.info("create_idp: %s tenant=%s", idp_id, tenant_id)
+        return dict(row)
+
+    async def get_idp(self, idp_id: str) -> dict[str, Any] | None:
+        row = await self.fetchrow("SELECT * FROM identity_providers WHERE idp_id=$1", idp_id)
+        return dict(row) if row else None
+
+    async def list_idps(self, tenant_id: str) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT * FROM identity_providers WHERE tenant_id=$1 ORDER BY created_at", tenant_id
+        )
+        return [dict(r) for r in rows]
+
+    async def delete_idp(self, idp_id: str) -> bool:
+        val = await self.fetchval("DELETE FROM identity_providers WHERE idp_id=$1", idp_id)
+        return bool(val)
+
+    async def update_idp(self, idp_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = (
+            "type",
+            "issuer_url",
+            "client_id",
+            "client_secret_enc",
+            "scopes",
+            "auto_provision",
+        )
+        sets: list[str] = []
+        params: list[Any] = [idp_id]
+        idx = 2
+        for k in allowed:
+            if k in fields and fields[k] is not None:
+                sets.append(f"{k}=${idx}")
+                params.append(fields[k])
+                idx += 1
+        if not sets:
+            return await self.get_idp(idp_id)
+        sql = f"UPDATE identity_providers SET {', '.join(sets)} WHERE idp_id=$1 RETURNING *"
+        row = await self.fetchrow(sql, *params)
+        return dict(row) if row else None
+
+    async def upsert_mfa(
+        self,
+        user_id: str,
+        method: str,
+        *,
+        secret_enc: str,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        row = await self.fetchrow(
+            """INSERT INTO user_mfa (user_id, method, secret_enc, enabled)
+               VALUES ($1,$2,$3,$4)
+               ON CONFLICT (user_id, method)
+               DO UPDATE SET secret_enc=EXCLUDED.secret_enc, enabled=EXCLUDED.enabled
+               RETURNING *""",
+            user_id,
+            method,
+            secret_enc,
+            enabled,
+        )
+        logger.info("upsert_mfa: user=%s method=%s", user_id, method)
+        return dict(row)
+
+    async def get_mfa(self, user_id: str, method: str) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            "SELECT * FROM user_mfa WHERE user_id=$1 AND method=$2", user_id, method
+        )
+        return dict(row) if row else None
+
+    async def list_mfa(self, user_id: str) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT * FROM user_mfa WHERE user_id=$1 ORDER BY enrolled_at", user_id
+        )
+        return [dict(r) for r in rows]
+
+    async def delete_mfa(self, user_id: str, method: str) -> bool:
+        val = await self.fetchval(
+            "DELETE FROM user_mfa WHERE user_id=$1 AND method=$2", user_id, method
+        )
+        return bool(val)
+
+
+def _decode_scopes(row: dict[str, Any]) -> dict[str, Any]:
+    r = dict(row)
+    if isinstance(r.get("scopes"), str):
+        r["scopes"] = json.loads(r["scopes"])
+    return r
+
+
+def _decode_quota(row: dict[str, Any]) -> dict[str, Any]:
+    r = dict(row)
+    if isinstance(r.get("allowed_models"), str):
+        r["allowed_models"] = json.loads(r["allowed_models"])
+    if isinstance(r.get("allowed_modules"), str):
+        r["allowed_modules"] = json.loads(r["allowed_modules"])
+    return r
 
 
 def _safe_url(url: str) -> str:

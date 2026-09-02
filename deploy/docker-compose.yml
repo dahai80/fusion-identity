@@ -1,0 +1,40 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  identity:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      FUSION_IDENTITY_HOST: "0.0.0.0"
+      FUSION_IDENTITY_PORT: "11470"
+      FUSION_IDENTITY_REDIS_URL: "redis://redis:6379/0"
+      FUSION_IDENTITY_GRPC_PORT: "50051"
+      FUSION_IDENTITY_LEASE_TTL: "120"
+      FUSION_IDENTITY_JWT_KEY: "${FUSION_IDENTITY_JWT_KEY:?set FUSION_IDENTITY_JWT_KEY}"
+      FUSION_IDENTITY_SERVICE_TOKEN: "${FUSION_IDENTITY_SERVICE_TOKEN:?set FUSION_IDENTITY_SERVICE_TOKEN}"
+      FUSION_BOOTSTRAP_ADMIN_USER: "${FUSION_BOOTSTRAP_ADMIN_USER:-admin}"
+      FUSION_BOOTSTRAP_ADMIN_PASS: "${FUSION_BOOTSTRAP_ADMIN_PASS:-adminpass}"
+    ports:
+      - "127.0.0.1:11470:11470"
+      - "127.0.0.1:50051:50051"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11470/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 8s
+    restart: unless-stopped

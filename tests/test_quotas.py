@@ -38,9 +38,6 @@ def test_quota_update_hot_no_restart(client: TestClient):
 
 def test_quota_cross_tenant_blocked(client: TestClient):
     token = _admin(client)
-    client.post(
-        "/api/v1/tenants", json={"tenant_id": "other", "display_name": "Other"}, headers=_hdr(token)
-    )
 
     resp = client.put(
         "/api/v1/tenants/other/quotas", json={"rpm": 999}, headers=_hdr(token, tenant="default")
