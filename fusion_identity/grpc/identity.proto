@@ -76,6 +76,7 @@ message ReportUsageRequest {
   int32 completion_tokens = 5;
   int64 execution_time_ms = 6;
   InferenceStatus status  = 7;
+  bool release_after      = 8;
 }
 
 message ReportUsageResponse {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import jwt
 import pytest
@@ -44,6 +45,9 @@ def _rs256_settings() -> Settings:
         redis_url="",
         grpc_port=0,
         lease_ttl_seconds=120,
+        trusted_proxies=frozenset(),
+        jwt_keyring_path="",
+        db_pool_max=8,
     )
 
 
@@ -169,3 +173,32 @@ def test_rotate_hs256_rejected(client: TestClient):
         headers={"Authorization": f"Bearer {TEST_SERVICE_TOKEN}"},
     )
     assert resp.status_code == 400
+
+
+def test_rotation_persists_across_restart(tmp_path):
+    # P0-1: a rotated key must survive a restart. Before the fix, KeyRing.rs256
+    # reloaded only the seed PEM and rsa_retired was empty, so tokens signed by
+    # the pre-rotation key became unverifiable after any restart.
+    persist = str(tmp_path / "keyring.json")
+    ring1 = KeyRing.rs256(persist_path=persist)
+    old_kid = ring1.kid
+    new_kid = ring1.rotate()
+    assert new_kid != old_kid
+    assert os.path.exists(persist)
+    # Simulate restart: rebuild KeyRing from the same persist path.
+    ring2 = KeyRing.rs256(persist_path=persist)
+    assert ring2.kid == new_kid
+    # The retired (pre-rotation) key must still be verifiable.
+    retired_keys = [k["kid"] for k in ring2.jwks()["keys"]]
+    assert old_kid in retired_keys
+    # verify_key_for must resolve the retired kid, not raise.
+    assert ring2.verify_key_for(old_kid)  # public pem non-empty
+
+
+def test_rotation_no_persist_path_rolls_back(tmp_path):
+    # P0-1: without a persist_path, rotation stays in-memory (legacy behavior).
+    # This documents the hazard — operators MUST set jwt_keyring_path for RS256
+    # production. The test asserts the file is NOT created.
+    ring = KeyRing.rs256()
+    ring.rotate()
+    assert not (tmp_path / "keyring.json").exists()

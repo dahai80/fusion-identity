@@ -387,6 +387,9 @@ def test_ac_p2_inmem_store_warning(client: TestClient):
         redis_url="",
         grpc_port=0,
         lease_ttl_seconds=120,
+        trusted_proxies=frozenset(),
+        jwt_keyring_path="",
+        db_pool_max=8,
     )
     store = _build_store(s)
     assert isinstance(store, InMemoryStore)

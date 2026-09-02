@@ -23,6 +23,7 @@ CREATE TABLE users (
     user_id              TEXT PRIMARY KEY,
     username             TEXT NOT NULL,
     email                TEXT UNIQUE,
+    display_name         TEXT,
     password_hash        TEXT NOT NULL DEFAULT '',
     password_hash_v      TEXT NOT NULL DEFAULT '',
     salt                 TEXT NOT NULL DEFAULT '',
@@ -135,6 +136,18 @@ CREATE TABLE revoked_jtis (
     expires_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX rj_expires_idx ON revoked_jtis(expires_at);
+
+-- issued_jtis (F4: /revoke ownership check) — records the tenant/user each
+-- access-token jti was issued to, so revocation can bind a jti to its tenant
+-- before revoking. Rows expire with the access-token TTL and are swept.
+CREATE TABLE issued_jtis (
+    jti        TEXT PRIMARY KEY,
+    tenant_id  TEXT NOT NULL REFERENCES tenants(tenant_id),
+    user_id    TEXT NOT NULL REFERENCES users(user_id),
+    issued_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX ij_expires_idx ON issued_jtis(expires_at);
 
 -- audit_log (§11.4, 7d hot + archive) — full-field chain hash + global seq
 CREATE TABLE audit_log (

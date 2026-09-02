@@ -7,13 +7,16 @@ import grpc
 from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
 from fusion_identity.grpc import identity_pb2_grpc as pb_grpc
+from fusion_identity.grpc_interceptor import ServiceTokenInterceptor
 from fusion_identity.grpc_servicer import IdentityServiceServicer
 
 logger = logging.getLogger(__name__)
 
 
 async def serve(app: Any, *, host: str, port: int) -> grpc.aio.Server:
-    server = grpc.aio.server()
+    settings = app.state.settings
+    interceptor = ServiceTokenInterceptor(settings.service_token)
+    server = grpc.aio.server(interceptors=[interceptor])
     pb_grpc.add_IdentityServiceServicer_to_server(
         IdentityServiceServicer(
             store=app.state.store,
@@ -30,5 +33,9 @@ async def serve(app: Any, *, host: str, port: int) -> grpc.aio.Server:
     await health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
     bound = server.add_insecure_port(f"{host}:{port}")
     await server.start()
-    logger.info("grpc server started host=%s bound=%s", host, bound)
+    logger.info(
+        "grpc server started host=%s bound=%s service-token-interceptor=enabled",
+        host,
+        bound,
+    )
     return server

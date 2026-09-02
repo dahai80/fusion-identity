@@ -109,10 +109,25 @@ def get_cache(request: Request):
 
 
 async def invalidate_tenant_cache(request: Request, tenant_id: str) -> None:
+    # A5: cache invalidation is security-critical (tenant disable / quota
+    # tighten). A swallowed failure lets stale lenient data authorize for up
+    # to TTL. Fail-closed: propagate so the mutating route can surface the
+    # error rather than silently serving stale cache.
     cache = get_cache(request)
     if cache is None:
         return
-    try:
-        await cache.invalidate_tenant(tenant_id)
-    except Exception as exc:
-        logger.warning("invalidate_tenant_cache: tenant=%s err=%s", tenant_id, exc)
+    await cache.invalidate_tenant(tenant_id)
+
+
+async def invalidate_tenant_api_keys_cache(request: Request, tenant_id: str) -> None:
+    # L4: quota/tenant changes must also drop the per-api-key cache blob
+    # (which embeds allowed_modules/max_concurrency/daily limits) — else the
+    # gRPC plane authorizes on the old lenient quota for up to 300s.
+    cache = get_cache(request)
+    if cache is None:
+        return
+    store = get_store(request)
+    api_keys = await store.list_api_keys(tenant_id)
+    key_hashes = [k["key_hash"] for k in api_keys if k.get("key_hash")]
+    await cache.invalidate_tenant_api_keys(tenant_id, key_hashes)
+    await cache.invalidate_tenant(tenant_id)

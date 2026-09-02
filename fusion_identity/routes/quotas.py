@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from fusion_identity.deps import get_store, invalidate_tenant_cache, require_tenant_admin_of
+from fusion_identity.deps import (
+    get_store,
+    invalidate_tenant_api_keys_cache,
+    require_tenant_admin_of,
+)
 from fusion_identity.models import QuotaUpdate
 from fusion_identity.store import InMemoryStore
 
+logger = logging.getLogger(__name__)
 _admin = require_tenant_admin_of("tenant_id")
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/quotas", tags=["quotas"])
 
@@ -38,5 +44,15 @@ async def put_quota(
     q = await store.put_quota(tenant_id, **fields)
     if not q:
         raise HTTPException(status_code=404, detail="tenant not found")
-    await invalidate_tenant_cache(request, tenant_id)
+    # A5/L4: invalidation is security-critical. Fail visibly (500) rather than
+    # swallowing — a swallowed failure would let the gRPC plane authorize on
+    # the old lenient quota for up to 300s.
+    try:
+        await invalidate_tenant_api_keys_cache(request, tenant_id)
+    except Exception as exc:
+        logger.error("quota update: cache invalidation failed tenant=%s err=%s", tenant_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail="quota updated but cache invalidation failed — may serve stale quota",
+        ) from exc
     return q

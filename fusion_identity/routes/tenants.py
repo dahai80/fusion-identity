@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from fusion_identity.deps import get_store, invalidate_tenant_cache, require_tenant_admin_of
 from fusion_identity.models import TenantUpdate
-from fusion_identity.store import InMemoryStore
+from fusion_identity.store import InMemoryStore, StoreConflict
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["tenants"])
 
@@ -45,7 +45,10 @@ async def update_tenant(
     fields = body.model_dump(exclude_none=True)
     if not fields:
         raise HTTPException(status_code=400, detail="no fields to update")
-    t = await store.update_tenant(tenant_id, **fields)
+    try:
+        t = await store.update_tenant(tenant_id, **fields)
+    except StoreConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not t:
         raise HTTPException(status_code=404, detail="tenant not found")
     if "status" in fields:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -20,15 +21,23 @@ class StoreError(RuntimeError):
 
 
 class PgStore:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, pool_max: int = 8) -> None:
         if asyncpg is None:
             raise StoreError("asyncpg not installed; cannot use PgStore")
         self._database_url = database_url
+        # P2-8: pool cap was hard-coded to 8, shared across all HTTP + gRPC
+        # concurrent requests. Make it operator-configurable so a multi-node
+        # gateway deployment can size the pool to its concurrency target.
+        self._pool_max = max(1, int(pool_max))
         self._pool: Any = None
 
     async def connect(self) -> None:
-        logger.info("pgstore: connecting to %s", _safe_url(self._database_url))
-        self._pool = await asyncpg.create_pool(dsn=self._database_url, min_size=1, max_size=8)
+        logger.info(
+            "pgstore: connecting to %s pool_max=%s", _safe_url(self._database_url), self._pool_max
+        )
+        self._pool = await asyncpg.create_pool(
+            dsn=self._database_url, min_size=1, max_size=self._pool_max
+        )
         logger.info("pgstore: pool ready")
 
     async def close(self) -> None:
@@ -113,11 +122,19 @@ class PgStore:
         params: list[Any] = [tenant_id] + [
             fields[k] for k in allowed if k in fields and fields[k] is not None
         ]
-        sql = (
-            f"UPDATE tenants SET {', '.join(sets)}, "
-            "disabled_at=CASE WHEN $2='disabled' THEN COALESCE(disabled_at, now()) "
-            "ELSE NULL END WHERE tenant_id=$1 RETURNING *"
-        )
+        # F19: disabled_at CASE binds the status value, not $2 (which is display_name
+        # when present). Compute a dedicated status param so the toggle is correct
+        # regardless of which fields are set.
+        status_val = fields.get("status")
+        if status_val is not None:
+            params.append(status_val)
+            case_sql = (
+                f"disabled_at=CASE WHEN ${len(params)}='disabled' "
+                "THEN COALESCE(disabled_at, now()) ELSE NULL END"
+            )
+        else:
+            case_sql = "disabled_at=disabled_at"
+        sql = f"UPDATE tenants SET {', '.join(sets)}, {case_sql} WHERE tenant_id=$1 RETURNING *"
         return await self.fetchrow(sql, *params)
 
     async def delete_tenant(self, tenant_id: str) -> bool:
@@ -188,6 +205,8 @@ class PgStore:
             "locked_until",
             "must_change_password",
             "last_login_at",
+            "display_name",
+            "email",
         )
         sets = []
         params: list[Any] = [user_id]
@@ -349,22 +368,28 @@ class PgStore:
     ) -> dict[str, Any]:
         from fusion_identity.store import _audit_fields, _chain_hash
 
-        async with self._pool.acquire() as conn:
+        # F10: serialize per-tenant append under a transaction + advisory lock so
+        # concurrent appends read the same prev_hash and chain without forking.
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", tenant_id)
             prev = (
                 await conn.fetchval(
-                    "SELECT chain_hash FROM audit_log WHERE tenant_id=$1 ORDER BY seq DESC LIMIT 1",
+                    "SELECT chain_hash FROM audit_log WHERE tenant_id=$1 "
+                    "ORDER BY seq DESC LIMIT 1 FOR UPDATE",
                     tenant_id,
                 )
                 or "genesis"
             )
             seq = await conn.fetchval("SELECT nextval('audit_seq_seq')")
-            ts = time.time()
+            # F11: round ts to microsecond precision so TIMESTAMPTZ storage and the
+            # float re-read in verify_audit_chain produce identical _chain_hash input.
+            ts = round(time.time(), 6)
             fields = _audit_fields(tenant_id, user_id, jti, role, action, resource, detail, ts)
             chain = _chain_hash(prev, fields)
             row = await conn.fetchrow(
                 "INSERT INTO audit_log(seq, tenant_id, user_id, jti, role, action, "
-                "resource, detail, chain_hash, prev_hash) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10) RETURNING *",
+                "resource, detail, chain_hash, prev_hash, ts) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,to_timestamp($11)) RETURNING *",
                 seq,
                 tenant_id,
                 user_id,
@@ -375,6 +400,7 @@ class PgStore:
                 json.dumps(detail, default=str),
                 chain,
                 prev,
+                ts,
             )
             return dict(row)
 
@@ -399,11 +425,12 @@ class PgStore:
             params.append(until)
             idx += 1
         if cursor is not None:
-            conds.append(f"id > ${idx}")
+            conds.append(f"id < ${idx}")
             params.append(cursor)
             idx += 1
         params.append(limit)
-        sql = f"SELECT * FROM audit_log WHERE {' AND '.join(conds)} ORDER BY id ASC LIMIT ${idx}"
+        # F19: DESC newest-first, id < cursor — align with InMemory (newest window).
+        sql = f"SELECT * FROM audit_log WHERE {' AND '.join(conds)} ORDER BY id DESC LIMIT ${idx}"
         return await self.fetch(sql, *params)
 
     async def verify_audit_chain(self, tenant_id: str) -> dict[str, Any]:
@@ -504,6 +531,44 @@ class PgStore:
             family_id,
         )
 
+    async def record_issued_jti(self, jti: str, tenant_id: str, user_id: str) -> None:
+        # F4: persist the (tenant, user) an access-token jti was issued to so
+        # /revoke can assert ownership. ON CONFLICT refreshes expires_at in case
+        # of a (vanishingly unlikely) jti collision.
+        ttl_seconds = int(os.environ.get("FUSION_IDENTITY_JWT_TTL", "900"))
+        await self.execute(
+            "INSERT INTO issued_jtis (jti, tenant_id, user_id, expires_at) "
+            "VALUES ($1,$2,$3, now() + ($4 || ' seconds')::interval) "
+            "ON CONFLICT (jti) DO UPDATE SET expires_at = excluded.expires_at",
+            jti,
+            tenant_id,
+            user_id,
+            str(ttl_seconds),
+        )
+
+    async def get_jti_owner(self, jti: str) -> tuple[str, str | None] | None:
+        # F4: resolve jti ownership from revoked_jtis, then issued_jtis (active
+        # access tokens), then refresh_tokens.
+        row = await self.fetchrow("SELECT tenant_id, user_id FROM revoked_jtis WHERE jti=$1", jti)
+        if row and row.get("tenant_id"):
+            return row["tenant_id"], row.get("user_id")
+        row = await self.fetchrow("SELECT tenant_id, user_id FROM issued_jtis WHERE jti=$1", jti)
+        if row:
+            return row["tenant_id"], row.get("user_id")
+        row = await self.fetchrow("SELECT tenant_id, user_id FROM refresh_tokens WHERE jti=$1", jti)
+        if row:
+            return row["tenant_id"], row.get("user_id")
+        return None
+
+    async def revoke_user_sessions(self, user_id: str) -> int:
+        # L10: revoke all active refresh tokens for a user.
+        return await self.fetchval(
+            "WITH u AS (UPDATE refresh_tokens SET status='revoked' "
+            "WHERE user_id=$1 AND status<>'revoked' RETURNING 1) "
+            "SELECT COUNT(*) FROM u",
+            user_id,
+        )
+
     async def record_usage(
         self,
         tenant_id: str,
@@ -517,7 +582,7 @@ class PgStore:
             "INSERT INTO usage_ledger"
             "(tenant_id, user_id, metric, value, source, model, bucket_hour) "
             "VALUES ($1,$2,$3,$4,$5,$6, date_trunc('hour', now())) "
-            "ON CONFLICT (tenant_id, bucket_hour, metric, source) "
+            "ON CONFLICT (tenant_id, bucket_hour, metric, source, model) "
             "DO UPDATE SET value=usage_ledger.value+EXCLUDED.value",
             tenant_id,
             user_id,
@@ -678,10 +743,13 @@ class PgStore:
         return [dict(r) for r in rows]
 
     async def delete_mfa(self, user_id: str, method: str) -> bool:
+        # F19: DELETE with RETURNING; plain fetchval returns None always.
         val = await self.fetchval(
-            "DELETE FROM user_mfa WHERE user_id=$1 AND method=$2", user_id, method
+            "DELETE FROM user_mfa WHERE user_id=$1 AND method=$2 RETURNING user_id",
+            user_id,
+            method,
         )
-        return bool(val)
+        return val is not None
 
     async def log_lease(
         self, tenant_id: str, lease_id: str, action: str, reason: str | None = None

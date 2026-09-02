@@ -13,6 +13,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scim/v2", tags=["scim"])
 
 
+async def _require_tenant(store: Any, tenant_id: str) -> None:
+    """F5: the tenantId query param is caller-controlled (the gateway passes
+    it). Every SCIM endpoint must reject an unknown/disabled tenant before
+    touching data, so an attacker with a stolen service token cannot reach
+    into an arbitrary or synthetic tenant namespace."""
+    tenant = await store.get_tenant(tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant not found")
+    if tenant.get("status") not in ("active", None):
+        raise HTTPException(status_code=404, detail="tenant not found")
+
+
 @router.get("/Users")
 async def list_users(
     request: Request,
@@ -24,6 +36,7 @@ async def list_users(
     _: None = Depends(require_service_token),
 ) -> dict[str, Any]:
     store = request.app.state.store
+    await _require_tenant(store, tenant_id)
     members = await store.list_members(tenant_id)
     resources = []
     for m in members:
@@ -70,8 +83,11 @@ def _apply_scim_filter(
 
     m = re.match(r'(\w+)\s+eq\s+"?([^"]+)"?', filter_expr.strip())
     if not m:
-        logger.warning("scim filter unsupported: %s", filter_expr)
-        return resources
+        logger.warning("scim filter unsupported, refusing (fail-closed): %s", filter_expr)
+        raise HTTPException(
+            status_code=400,
+            detail='unsupported SCIM filter (only `attr eq "val"` is supported)',
+        )
     attr, val = m.group(1), m.group(2)
     return [r for r in resources if str(r.get(attr, "")) == val]
 
@@ -84,9 +100,7 @@ async def create_user(
     _: None = Depends(require_service_token),
 ) -> dict[str, Any]:
     store = request.app.state.store
-    tenant = await store.get_tenant(tenant_id)
-    if tenant is None:
-        raise HTTPException(status_code=404, detail="tenant not found")
+    await _require_tenant(store, tenant_id)
     username = body.get("userName")
     if not username:
         raise HTTPException(status_code=400, detail="userName required")
@@ -133,6 +147,7 @@ async def get_user(
     _: None = Depends(require_service_token),
 ) -> dict[str, Any]:
     store = request.app.state.store
+    await _require_tenant(store, tenant_id)
     member = await store.get_member(tenant_id, user_id)
     if member is None:
         raise HTTPException(status_code=404, detail="user not found in tenant")
@@ -152,6 +167,7 @@ async def patch_user(
     _: None = Depends(require_service_token),
 ) -> dict[str, Any]:
     store = request.app.state.store
+    await _require_tenant(store, tenant_id)
     member = await store.get_member(tenant_id, user_id)
     if member is None:
         raise HTTPException(status_code=404, detail="user not found in tenant")
@@ -159,12 +175,38 @@ async def patch_user(
     if user is None:
         raise HTTPException(status_code=404, detail="user not found")
     fields: dict[str, Any] = {}
-    if "displayName" in body and body["displayName"] is not None:
-        fields["display_name"] = body["displayName"]
-    if "userName" in body and body["userName"] is not None:
-        fields["display_name"] = body["userName"]
-    if "active" in body:
-        fields["status"] = "active" if body["active"] else "disabled"
+    operations = body.get("Operations")
+    if isinstance(operations, list):
+        # RFC 7644 PATCH: a list of Operations, each with op/path/value.
+        # Support "replace" on displayName/active; ignore userName (read-only).
+        for op in operations:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("op", "")).lower().strip()
+            if op_type not in ("replace", "add", "remove"):
+                logger.warning("scim patch_user: unsupported op=%s user=%s", op_type, user_id)
+                continue
+            path = op.get("path") or ""
+            value = op.get("value")
+            attrs = _scim_patch_attrs(path, value, body)
+            for attr, val in attrs.items():
+                if attr == "display_name" and val is not None and op_type in ("replace", "add"):
+                    fields["display_name"] = val
+                elif attr == "active" and op_type in ("replace", "add", "remove"):
+                    if op_type == "remove":
+                        fields["status"] = "disabled"
+                    else:
+                        fields["status"] = "active" if val else "disabled"
+                elif attr == "username":
+                    logger.info("scim patch_user: ignoring read-only userName user=%s", user_id)
+    else:
+        # Legacy flat-resource PATCH (non-RFC): keep for backward compat.
+        if "displayName" in body and body["displayName"] is not None:
+            fields["display_name"] = body["displayName"]
+        if "userName" in body and body["userName"] is not None:
+            logger.info("scim patch_user: ignoring read-only userName user=%s", user_id)
+        if "active" in body:
+            fields["status"] = "active" if body["active"] else "disabled"
     if fields:
         user = await store.update_user(user_id, **fields)
     logger.warning("scim patch_user: tenant=%s user=%s fields=%s", tenant_id, user_id, list(fields))
@@ -172,6 +214,26 @@ async def patch_user(
         tenant_id, user_id, None, None, "scim.user.patch", "user", {"fields": list(fields)}
     )
     return _scim_user_view(user or {}, tenant_id)
+
+
+def _scim_patch_attrs(path: str, value: Any, body: dict[str, Any]) -> dict[str, Any]:
+    # RFC 7644: path may be an attribute name ("displayName"), or absent with
+    # value as a dict of attributes. Normalize to a flat {attr: val} map using
+    # SCIM camelCase -> snake_case column names.
+    scim_map = {
+        "displayName": "display_name",
+        "userName": "username",
+        "active": "active",
+    }
+    attrs: dict[str, Any] = {}
+    if path:
+        attr = scim_map.get(path.strip(), path.strip().lower())
+        attrs[attr] = value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            attr = scim_map.get(k, k.lower())
+            attrs[attr] = v
+    return attrs
 
 
 @router.delete("/Users/{user_id}")
@@ -182,6 +244,7 @@ async def delete_user(
     _: None = Depends(require_service_token),
 ) -> dict[str, Any]:
     store = request.app.state.store
+    await _require_tenant(store, tenant_id)
     member = await store.get_member(tenant_id, user_id)
     if member is None:
         raise HTTPException(status_code=404, detail="user not found in tenant")
@@ -207,6 +270,7 @@ async def list_groups(
     _: None = Depends(require_service_token),
 ) -> dict[str, Any]:
     store = request.app.state.store
+    await _require_tenant(store, tenant_id)
     members = await store.list_members(tenant_id)
     by_role: dict[str, list[str]] = {r: [] for r in _SCIM_GROUP_ROLES}
     for m in members:
@@ -230,7 +294,11 @@ async def list_groups(
             attr, val = m.group(1), m.group(2)
             resources = [r for r in resources if str(r.get(attr, "")) == val]
         else:
-            logger.warning("scim groups filter unsupported: %s", filter_)
+            logger.warning("scim groups filter unsupported, refusing (fail-closed): %s", filter_)
+            raise HTTPException(
+                status_code=400,
+                detail='unsupported SCIM filter (only `attr eq "val"` is supported)',
+            )
     total = len(resources)
     page = resources[start_index - 1 : start_index - 1 + count]
     logger.info("scim list_groups: tenant=%s total=%d", tenant_id, total)
@@ -251,6 +319,7 @@ async def get_group(
     _: None = Depends(require_service_token),
 ) -> dict[str, Any]:
     store = request.app.state.store
+    await _require_tenant(store, tenant_id)
     members = await store.list_members(tenant_id)
     role = group_id.split(":")[-1] if ":" in group_id else group_id
     uids = [m["user_id"] for m in members if m.get("role") == role]

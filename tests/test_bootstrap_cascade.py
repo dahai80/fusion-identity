@@ -44,6 +44,9 @@ def _settings(bootstrap_tenants: str | None = None) -> Settings:
         redis_url="",
         grpc_port=0,
         lease_ttl_seconds=120,
+        trusted_proxies=frozenset(),
+        jwt_keyring_path="",
+        db_pool_max=8,
     )
 
 
@@ -81,6 +84,28 @@ def test_bootstrap_tenants_via_build_app():
             json={"username": "admin", "password": "adminpass", "tenant_id": "default"},
         )
         assert login.status_code == 200
+
+
+async def test_bootstrap_missing_creds_empty_table_fail_closed():
+    # T9/F15: empty tenant table + no bootstrap creds → fail-closed. The service
+    # refuses to start (RuntimeError) rather than silently coming up with no
+    # admin, which would lock operators out. CLAUDE.md's "skip" note describes
+    # the operator-seeding path; the F15 fix makes the code enforce it loudly.
+    store = InMemoryStore()
+    with pytest.raises(RuntimeError, match="FUSION_BOOTSTRAP_ADMIN"):
+        await bootstrap(store, "", "")
+
+
+async def test_bootstrap_missing_creds_nonempty_table_skips():
+    # T9: tenants already exist → bootstrap is a no-op regardless of creds, so
+    # an operator who seeded out-of-band can start the service without creds.
+    store = InMemoryStore()
+    await store.create_tenant("default", "Default Tenant", plan="team")
+    await store.create_user("usr_admin", "admin", "adminpass")
+    await store.add_member("default", "usr_admin", "tenant_admin")
+    # No raise — non-empty table short-circuits before the creds check.
+    await bootstrap(store, "", "")
+    assert await store.get_tenant("default") is not None
 
 
 async def test_delete_tenant_cascades():

@@ -17,7 +17,7 @@ def test_mfa_enroll_returns_secret_and_uri(client: TestClient, admin_token: str)
     assert body["method"] == "totp"
     assert body["secret"]
     assert body["otpauth_uri"].startswith("otpauth://totp/")
-    rec = client.app.state.store.get_mfa_sync("usr_admin", "totp")
+    rec = client.app.state.store._mfa.get(("usr_admin", "totp"))
     assert rec is not None
 
 
