@@ -634,6 +634,9 @@ class PgStore:
             "refresh_tokens": "SELECT count(*) FROM refresh_tokens WHERE status='active'",
             "idps": "SELECT count(*) FROM identity_providers",
             "mfa": "SELECT count(*) FROM user_mfa",
+            # P1-5: dormant legacy-scrypt accounts (fixed salt). >0 → operator
+            # force-resets; mechanism rehashes active ones on login.
+            "legacy_scrypt_users": "SELECT count(*) FROM users WHERE password_algo='scrypt'",
         }
         out: dict[str, Any] = {}
         for key, sql in counts.items():

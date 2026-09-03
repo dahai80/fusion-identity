@@ -62,16 +62,20 @@ class IdentityClient:
         target_model: str = "",
         request_id: str = "",
         client_ip: str = "",
+        tenant_id: str = "",
     ) -> pb.AuthorizeAndAcquireResponse:
         if self._stub is None:
             await self.connect()
         assert self._stub is not None
+        # P2-3: optionally assert the tenant the api_key belongs to. The server
+        # cross-checks it against the key's real tenant and refuses on mismatch.
         req = pb.AuthorizeAndAcquireRequest(
             api_key=api_key,
             target_module=target_module,
             target_model=target_model,
             request_id=request_id,
             client_ip=client_ip,
+            tenant_id=tenant_id,
         )
         try:
             resp = await self._stub.AuthorizeAndAcquire(req, timeout=self._deadline)

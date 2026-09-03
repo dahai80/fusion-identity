@@ -36,12 +36,48 @@ def _purge_states() -> None:
         _STATES.pop(k, None)
 
 
-def _put_state(state: str, info: dict[str, Any]) -> None:
+def _cache(request: Request):
+    return getattr(request.app.state, "cache", None)
+
+
+async def _put_state(request: Request, state: str, info: dict[str, Any]) -> None:
+    # P2-2: prefer Redis so a callback landing on a different worker still
+    # resolves the state. In-memory OrderedDict is the single-worker fallback.
+    info = {**info, "ts": time.time()}
+    cache = _cache(request)
+    if cache is not None:
+        try:
+            await cache.put_oidc_state(state, info, _STATES_TTL)
+            return
+        except Exception as exc:
+            logger.warning("oidc: redis put_state failed, fallback in-memory: %s", exc)
     _purge_states()
-    _STATES[state] = {**info, "ts": time.time()}
+    _STATES[state] = info
     _STATES.move_to_end(state)
     while len(_STATES) > _STATES_MAX:
         _STATES.popitem(last=False)
+
+
+async def _pop_state(request: Request, state: str) -> dict[str, Any] | None:
+    cache = _cache(request)
+    if cache is not None:
+        try:
+            info = await cache.pop_oidc_state(state)
+            if info is not None:
+                return info
+            # absent in redis — do NOT consult in-memory: in a multi-worker
+            # setup a None from redis is authoritative (state never existed or
+            # already consumed). Fall through only on redis error (handled below).
+            return None
+        except Exception as exc:
+            logger.warning("oidc: redis pop_state failed, fallback in-memory: %s", exc)
+    _purge_states()
+    st = _STATES.pop(state, None)
+    if st is None:
+        return None
+    if time.time() - st.get("ts", 0) > _STATES_TTL:
+        return None
+    return st
 
 
 def _sanitize_username(raw: str) -> str:
@@ -64,19 +100,30 @@ async def oidc_login(idp_id: str, request: Request) -> RedirectResponse:
     # exchange is bound to this login initiation (CSRF + login-fixation defense
     # alongside the mandatory state check).
     code_verifier = secrets.token_urlsafe(48)
-    _put_state(
-        state, {"idp_id": idp_id, "tenant_id": idp["tenant_id"], "code_verifier": code_verifier}
+    # P2-1: nonce binds the id_token to this login (replay defense).
+    nonce = secrets.token_urlsafe(24)
+    await _put_state(
+        request,
+        state,
+        {
+            "idp_id": idp_id,
+            "tenant_id": idp["tenant_id"],
+            "code_verifier": code_verifier,
+            "nonce": nonce,
+        },
     )
+    disc = await _discovery(idp["issuer_url"])
     params = {
         "response_type": "code",
         "client_id": idp.get("client_id") or "",
         "redirect_uri": _redirect_uri(request, idp_id),
         "scope": idp.get("scopes") or "openid profile email",
         "state": state,
+        "nonce": nonce,
         "code_challenge": _pkce_challenge(code_verifier),
         "code_challenge_method": "S256",
     }
-    authorize = idp["issuer_url"].rstrip("/") + "/authorize?" + urlencode(params)
+    authorize = disc["authorization_endpoint"] + "?" + urlencode(params)
     logger.info("oidc_login: idp=%s redirect state=%s", idp_id, state)
     return RedirectResponse(url=authorize, status_code=302)
 
@@ -87,6 +134,93 @@ def _pkce_challenge(verifier: str) -> str:
 
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+# P2-1: IdP discovery cache. Resolves standard OIDC endpoints from the issuer's
+# /.well-known/openid-configuration instead of hardcoding /authorize /token
+# /userinfo. Falls back to constructed paths when the IdP has no discovery doc
+# (legacy OAuth2 IdPs), so existing integrations do not break.
+_DISCOVERY: dict[str, dict[str, Any]] = {}
+
+
+async def _discovery(issuer_url: str) -> dict[str, str]:
+    issuer = issuer_url.rstrip("/")
+    cached = _DISCOVERY.get(issuer)
+    if cached is not None:
+        return cached
+    doc_url = issuer + "/.well-known/openid-configuration"
+    fallback = {
+        "issuer": issuer,
+        "authorization_endpoint": issuer + "/authorize",
+        "token_endpoint": issuer + "/token",
+        "userinfo_endpoint": issuer + "/userinfo",
+        "jwks_uri": issuer + "/jwks",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as cx:
+            dresp = await cx.get(doc_url)
+            if dresp.status_code != 200:
+                logger.warning(
+                    "oidc: discovery %s returned %s, using fallback paths",
+                    doc_url,
+                    dresp.status_code,
+                )
+                _DISCOVERY[issuer] = fallback
+                return fallback
+            doc = dresp.json()
+    except Exception as exc:
+        logger.warning("oidc: discovery fetch failed (%s), using fallback paths", exc)
+        _DISCOVERY[issuer] = fallback
+        return fallback
+    resolved = {
+        "issuer": doc.get("issuer", issuer),
+        "authorization_endpoint": doc.get(
+            "authorization_endpoint", fallback["authorization_endpoint"]
+        ),
+        "token_endpoint": doc.get("token_endpoint", fallback["token_endpoint"]),
+        "userinfo_endpoint": doc.get("userinfo_endpoint", fallback["userinfo_endpoint"]),
+        "jwks_uri": doc.get("jwks_uri", fallback["jwks_uri"]),
+    }
+    _DISCOVERY[issuer] = resolved
+    logger.info("oidc: discovery resolved issuer=%s endpoints=%s", issuer, list(resolved))
+    return resolved
+
+
+async def _verify_id_token(
+    id_token: str, disc: dict[str, str], client_id: str, nonce: str | None
+) -> dict[str, Any] | None:
+    # P2-1: verify the id_token JWT — signature via the IdP JWKS (PyJWKClient),
+    # plus iss/aud/exp/nonce claims. Returns the claims, or None when the IdP
+    # did not return an id_token (legacy OAuth2) so the caller falls back to
+    # userinfo. A present-but-invalid id_token raises (fail-closed).
+    import jwt as pyjwt
+    from jwt import PyJWKClient
+
+    jwks_uri = disc.get("jwks_uri")
+    if not jwks_uri:
+        logger.warning("oidc: id_token present but no jwks_uri — cannot verify")
+        raise HTTPException(status_code=502, detail="idp jwks_uri missing")
+    signing_algos = ["RS256", "ES256", "RS384", "RS512"]
+    try:
+        jwks_client = PyJWKClient(jwks_uri, timeout=10)
+        signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+        claims = pyjwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=signing_algos,
+            audience=client_id,
+            issuer=disc.get("issuer"),
+            options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("oidc: id_token verification failed: %s", exc)
+        raise HTTPException(status_code=401, detail="id_token verification failed") from exc
+    if nonce is not None and claims.get("nonce") != nonce:
+        logger.warning("oidc: id_token nonce mismatch (replay?)")
+        raise HTTPException(status_code=401, detail="id_token nonce mismatch")
+    return claims
 
 
 @router.post("/{idp_id}/callback")
@@ -101,8 +235,7 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
     # P6: also reject expired states (purge first so stale entries are gone).
     if not req.state:
         raise HTTPException(status_code=400, detail="missing state (csrf protection required)")
-    _purge_states()
-    st = _STATES.pop(req.state, None)
+    st = await _pop_state(request, req.state)
     if st is None:
         raise HTTPException(status_code=400, detail="unknown or expired state")
     if time.time() - st.get("ts", 0) > _STATES_TTL:
@@ -110,12 +243,14 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
     if st.get("idp_id") != idp_id:
         raise HTTPException(status_code=400, detail="state mismatch")
     code_verifier = st.get("code_verifier")
+    nonce = st.get("nonce")
     kek = get_settings(request).kek
     client_secret = (
         decrypt_secret(idp["client_secret_enc"], kek) if idp["client_secret_enc"] else None
     )
-    token_url = idp["issuer_url"].rstrip("/") + "/token"
-    userinfo_url = idp["issuer_url"].rstrip("/") + "/userinfo"
+    disc = await _discovery(idp["issuer_url"])
+    token_url = disc["token_endpoint"]
+    userinfo_url = disc["userinfo_endpoint"]
     data = {
         "grant_type": "authorization_code",
         "code": req.code,
@@ -132,14 +267,25 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
         if tresp.status_code != 200:
             logger.warning("oidc_callback: token exchange failed %s", tresp.status_code)
             raise HTTPException(status_code=502, detail="idp token exchange failed")
-        access_token = tresp.json().get("access_token")
+        tjson = tresp.json()
+        access_token = tjson.get("access_token")
         if not access_token:
             raise HTTPException(status_code=502, detail="idp returned no access_token")
-        uresp = await cx.get(userinfo_url, headers={"Authorization": f"Bearer {access_token}"})
-        if uresp.status_code != 200:
-            logger.warning("oidc_callback: userinfo failed %s", uresp.status_code)
-            raise HTTPException(status_code=502, detail="idp userinfo failed")
-        userinfo = uresp.json()
+        # P2-1: verify id_token when present (true OIDC). Fall back to userinfo
+        # for legacy OAuth2 IdPs that return no id_token.
+        id_claims = None
+        id_token = tjson.get("id_token")
+        if id_token:
+            id_claims = await _verify_id_token(id_token, disc, idp.get("client_id") or "", nonce)
+            logger.info("oidc_callback: id_token verified sub=%s", id_claims.get("sub"))
+        if id_claims is not None:
+            userinfo = id_claims
+        else:
+            uresp = await cx.get(userinfo_url, headers={"Authorization": f"Bearer {access_token}"})
+            if uresp.status_code != 200:
+                logger.warning("oidc_callback: userinfo failed %s", uresp.status_code)
+                raise HTTPException(status_code=502, detail="idp userinfo failed")
+            userinfo = uresp.json()
     sub = userinfo.get("sub") or userinfo.get("email")
     if not sub:
         raise HTTPException(status_code=502, detail="idp userinfo missing sub/email")

@@ -41,17 +41,52 @@ end
 return {1, math.max(0, limit - count - 1)}
 """
 
+# Fixed-window login rate limit (P1-4). INCR + EXPIRE is atomic enough here:
+# the only race is two concurrent first-of-window INCRs both seeing count 1,
+# which still denies correctly once the window is full. Multi-worker shares
+# one counter so the configured limit is the real limit, not N× it.
+CHECK_LOGIN_LUA = """
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local cur = tonumber(redis.call('get', key) or "0")
+if cur >= limit then
+    return 0
+end
+local n = redis.call('incr', key)
+if n == 1 then
+    redis.call('expire', key, window)
+end
+return 1
+"""
+
+# P2-2: atomic consume of an OIDC state. GETDEL removes the state so a replayed
+# or racing callback cannot reuse it (one-shot, multi-worker safe). Returns the
+# JSON blob or nil when the state is unknown/expired.
+POP_OIDC_STATE_LUA = """
+local key = KEYS[1]
+local val = redis.call('get', key)
+if val then
+    redis.call('del', key)
+end
+return val
+"""
+
 
 class IdentityCache:
     def __init__(self, redis: Any) -> None:
         self._redis = redis
         self._lua_reserve = None
         self._lua_rpm = None
+        self._lua_login = None
+        self._lua_oidc_state = None
 
     async def init_scripts(self) -> None:
         self._lua_reserve = self._redis.register_script(RESERVE_QUOTA_LUA)
         self._lua_rpm = self._redis.register_script(CHECK_RPM_LUA)
-        logger.info("cache: lua scripts registered (reserve_quota, rpm)")
+        self._lua_login = self._redis.register_script(CHECK_LOGIN_LUA)
+        self._lua_oidc_state = self._redis.register_script(POP_OIDC_STATE_LUA)
+        logger.info("cache: lua scripts registered (reserve_quota, rpm, login_rate, oidc_state)")
 
     def _api_key_hash(self, api_key: str) -> str:
         return hashlib.sha256(api_key.encode()).hexdigest()
@@ -189,3 +224,69 @@ class IdentityCache:
     async def reset_rpm(self, tenant_id: str) -> None:
         await self._redis.delete(self._rpm_key(tenant_id))
         logger.debug("cache: reset rpm tenant=%s", tenant_id)
+
+    # P1-4: multi-worker login rate limit. Keys mirror ratelimit.py — a per-IP
+    # bucket and a per-username bucket; both must pass (deny if either full).
+    def _login_key(self, tenant_id: str, ip: str) -> str:
+        return f"loginrate:{tenant_id}:{ip}"
+
+    def _login_user_key(self, tenant_id: str, username: str) -> str:
+        return f"loginrate:u:{tenant_id}:{username.lower()}"
+
+    async def check_login_rate(
+        self, tenant_id: str, ip: str, username: str | None, limit: int, window: int
+    ) -> bool:
+        if limit <= 0:
+            return True
+        if self._lua_login is None:
+            await self.init_scripts()
+        try:
+            ip_ok = int(
+                await self._lua_login(keys=[self._login_key(tenant_id, ip)], args=[limit, window])
+            )
+            if not ip_ok:
+                logger.warning("cache: login rate deny tenant=%s ip=%s", tenant_id, ip)
+                return False
+            if username:
+                u_ok = int(
+                    await self._lua_login(
+                        keys=[self._login_user_key(tenant_id, username)],
+                        args=[limit, window],
+                    )
+                )
+                if not u_ok:
+                    logger.warning("cache: login rate deny tenant=%s user=%s", tenant_id, username)
+                    return False
+            return True
+        except Exception as exc:
+            # P1-7 parity: a redis hiccup must not take login down. Fall back
+            # to the in-memory limiter (caller decides) — fail open on rate
+            # state, NOT on authentication.
+            logger.warning("cache: login rate check failed (fail-open): %s", exc)
+            return True
+
+    # P2-2: multi-worker OIDC state store. States are one-shot (consumed on
+    # callback), TTL-bounded, and must survive a callback landing on a different
+    # worker than the one that started the login.
+    def _oidc_state_key(self, state: str) -> str:
+        return f"oidcstate:{state}"
+
+    async def put_oidc_state(self, state: str, info: dict, ttl: int) -> None:
+        await self._redis.set(self._oidc_state_key(state), json.dumps(info), ex=ttl)
+        logger.debug("cache: put oidc state=%s ttl=%s", state, ttl)
+
+    async def pop_oidc_state(self, state: str) -> dict | None:
+        if self._lua_oidc_state is None:
+            await self.init_scripts()
+        try:
+            val = await self._lua_oidc_state(keys=[self._oidc_state_key(state)])
+        except Exception as exc:
+            logger.warning("cache: oidc state pop failed (fail-open to in-memory): %s", exc)
+            return None
+        if not val:
+            return None
+        try:
+            return json.loads(val)
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning("cache: oidc state corrupt: %s", exc)
+            return None

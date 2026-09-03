@@ -739,6 +739,12 @@ class InMemoryStore:
             ),
             "idps": len(self._idps),
             "mfa": len(self._mfa),
+            # P1-5: surface dormant legacy-scrypt accounts (fixed salt, never
+            # rehashed because they never log in). A DB leak exposes them to a
+            # single precomputed rainbow table. >0 → operator force-resets.
+            "legacy_scrypt_users": sum(
+                1 for u in self._users.values() if (u.get("password_algo") or "") == "scrypt"
+            ),
         }
 
     async def create_idp(

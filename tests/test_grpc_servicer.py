@@ -287,6 +287,34 @@ async def test_quota_zero_tpm_denies_not_default(grpc_stack):
     assert resp.error_code == pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED
 
 
+async def test_p2_3_authorize_cross_tenant_assertion_refused(grpc_stack):
+    # P2-3: a caller asserting the wrong tenant for an api_key must be refused
+    # (fail-closed), so a key for tenant A cannot be misattributed to tenant B.
+    store, stub, _ = grpc_stack
+    raw = await _seed_key(store, "acme", "usr_acme")
+    resp = await stub.AuthorizeAndAcquire(
+        pb.AuthorizeAndAcquireRequest(
+            api_key=raw, target_module="code", request_id="p23x", tenant_id="other"
+        )
+    )
+    assert resp.is_allowed is False
+    assert resp.error_code == pb.AuthErrorCode.INVALID_API_KEY
+
+
+async def test_p2_3_authorize_matching_tenant_assertion_passes(grpc_stack):
+    # P2-3: asserting the correct tenant matches the key's real tenant → allowed,
+    # parity with the unasserted path.
+    store, stub, _ = grpc_stack
+    raw = await _seed_key(store, "acme", "usr_acme")
+    resp = await stub.AuthorizeAndAcquire(
+        pb.AuthorizeAndAcquireRequest(
+            api_key=raw, target_module="code", request_id="p23ok", tenant_id="acme"
+        )
+    )
+    assert resp.is_allowed is True
+    assert resp.tenant_context.tenant_id == "acme"
+
+
 async def test_grpc_service_token_interceptor_rejects_unauth():
     # T5/F1: a server wired with the interceptor rejects missing/invalid token.
     from fusion_identity.grpc_interceptor import ServiceTokenInterceptor

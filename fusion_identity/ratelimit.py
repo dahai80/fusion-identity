@@ -119,9 +119,32 @@ def client_ip(request: Request) -> str:
     return peer
 
 
-def check_login_rate(request: Request, tenant_id: str, username: str | None = None) -> None:
-    limiter = get_login_limiter(request)
+async def check_login_rate(request: Request, tenant_id: str, username: str | None = None) -> None:
     ip = client_ip(request)
+    cache = getattr(request.app.state, "cache", None)
+    settings = getattr(request.app.state, "settings", None)
+    limit = getattr(settings, "login_rate_limit", DEFAULT_LOGIN_LIMIT) or 0
+    window = getattr(settings, "login_rate_window", DEFAULT_LOGIN_WINDOW) or DEFAULT_LOGIN_WINDOW
+    # P1-4: prefer the Redis-backed limiter when the cache plane is active so
+    # the configured limit is enforced across workers (in-memory gives N×).
+    # Fall back to the process-local limiter only when redis is absent.
+    if cache is not None and limit > 0:
+        try:
+            allowed = await cache.check_login_rate(tenant_id, ip, username, limit, window)
+        except Exception as exc:
+            logger.warning("login_ratelimit: redis path failed, fallback in-memory: %s", exc)
+            allowed = None
+        if allowed is False:
+            logger.warning(
+                "login_ratelimit: 429 tenant=%s ip=%s user=%s (redis)", tenant_id, ip, username
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many login attempts, retry later",
+            )
+        if allowed is True:
+            return
+    limiter = get_login_limiter(request)
     if not limiter.allow(tenant_id, ip, username):
         logger.warning("login_ratelimit: 429 tenant=%s ip=%s user=%s", tenant_id, ip, username)
         raise HTTPException(

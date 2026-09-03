@@ -186,7 +186,7 @@ Proto: [`fusion_identity/grpc/identity.proto`](fusion_identity/grpc/identity.pro
 
 | RPC | Notes |
 |---|---|
-| `AuthorizeAndAcquire` | validate `api_key` → tenant context, module/model allowlist, RPM rate limit, daily quota, then atomically acquire a concurrency **lease** (Redis Lua). Returns `is_allowed`, `TenantContext` (incl. `priority`), `lease_id`, `max_allowed_tokens`. Refusal codes: `INVALID_API_KEY` / `TENANT_DISABLED` / `MODULE_UNAUTHORIZED` / `MODEL_UNAUTHORIZED` / `CONCURRENCY_LIMIT_EXCEEDED` / `DAILY_QUOTA_EXCEEDED` / `RATE_LIMIT_EXCEEDED`. |
+| `AuthorizeAndAcquire` | validate `api_key` → tenant context, module/model allowlist, RPM rate limit, daily quota, then atomically acquire a concurrency **lease** (Redis Lua). The request carries an optional `tenant_id`: when set, the server cross-checks it against the key's real tenant and refuses (fail-closed) on mismatch, so a key cannot be misattributed to another tenant. Returns `is_allowed`, `TenantContext` (incl. `priority`), `lease_id`, `max_allowed_tokens`. Refusal codes: `INVALID_API_KEY` / `TENANT_DISABLED` / `MODULE_UNAUTHORIZED` / `MODEL_UNAUTHORIZED` / `CONCURRENCY_LIMIT_EXCEEDED` / `DAILY_QUOTA_EXCEEDED` / `RATE_LIMIT_EXCEEDED`. |
 | `ReleaseLease` | release a lease (decrement concurrency counter). |
 | `ReportUsage` | record token usage (daily quota counter), release the lease, append to the usage ledger (non-blocking). |
 
@@ -196,7 +196,7 @@ Priority is derived from `quotas.default_priority` (settable via the admin/quota
 
 [`fusion_identity/client/`](fusion_identity/client/) ships a Python client for gateways:
 
-- `IdentityClient` — long-lived gRPC channel, 10 ms default deadline, async `authorize_and_acquire` / `release_lease` / `report_usage` / `health`.
+- `IdentityClient` — long-lived gRPC channel, 10 ms default deadline, async `authorize_and_acquire` (optionally asserts `tenant_id`) / `release_lease` / `report_usage` / `health`.
 - `lease_guard` — `asynccontextmanager` that acquires a lease, yields the response, and always releases on exit; raises `LeaseDenied` on refusal.
 - `KV_PREFIX = "fusion:identity:"` — shared Redis key namespace for cross-service coordination.
 

@@ -161,6 +161,21 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
             return _refuse(pb.AuthErrorCode.TENANT_DISABLED, "tenant disabled")
 
         tenant_id = tenant_info["tenant_id"]
+        # P2-3: cross-tenant guard. A caller may assert which tenant the api_key
+        # belongs to; if it does, the assertion MUST match the key's real tenant.
+        # Without this a key for tenant A could be presented as tenant B and the
+        # returned TenantContext / lease would be misattributed. Fail-closed.
+        asserted = (request.tenant_id or "").strip()
+        if asserted and asserted != tenant_id:
+            logger.warning(
+                "grpc authorize refused: api_key tenant=%s != asserted tenant=%s",
+                tenant_id,
+                asserted,
+            )
+            return _refuse(
+                pb.AuthErrorCode.INVALID_API_KEY,
+                "api_key does not belong to asserted tenant",
+            )
         allowed_modules = tenant_info.get("allowed_modules") or []
         if (
             allowed_modules
