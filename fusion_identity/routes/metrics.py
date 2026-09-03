@@ -21,12 +21,20 @@ _START = time.time()
 async def metrics(
     store: InMemoryStore = Depends(get_store),
 ) -> Response:
+    stats_error = 0
     try:
         s = await store.stats()
     except Exception as exc:
-        logger.warning("metrics: stats failed: %s", exc)
+        # P3-2: a swallowed stats() failure left every gauge at 0, which a
+        # scraper cannot distinguish from a genuinely empty system. Mark the
+        # failure with a dedicated gauge so monitoring can alert on it loudly.
+        logger.error("metrics: stats failed: %s", exc, exc_info=True)
         s = {}
+        stats_error = 1
     lines = [
+        "# HELP fusion_identity_stats_error 1 if store.stats() failed this scrape",
+        "# TYPE fusion_identity_stats_error gauge",
+        f"fusion_identity_stats_error {stats_error}",
         "# HELP fusion_identity_tenants Total active tenants",
         "# TYPE fusion_identity_tenants gauge",
         f"fusion_identity_tenants {s.get('tenants', 0)}",
@@ -48,6 +56,12 @@ async def metrics(
         "# HELP fusion_identity_active_refresh Active refresh tokens",
         "# TYPE fusion_identity_active_refresh gauge",
         f"fusion_identity_active_refresh {s.get('refresh_tokens', 0)}",
+        (
+            "# HELP fusion_identity_legacy_scrypt_users "
+            "Legacy scrypt accounts (fixed salt, force-reset)"
+        ),
+        "# TYPE fusion_identity_legacy_scrypt_users gauge",
+        f"fusion_identity_legacy_scrypt_users {s.get('legacy_scrypt_users', 0)}",
         "# HELP fusion_identity_uptime_seconds Process uptime",
         "# TYPE fusion_identity_uptime_seconds gauge",
         f"fusion_identity_uptime_seconds {time.time() - _START:.0f}",

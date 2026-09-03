@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0eidentity.proto\x12\x12\x66usion.identity.v1\"\x81\x01\n\x1a\x41uthorizeAndAcquireRequest\x12\x0f\n\x07\x61pi_key\x18\x01 \x01(\t\x12\x15\n\rtarget_module\x18\x02 \x01(\t\x12\x14\n\x0ctarget_model\x18\x03 \x01(\t\x12\x12\n\nrequest_id\x18\x04 \x01(\t\x12\x11\n\tclient_ip\x18\x05 \x01(\t\"z\n\rTenantContext\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x13\n\x0btenant_name\x18\x02 \x01(\t\x12\x0c\n\x04tier\x18\x03 \x01(\t\x12\x33\n\x08priority\x18\x04 \x01(\x0e\x32!.fusion.identity.v1.PriorityLevel\"\xe8\x01\n\x1b\x41uthorizeAndAcquireResponse\x12\x12\n\nis_allowed\x18\x01 \x01(\x08\x12\x35\n\nerror_code\x18\x02 \x01(\x0e\x32!.fusion.identity.v1.AuthErrorCode\x12\x15\n\rerror_message\x18\x03 \x01(\t\x12\x39\n\x0etenant_context\x18\x04 \x01(\x0b\x32!.fusion.identity.v1.TenantContext\x12\x10\n\x08lease_id\x18\x05 \x01(\t\x12\x1a\n\x12max_allowed_tokens\x18\x06 \x01(\x05\"J\n\x13ReleaseLeaseRequest\x12\x10\n\x08lease_id\x18\x01 \x01(\t\x12\x11\n\ttenant_id\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\"\'\n\x14ReleaseLeaseResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"\xe6\x01\n\x12ReportUsageRequest\x12\x10\n\x08lease_id\x18\x01 \x01(\t\x12\x11\n\ttenant_id\x18\x02 \x01(\t\x12\x12\n\nmodel_name\x18\x03 \x01(\t\x12\x15\n\rprompt_tokens\x18\x04 \x01(\x05\x12\x19\n\x11\x63ompletion_tokens\x18\x05 \x01(\x05\x12\x19\n\x11\x65xecution_time_ms\x18\x06 \x01(\x03\x12\x33\n\x06status\x18\x07 \x01(\x0e\x32#.fusion.identity.v1.InferenceStatus\x12\x15\n\rrelease_after\x18\x08 \x01(\x08\"E\n\x13ReportUsageResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x1d\n\x15remaining_daily_quota\x18\x02 \x01(\x03*\xde\x01\n\rAuthErrorCode\x12\x1f\n\x1b\x41UTH_ERROR_CODE_UNSPECIFIED\x10\x00\x12\x13\n\x0fINVALID_API_KEY\x10\x01\x12\x13\n\x0fTENANT_DISABLED\x10\x02\x12\x17\n\x13MODULE_UNAUTHORIZED\x10\x03\x12\x16\n\x12MODEL_UNAUTHORIZED\x10\x04\x12\x1e\n\x1a\x43ONCURRENCY_LIMIT_EXCEEDED\x10\x05\x12\x18\n\x14\x44\x41ILY_QUOTA_EXCEEDED\x10\x06\x12\x17\n\x13RATE_LIMIT_EXCEEDED\x10\x07*i\n\rPriorityLevel\x12\x1e\n\x1aPRIORITY_LEVEL_UNSPECIFIED\x10\x00\x12\x10\n\x0cPRIORITY_LOW\x10\x01\x12\x13\n\x0fPRIORITY_NORMAL\x10\x02\x12\x11\n\rPRIORITY_HIGH\x10\x03*Z\n\x0fInferenceStatus\x12 \n\x1cINFERENCE_STATUS_UNSPECIFIED\x10\x00\x12\x0b\n\x07SUCCESS\x10\x01\x12\x0c\n\x08\x43\x41NCELED\x10\x02\x12\n\n\x06\x46\x41ILED\x10\x03\x32\xcc\x02\n\x0fIdentityService\x12v\n\x13\x41uthorizeAndAcquire\x12..fusion.identity.v1.AuthorizeAndAcquireRequest\x1a/.fusion.identity.v1.AuthorizeAndAcquireResponse\x12\x61\n\x0cReleaseLease\x12\'.fusion.identity.v1.ReleaseLeaseRequest\x1a(.fusion.identity.v1.ReleaseLeaseResponse\x12^\n\x0bReportUsage\x12&.fusion.identity.v1.ReportUsageRequest\x1a\'.fusion.identity.v1.ReportUsageResponseB\x1fZ\x1d\x66usion/identity/v1;identityv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0eidentity.proto\x12\x12\x66usion.identity.v1\"\x94\x01\n\x1a\x41uthorizeAndAcquireRequest\x12\x0f\n\x07\x61pi_key\x18\x01 \x01(\t\x12\x15\n\rtarget_module\x18\x02 \x01(\t\x12\x14\n\x0ctarget_model\x18\x03 \x01(\t\x12\x12\n\nrequest_id\x18\x04 \x01(\t\x12\x11\n\tclient_ip\x18\x05 \x01(\t\x12\x11\n\ttenant_id\x18\x06 \x01(\t\"z\n\rTenantContext\x12\x11\n\ttenant_id\x18\x01 \x01(\t\x12\x13\n\x0btenant_name\x18\x02 \x01(\t\x12\x0c\n\x04tier\x18\x03 \x01(\t\x12\x33\n\x08priority\x18\x04 \x01(\x0e\x32!.fusion.identity.v1.PriorityLevel\"\xe8\x01\n\x1b\x41uthorizeAndAcquireResponse\x12\x12\n\nis_allowed\x18\x01 \x01(\x08\x12\x35\n\nerror_code\x18\x02 \x01(\x0e\x32!.fusion.identity.v1.AuthErrorCode\x12\x15\n\rerror_message\x18\x03 \x01(\t\x12\x39\n\x0etenant_context\x18\x04 \x01(\x0b\x32!.fusion.identity.v1.TenantContext\x12\x10\n\x08lease_id\x18\x05 \x01(\t\x12\x1a\n\x12max_allowed_tokens\x18\x06 \x01(\x05\"J\n\x13ReleaseLeaseRequest\x12\x10\n\x08lease_id\x18\x01 \x01(\t\x12\x11\n\ttenant_id\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t\"\'\n\x14ReleaseLeaseResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"\xe6\x01\n\x12ReportUsageRequest\x12\x10\n\x08lease_id\x18\x01 \x01(\t\x12\x11\n\ttenant_id\x18\x02 \x01(\t\x12\x12\n\nmodel_name\x18\x03 \x01(\t\x12\x15\n\rprompt_tokens\x18\x04 \x01(\x05\x12\x19\n\x11\x63ompletion_tokens\x18\x05 \x01(\x05\x12\x19\n\x11\x65xecution_time_ms\x18\x06 \x01(\x03\x12\x33\n\x06status\x18\x07 \x01(\x0e\x32#.fusion.identity.v1.InferenceStatus\x12\x15\n\rrelease_after\x18\x08 \x01(\x08\"E\n\x13ReportUsageResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x1d\n\x15remaining_daily_quota\x18\x02 \x01(\x03*\xde\x01\n\rAuthErrorCode\x12\x1f\n\x1b\x41UTH_ERROR_CODE_UNSPECIFIED\x10\x00\x12\x13\n\x0fINVALID_API_KEY\x10\x01\x12\x13\n\x0fTENANT_DISABLED\x10\x02\x12\x17\n\x13MODULE_UNAUTHORIZED\x10\x03\x12\x16\n\x12MODEL_UNAUTHORIZED\x10\x04\x12\x1e\n\x1a\x43ONCURRENCY_LIMIT_EXCEEDED\x10\x05\x12\x18\n\x14\x44\x41ILY_QUOTA_EXCEEDED\x10\x06\x12\x17\n\x13RATE_LIMIT_EXCEEDED\x10\x07*i\n\rPriorityLevel\x12\x1e\n\x1aPRIORITY_LEVEL_UNSPECIFIED\x10\x00\x12\x10\n\x0cPRIORITY_LOW\x10\x01\x12\x13\n\x0fPRIORITY_NORMAL\x10\x02\x12\x11\n\rPRIORITY_HIGH\x10\x03*Z\n\x0fInferenceStatus\x12 \n\x1cINFERENCE_STATUS_UNSPECIFIED\x10\x00\x12\x0b\n\x07SUCCESS\x10\x01\x12\x0c\n\x08\x43\x41NCELED\x10\x02\x12\n\n\x06\x46\x41ILED\x10\x03\x32\xcc\x02\n\x0fIdentityService\x12v\n\x13\x41uthorizeAndAcquire\x12..fusion.identity.v1.AuthorizeAndAcquireRequest\x1a/.fusion.identity.v1.AuthorizeAndAcquireResponse\x12\x61\n\x0cReleaseLease\x12\'.fusion.identity.v1.ReleaseLeaseRequest\x1a(.fusion.identity.v1.ReleaseLeaseResponse\x12^\n\x0bReportUsage\x12&.fusion.identity.v1.ReportUsageRequest\x1a\'.fusion.identity.v1.ReportUsageResponseB\x1fZ\x1d\x66usion/identity/v1;identityv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,26 +32,26 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'identity_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z\035fusion/identity/v1;identityv1'
-  _globals['_AUTHERRORCODE']._serialized_start=951
-  _globals['_AUTHERRORCODE']._serialized_end=1173
-  _globals['_PRIORITYLEVEL']._serialized_start=1175
-  _globals['_PRIORITYLEVEL']._serialized_end=1280
-  _globals['_INFERENCESTATUS']._serialized_start=1282
-  _globals['_INFERENCESTATUS']._serialized_end=1372
+  _globals['_AUTHERRORCODE']._serialized_start=970
+  _globals['_AUTHERRORCODE']._serialized_end=1192
+  _globals['_PRIORITYLEVEL']._serialized_start=1194
+  _globals['_PRIORITYLEVEL']._serialized_end=1299
+  _globals['_INFERENCESTATUS']._serialized_start=1301
+  _globals['_INFERENCESTATUS']._serialized_end=1391
   _globals['_AUTHORIZEANDACQUIREREQUEST']._serialized_start=39
-  _globals['_AUTHORIZEANDACQUIREREQUEST']._serialized_end=168
-  _globals['_TENANTCONTEXT']._serialized_start=170
-  _globals['_TENANTCONTEXT']._serialized_end=292
-  _globals['_AUTHORIZEANDACQUIRERESPONSE']._serialized_start=295
-  _globals['_AUTHORIZEANDACQUIRERESPONSE']._serialized_end=527
-  _globals['_RELEASELEASEREQUEST']._serialized_start=529
-  _globals['_RELEASELEASEREQUEST']._serialized_end=603
-  _globals['_RELEASELEASERESPONSE']._serialized_start=605
-  _globals['_RELEASELEASERESPONSE']._serialized_end=644
-  _globals['_REPORTUSAGEREQUEST']._serialized_start=647
-  _globals['_REPORTUSAGEREQUEST']._serialized_end=877
-  _globals['_REPORTUSAGERESPONSE']._serialized_start=879
-  _globals['_REPORTUSAGERESPONSE']._serialized_end=948
-  _globals['_IDENTITYSERVICE']._serialized_start=1375
-  _globals['_IDENTITYSERVICE']._serialized_end=1707
+  _globals['_AUTHORIZEANDACQUIREREQUEST']._serialized_end=187
+  _globals['_TENANTCONTEXT']._serialized_start=189
+  _globals['_TENANTCONTEXT']._serialized_end=311
+  _globals['_AUTHORIZEANDACQUIRERESPONSE']._serialized_start=314
+  _globals['_AUTHORIZEANDACQUIRERESPONSE']._serialized_end=546
+  _globals['_RELEASELEASEREQUEST']._serialized_start=548
+  _globals['_RELEASELEASEREQUEST']._serialized_end=622
+  _globals['_RELEASELEASERESPONSE']._serialized_start=624
+  _globals['_RELEASELEASERESPONSE']._serialized_end=663
+  _globals['_REPORTUSAGEREQUEST']._serialized_start=666
+  _globals['_REPORTUSAGEREQUEST']._serialized_end=896
+  _globals['_REPORTUSAGERESPONSE']._serialized_start=898
+  _globals['_REPORTUSAGERESPONSE']._serialized_end=967
+  _globals['_IDENTITYSERVICE']._serialized_start=1394
+  _globals['_IDENTITYSERVICE']._serialized_end=1726
 # @@protoc_insertion_point(module_scope)

@@ -31,7 +31,7 @@ async def login(
     request: Request,
     svc: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
-    check_login_rate(request, req.tenant_id, req.username)
+    await check_login_rate(request, req.tenant_id, req.username)
     try:
         resp = await svc.login(req)
         # P3-1: the auth_requests_total counter only recorded gRPC authorize
