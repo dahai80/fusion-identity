@@ -45,16 +45,10 @@ def encrypt_secret(plaintext: str, kek_material: str) -> str:
     return blob
 
 
-def decrypt_secret(blob: str, kek_material: str) -> str:
-    # M5: an InvalidTag (tampered/corrupt/wrong-key blob) must surface as a
-    # domain error, not an uncaught 500 / silent swallow.
-    try:
-        raw = base64.b64decode(blob, validate=True)
-    except (ValueError, base64.binascii.Error) as exc:
-        logger.error("decrypt_secret: malformed blob (base64)")
-        raise CryptoError("malformed ciphertext blob") from exc
+def _decrypt_with(blob: str, kek_material: str) -> str:
+    # inner decrypt against ONE derived key; raises CryptoError on any failure.
+    raw = base64.b64decode(blob, validate=True)
     if len(raw) < _NONCE_LEN + 1:
-        logger.error("decrypt_secret: truncated blob len=%d", len(raw))
         raise CryptoError("truncated ciphertext blob")
     nonce, ct = raw[:_NONCE_LEN], raw[_NONCE_LEN:]
     kek = _derive_kek(kek_material)
@@ -62,10 +56,37 @@ def decrypt_secret(blob: str, kek_material: str) -> str:
     try:
         pt = aesgcm.decrypt(nonce, ct, None).decode()
     except InvalidTag as exc:
-        logger.error("decrypt_secret: authentication failed (tampered or wrong key)")
         raise CryptoError("ciphertext authentication failed") from exc
     except UnicodeDecodeError as exc:
-        logger.error("decrypt_secret: decrypted bytes are not valid utf-8")
         raise CryptoError("ciphertext decrypted to non-utf8") from exc
-    logger.debug("decrypt_secret: ok len=%d", len(pt))
     return pt
+
+
+def decrypt_secret(blob: str, kek_material: str, prev_kek_material: str | None = None) -> str:
+    # M5: an InvalidTag (tampered/corrupt/wrong-key blob) must surface as a
+    # domain error, not an uncaught 500 / silent swallow.
+    # D2: KEK online rotation dual-window. During a rotation the current KEK
+    # encrypts NEW secrets while some at-rest secrets are still encrypted with
+    # the PREVIOUS KEK (until the re-encrypt sweep completes). Try the current
+    # KEK first; on an auth failure fall back to prev_kek (if configured) so the
+    # grace window keeps old secrets readable without a full stop-the-world.
+    try:
+        pt = _decrypt_with(blob, kek_material)
+        logger.debug("decrypt_secret: ok (current kek) len=%d", len(pt))
+        return pt
+    except CryptoError:
+        if not prev_kek_material or prev_kek_material == kek_material:
+            logger.error("decrypt_secret: authentication failed (no prev kek window)")
+            raise
+        try:
+            pt = _decrypt_with(blob, prev_kek_material)
+        except CryptoError:
+            logger.error("decrypt_secret: authentication failed (current + prev kek)")
+            raise
+        # decrypted with the OLD kek — re-encryption still pending. Log so the
+        # operator can see secrets still living in the grace window.
+        logger.warning("decrypt_secret: ok (prev kek grace) len=%d — re-encrypt pending", len(pt))
+        return pt
+    except (ValueError, base64.binascii.Error) as exc:
+        logger.error("decrypt_secret: malformed blob (base64)")
+        raise CryptoError("malformed ciphertext blob") from exc

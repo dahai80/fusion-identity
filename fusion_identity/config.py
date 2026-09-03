@@ -80,6 +80,19 @@ class Settings:
     trusted_proxies: frozenset[str]
     jwt_keyring_path: str
     db_pool_max: int
+    # D2: optional previous KEK for online rotation dual-window. During a KEK
+    # rotation the operator sets the NEW key as FUSION_IDENTITY_KEK and the OLD
+    # key as FUSION_IDENTITY_KEK_PREV, restarts, then runs the re-encrypt sweep
+    # (POST /api/v1/admin/kek/reencrypt). Until the sweep finishes, secrets still
+    # encrypted with the old key decrypt via kek_prev. Once swept, drop KEK_PREV.
+    kek_prev: str | None = None
+    # D3: optional previous service token for rotation dual-window. The operator
+    # sets the NEW token as FUSION_IDENTITY_SERVICE_TOKEN and the OLD token as
+    # FUSION_IDENTITY_SERVICE_TOKEN_PREV, restarts (both tokens accepted during
+    # the window), revokes/rotates callers off the old token, then drops PREV and
+    # restarts to close the window. Same fail-closed + isolation rules as the
+    # current token.
+    service_token_prev: str | None = None
 
 
 def load_settings() -> Settings:
@@ -109,6 +122,27 @@ def load_settings() -> Settings:
             _MIN_TOKEN_LEN,
         )
         raise ConfigError(f"FUSION_IDENTITY_SERVICE_TOKEN must be at least {_MIN_TOKEN_LEN} bytes")
+    # D3: optional previous service token for the rotation dual-window. The grace
+    # token must meet the same strength floor and must not equal the current
+    # token (a no-op) — otherwise the window is meaningless.
+    service_token_prev = os.environ.get("FUSION_IDENTITY_SERVICE_TOKEN_PREV", "").strip() or None
+    if service_token_prev:
+        if service_token_prev == service_token:
+            _logger_src.error(
+                "config: FUSION_IDENTITY_SERVICE_TOKEN_PREV equals current token — no-op"
+            )
+            raise ConfigError(
+                "FUSION_IDENTITY_SERVICE_TOKEN_PREV must differ from the current service token"
+            )
+        if len(service_token_prev) < _MIN_TOKEN_LEN:
+            _logger_src.error(
+                "config: FUSION_IDENTITY_SERVICE_TOKEN_PREV too short (need >=%d bytes)",
+                _MIN_TOKEN_LEN,
+            )
+            raise ConfigError(
+                f"FUSION_IDENTITY_SERVICE_TOKEN_PREV must be at least {_MIN_TOKEN_LEN} bytes"
+            )
+        _logger_src.info("config: service token rotation grace window active (prev set)")
     # M8: jwt_algorithm must be a known value; reject typos like "HS25".
     jwt_algorithm = os.environ.get("FUSION_IDENTITY_JWT_ALGORITHM", "HS256").strip().upper()
     if jwt_algorithm not in _KNOWN_JWT_ALGORITHMS:
@@ -127,6 +161,19 @@ def load_settings() -> Settings:
             "config: FUSION_IDENTITY_KEK equals JWT signing key — key isolation required"
         )
         raise ConfigError("FUSION_IDENTITY_KEK must differ from the JWT signing key")
+    # D2: optional previous KEK for the rotation dual-window. The grace key must
+    # differ from both the current KEK and the JWT signing key (isolation).
+    kek_prev = os.environ.get("FUSION_IDENTITY_KEK_PREV", "").strip() or None
+    if kek_prev:
+        if kek_prev == kek:
+            _logger_src.error("config: FUSION_IDENTITY_KEK_PREV equals current KEK — no-op")
+            raise ConfigError("FUSION_IDENTITY_KEK_PREV must differ from the current KEK")
+        if kek_prev == jwt_signing_key:
+            _logger_src.error(
+                "config: FUSION_IDENTITY_KEK_PREV equals JWT signing key — key isolation required"
+            )
+            raise ConfigError("FUSION_IDENTITY_KEK_PREV must differ from the JWT signing key")
+        _logger_src.info("config: KEK rotation grace window active (kek_prev set)")
     bootstrap_admin_pass = os.environ.get("FUSION_BOOTSTRAP_ADMIN_PASS") or None
     bootstrap_admin_user = os.environ.get("FUSION_BOOTSTRAP_ADMIN_USER") or None
     # C1: reject weak bootstrap admin passwords — fail-closed. The first admin
@@ -167,6 +214,7 @@ def load_settings() -> Settings:
         jwt_private_key_pem=os.environ.get("FUSION_IDENTITY_JWT_PRIVATE_KEY_PEM") or None,
         jwt_public_keys=os.environ.get("FUSION_IDENTITY_JWT_PUBLIC_KEYS") or None,
         kek=kek,
+        kek_prev=kek_prev,
         mfa_enforce_admin=os.environ.get("FUSION_IDENTITY_MFA_ENFORCE_ADMIN", "0").strip().lower()
         in ("1", "true", "yes"),
         redis_url=os.environ.get("FUSION_IDENTITY_REDIS_URL", ""),
@@ -186,4 +234,5 @@ def load_settings() -> Settings:
         # tokens signed by a retired key unverifiable).
         jwt_keyring_path=os.environ.get("FUSION_IDENTITY_JWT_KEYRING_PATH", ""),
         db_pool_max=_int_env("FUSION_IDENTITY_DB_POOL_MAX", DEFAULT_DB_POOL_MAX),
+        service_token_prev=service_token_prev,
     )

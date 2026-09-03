@@ -188,8 +188,7 @@ def test_p2_5_per_username_rate_limit_denies(client: TestClient):
     app = build_app(settings, store=store, run_bootstrap=True)
     with TestClient(app) as c:
         bodies = [
-            {"username": "admin", "password": "wrong", "tenant_id": "default"}
-            for _ in range(5)
+            {"username": "admin", "password": "wrong", "tenant_id": "default"} for _ in range(5)
         ]
         statuses = []
         for b in bodies:

@@ -71,22 +71,51 @@ class PgStore:
     async def _acquire(self):
         return self._pool.acquire()
 
+    def _tenant_guc(self) -> str:
+        # D1: narrow app.current_tenant to the request's tenant so the strong
+        # RLS layer (migration 0007) enforces per-request. Read from the
+        # fusion_core TenantContext contextvar set by the HTTP tenant middleware
+        # (or the gRPC servicer). No context → '_system' (platform scope:
+        # login/verify/refresh/api-key-by-hash/admin/stats/bootstrap), which is
+        # the DB-default GUC and spans tenants by design.
+        try:
+            from fusion_core.tenant.context import current
+
+            ctx = current()
+            if ctx is not None and ctx.tenant_id:
+                return ctx.tenant_id
+        except Exception:
+            pass
+        return "_system"
+
+    async def _set_guc(self, conn) -> None:
+        tid = self._tenant_guc()
+        if tid == "_system":
+            # _system is the connection reset default (ALTER DATABASE); no-op so
+            # a platform-scope call reuses the pooled connection's GUC directly.
+            return
+        await conn.execute("SELECT set_config('app.current_tenant', $1, false)", tid)
+
     async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
+            await self._set_guc(conn)
             row = await conn.fetchrow(sql, *args)
             return dict(row) if row is not None else None
 
     async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:
+            await self._set_guc(conn)
             rows = await conn.fetch(sql, *args)
             return [dict(r) for r in rows]
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
         async with self._pool.acquire() as conn:
+            await self._set_guc(conn)
             return await conn.fetchval(sql, *args)
 
     async def execute(self, sql: str, *args: Any) -> str:
         async with self._pool.acquire() as conn:
+            await self._set_guc(conn)
             return await conn.execute(sql, *args)
 
     async def ensure_schema(self) -> None:
@@ -393,6 +422,7 @@ class PgStore:
         # F10: serialize per-tenant append under a transaction + advisory lock so
         # concurrent appends read the same prev_hash and chain without forking.
         async with self._pool.acquire() as conn, conn.transaction():
+            await self._set_guc(conn)
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", tenant_id)
             prev = (
                 await conn.fetchval(
@@ -705,6 +735,16 @@ class PgStore:
         )
         return [dict(r) for r in rows]
 
+    async def list_all_idps(self) -> list[dict[str, Any]]:
+        # D2: cross-tenant KEK re-encrypt sweep. MUST run under the _system GUC
+        # (the admin endpoint sets X-Tenant-Id: _system) or RLS fences out other
+        # tenants' IdPs. Only rows with a stored secret need re-encryption.
+        rows = await self.fetch(
+            "SELECT * FROM identity_providers WHERE client_secret_enc IS NOT NULL "
+            "ORDER BY created_at"
+        )
+        return [dict(r) for r in rows]
+
     async def delete_idp(self, idp_id: str) -> bool:
         status = await self.execute("DELETE FROM identity_providers WHERE idp_id=$1", idp_id)
         logger.info("delete_idp: %s status=%s", idp_id, status)
@@ -765,6 +805,13 @@ class PgStore:
         rows = await self.fetch(
             "SELECT * FROM user_mfa WHERE user_id=$1 ORDER BY enrolled_at", user_id
         )
+        return [dict(r) for r in rows]
+
+    async def list_all_mfa(self) -> list[dict[str, Any]]:
+        # D2: KEK re-encrypt sweep. user_mfa is not tenant-scoped (no RLS), so
+        # the _system context is not required, but the sweep is still gated by
+        # the service-token admin endpoint.
+        rows = await self.fetch("SELECT * FROM user_mfa ORDER BY enrolled_at")
         return [dict(r) for r in rows]
 
     async def delete_mfa(self, user_id: str, method: str) -> bool:

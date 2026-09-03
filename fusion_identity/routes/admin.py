@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from fusion_identity.deps import (
     get_cache,
+    get_settings,
     get_store,
     invalidate_tenant_cache,
     require_service_token,
@@ -249,4 +250,116 @@ async def admin_usage_today(
             "daily_limit": daily_limit,
             "usage_percentage": usage_pct,
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# D2: KEK online rotation — re-encrypt all at-rest secrets to the current KEK.
+# Operator workflow:
+#   1. set FUSION_IDENTITY_KEK=<new>  FUSION_IDENTITY_KEK_PREV=<old>, restart
+#   2. POST /api/v1/admin/kek/reencrypt (service token, X-Tenant-Id: _system)
+#   3. drop FUSION_IDENTITY_KEK_PREV, restart — dual window closed.
+# The endpoint decrypts every IdP client_secret + MFA secret with the PREVIOUS
+# kek and re-encrypts with the CURRENT kek, so no secret survives the rotation
+# encrypted under the retired key.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/kek/reencrypt")
+async def admin_kek_reencrypt(
+    request: Request,
+    store: InMemoryStore = Depends(get_store),
+) -> dict[str, Any]:
+    from fusion_identity.crypto import CryptoError, decrypt_secret, encrypt_secret
+
+    settings = get_settings(request)
+    kek = settings.kek
+    kek_prev = settings.kek_prev
+    if not kek_prev:
+        logger.warning("admin_kek_reencrypt: no KEK_PREV configured — nothing to rotate")
+        raise HTTPException(
+            status_code=409,
+            detail="FUSION_IDENTITY_KEK_PREV not set — no rotation window active",
+        )
+    if not hasattr(store, "list_all_idps") or not hasattr(store, "list_all_mfa"):
+        raise HTTPException(status_code=501, detail="store backend does not support KEK rotation")
+
+    idp_total = 0
+    idp_migrated = 0
+    idp_skipped = 0
+    idp_failed = 0
+    for idp in await store.list_all_idps():
+        idp_total += 1
+        blob = idp.get("client_secret_enc")
+        if not blob:
+            idp_skipped += 1
+            continue
+        try:
+            plain = decrypt_secret(blob, kek_prev)
+            new_blob = encrypt_secret(plain, kek)
+        except CryptoError as exc:
+            idp_failed += 1
+            logger.error(
+                "admin_kek_reencrypt: idp=%s decrypt failed: %s (already on current kek?)",
+                idp.get("idp_id"),
+                exc,
+            )
+            continue
+        await store.update_idp(idp["idp_id"], client_secret_enc=new_blob)
+        idp_migrated += 1
+        logger.info("admin_kek_reencrypt: idp=%s re-encrypted", idp["idp_id"])
+
+    mfa_total = 0
+    mfa_migrated = 0
+    mfa_failed = 0
+    for rec in await store.list_all_mfa():
+        mfa_total += 1
+        blob = rec.get("secret_enc")
+        if not blob:
+            continue
+        try:
+            plain = decrypt_secret(blob, kek_prev)
+            new_blob = encrypt_secret(plain, kek)
+        except CryptoError as exc:
+            mfa_failed += 1
+            logger.error(
+                "admin_kek_reencrypt: mfa user=%s method=%s decrypt failed: %s",
+                rec.get("user_id"),
+                rec.get("method"),
+                exc,
+            )
+            continue
+        await store.upsert_mfa(
+            rec["user_id"],
+            rec["method"],
+            secret_enc=new_blob,
+            enabled=bool(rec.get("enabled", True)),
+        )
+        mfa_migrated += 1
+        logger.info(
+            "admin_kek_reencrypt: mfa user=%s method=%s re-encrypted",
+            rec["user_id"],
+            rec["method"],
+        )
+
+    logger.warning(
+        "admin_kek_reencrypt: done idps(migrated=%s skipped=%s failed=%s of %s) "
+        "mfa(migrated=%s failed=%s of %s)",
+        idp_migrated,
+        idp_skipped,
+        idp_failed,
+        idp_total,
+        mfa_migrated,
+        mfa_failed,
+        mfa_total,
+    )
+    return {
+        "idps": {
+            "total": idp_total,
+            "migrated": idp_migrated,
+            "skipped": idp_skipped,
+            "failed": idp_failed,
+        },
+        "mfa": {"total": mfa_total, "migrated": mfa_migrated, "failed": mfa_failed},
+        "next_step": "drop FUSION_IDENTITY_KEK_PREV and restart to close the grace window",
     }

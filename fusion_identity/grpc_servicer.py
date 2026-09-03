@@ -7,12 +7,23 @@ import time
 from typing import Any
 
 import grpc
+from fusion_core.tenant.context import TenantContext, reset, set_context
 
 from fusion_identity import metrics_collector as mc
 from fusion_identity.grpc import identity_pb2 as pb
 from fusion_identity.grpc import identity_pb2_grpc as pb_grpc
 
 logger = logging.getLogger(__name__)
+
+
+def _enter_tenant(tenant_id: str):
+    # D1: bind the fusion_core TenantContext so PgStore narrows app.current_tenant
+    # and the strong RLS layer enforces per-request on the gRPC plane too. Returns
+    # the reset token; caller MUST reset in finally. _system (platform scope) is
+    # used when tenant_id is empty so api-key-by-hash / cross-tenant lookups keep
+    # working.
+    return set_context(TenantContext(tenant_id=tenant_id or "_system"))
+
 
 _DEFAULT_MAX_TOKENS = 4096
 _TIER_PRIORITY = {"enterprise": 3, "pro": 2, "standard": 2, "team": 2, "free": 1}
@@ -161,184 +172,208 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
             return _refuse(pb.AuthErrorCode.TENANT_DISABLED, "tenant disabled")
 
         tenant_id = tenant_info["tenant_id"]
-        # P2-3: cross-tenant guard. A caller may assert which tenant the api_key
-        # belongs to; if it does, the assertion MUST match the key's real tenant.
-        # Without this a key for tenant A could be presented as tenant B and the
-        # returned TenantContext / lease would be misattributed. Fail-closed.
-        asserted = (request.tenant_id or "").strip()
-        if asserted and asserted != tenant_id:
-            logger.warning(
-                "grpc authorize refused: api_key tenant=%s != asserted tenant=%s",
-                tenant_id,
-                asserted,
-            )
-            return _refuse(
-                pb.AuthErrorCode.INVALID_API_KEY,
-                "api_key does not belong to asserted tenant",
-            )
-        allowed_modules = tenant_info.get("allowed_modules") or []
-        if (
-            allowed_modules
-            and request.target_module
-            and request.target_module not in allowed_modules
-        ):
-            return _refuse(
-                pb.AuthErrorCode.MODULE_UNAUTHORIZED,
-                f"unauthorized module: {request.target_module}",
-            )
-
-        allowed_models = tenant_info.get("allowed_models") or []
-        if allowed_models and request.target_model and request.target_model not in allowed_models:
-            return _refuse(
-                pb.AuthErrorCode.MODEL_UNAUTHORIZED,
-                f"unauthorized model: {request.target_model}",
-            )
-
-        daily_limit = int(tenant_info.get("daily_token_limit", 50000))
-        if daily_limit <= 0:
-            # P0-3: tpm=0 means no daily budget at all — deny before reserving.
-            return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, "daily token quota set to 0")
-        if self._cache is not None:
-            quota_ok, remaining = await self._cache.reserve_daily_quota(tenant_id, daily_limit)
-        else:
-            quota_ok, remaining = True, daily_limit
-        if not quota_ok:
-            return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, "daily token quota exceeded")
-
-        max_concurrency = int(tenant_info.get("max_concurrency", 2))
-        acquired = await self._concurrency.try_acquire(tenant_id, max_concurrency)
-        if not acquired:
-            if self._cache is not None:
-                await self._cache.refund_daily_quota(tenant_id, 0)
-            return _refuse(
-                pb.AuthErrorCode.CONCURRENCY_LIMIT_EXCEEDED,
-                f"concurrency limit ({max_concurrency}) reached",
-            )
-        lease_id, active = acquired
-        await self._store.log_lease(tenant_id, lease_id, "acquire", "grpc_authorize")
-        mc.set_active_concurrency(tenant_id, active)
-
-        # RPM counted only after all gates pass (L3 fix) — downstream failures
-        # must not burn the per-minute budget.
-        rpm_limit = int(tenant_info.get("rpm_limit", 0))
-        if rpm_limit > 0 and self._cache is not None:
-            rpm_ok, _ = await self._cache.check_rpm(tenant_id, rpm_limit)
-            if not rpm_ok:
-                await self._concurrency.release(tenant_id, lease_id, "rpm_exceeded")
-                await self._cache.refund_daily_quota(tenant_id, 0)
-                await self._store.log_lease(tenant_id, lease_id, "release", "rpm_exceeded")
-                logger.info("grpc authorize refuse rpm tenant=%s limit=%s", tenant_id, rpm_limit)
+        # D1: narrow the RLS GUC to this tenant for all remaining store writes
+        # (log_lease). api-key-by-hash above ran under _system (cross-tenant
+        # match), which is correct. Reset in finally so the gRPC task does not
+        # leak the tenant scope to a later request on the same loop.
+        ctx_tok = _enter_tenant(tenant_id)
+        try:
+            # P2-3: cross-tenant guard. A caller may assert which tenant the api_key
+            # belongs to; if it does, the assertion MUST match the key's real tenant.
+            # Without this a key for tenant A could be presented as tenant B and the
+            # returned TenantContext / lease would be misattributed. Fail-closed.
+            asserted = (request.tenant_id or "").strip()
+            if asserted and asserted != tenant_id:
+                logger.warning(
+                    "grpc authorize refused: api_key tenant=%s != asserted tenant=%s",
+                    tenant_id,
+                    asserted,
+                )
                 return _refuse(
-                    pb.AuthErrorCode.RATE_LIMIT_EXCEEDED,
-                    f"rpm limit ({rpm_limit}/min) exceeded",
+                    pb.AuthErrorCode.INVALID_API_KEY,
+                    "api_key does not belong to asserted tenant",
+                )
+            allowed_modules = tenant_info.get("allowed_modules") or []
+            if (
+                allowed_modules
+                and request.target_module
+                and request.target_module not in allowed_modules
+            ):
+                return _refuse(
+                    pb.AuthErrorCode.MODULE_UNAUTHORIZED,
+                    f"unauthorized module: {request.target_module}",
                 )
 
-        priority = _priority_from(
-            {"default_priority": tenant_info.get("default_priority")},
-            tenant_info.get("tier", "standard"),
-        )
-        max_tokens = min(_DEFAULT_MAX_TOKENS, remaining if remaining > 0 else _DEFAULT_MAX_TOKENS)
+            allowed_models = tenant_info.get("allowed_models") or []
+            if (
+                allowed_models
+                and request.target_model
+                and request.target_model not in allowed_models
+            ):
+                return _refuse(
+                    pb.AuthErrorCode.MODEL_UNAUTHORIZED,
+                    f"unauthorized model: {request.target_model}",
+                )
 
-        logger.info(
-            "grpc authorize pass tenant=%s module=%s lease=%s priority=%s",
-            tenant_id,
-            request.target_module,
-            lease_id,
-            priority,
-        )
-        return pb.AuthorizeAndAcquireResponse(
-            is_allowed=True,
-            error_code=pb.AuthErrorCode.AUTH_ERROR_CODE_UNSPECIFIED,
-            tenant_context=pb.TenantContext(
-                tenant_id=tenant_id,
-                tenant_name=tenant_info.get("tenant_name", tenant_id),
-                tier=tenant_info.get("tier", "standard"),
-                priority=priority,
-            ),
-            lease_id=lease_id,
-            max_allowed_tokens=max_tokens,
-        )
+            daily_limit = int(tenant_info.get("daily_token_limit", 50000))
+            if daily_limit <= 0:
+                # P0-3: tpm=0 means no daily budget at all — deny before reserving.
+                return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, "daily token quota set to 0")
+            if self._cache is not None:
+                quota_ok, remaining = await self._cache.reserve_daily_quota(tenant_id, daily_limit)
+            else:
+                quota_ok, remaining = True, daily_limit
+            if not quota_ok:
+                return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, "daily token quota exceeded")
+
+            max_concurrency = int(tenant_info.get("max_concurrency", 2))
+            acquired = await self._concurrency.try_acquire(tenant_id, max_concurrency)
+            if not acquired:
+                if self._cache is not None:
+                    await self._cache.refund_daily_quota(tenant_id, 0)
+                return _refuse(
+                    pb.AuthErrorCode.CONCURRENCY_LIMIT_EXCEEDED,
+                    f"concurrency limit ({max_concurrency}) reached",
+                )
+            lease_id, active = acquired
+            await self._store.log_lease(tenant_id, lease_id, "acquire", "grpc_authorize")
+            mc.set_active_concurrency(tenant_id, active)
+
+            # RPM counted only after all gates pass (L3 fix) — downstream failures
+            # must not burn the per-minute budget.
+            rpm_limit = int(tenant_info.get("rpm_limit", 0))
+            if rpm_limit > 0 and self._cache is not None:
+                rpm_ok, _ = await self._cache.check_rpm(tenant_id, rpm_limit)
+                if not rpm_ok:
+                    await self._concurrency.release(tenant_id, lease_id, "rpm_exceeded")
+                    await self._cache.refund_daily_quota(tenant_id, 0)
+                    await self._store.log_lease(tenant_id, lease_id, "release", "rpm_exceeded")
+                    logger.info(
+                        "grpc authorize refuse rpm tenant=%s limit=%s", tenant_id, rpm_limit
+                    )
+                    return _refuse(
+                        pb.AuthErrorCode.RATE_LIMIT_EXCEEDED,
+                        f"rpm limit ({rpm_limit}/min) exceeded",
+                    )
+
+            priority = _priority_from(
+                {"default_priority": tenant_info.get("default_priority")},
+                tenant_info.get("tier", "standard"),
+            )
+            max_tokens = min(
+                _DEFAULT_MAX_TOKENS, remaining if remaining > 0 else _DEFAULT_MAX_TOKENS
+            )
+
+            logger.info(
+                "grpc authorize pass tenant=%s module=%s lease=%s priority=%s",
+                tenant_id,
+                request.target_module,
+                lease_id,
+                priority,
+            )
+            return pb.AuthorizeAndAcquireResponse(
+                is_allowed=True,
+                error_code=pb.AuthErrorCode.AUTH_ERROR_CODE_UNSPECIFIED,
+                tenant_context=pb.TenantContext(
+                    tenant_id=tenant_id,
+                    tenant_name=tenant_info.get("tenant_name", tenant_id),
+                    tier=tenant_info.get("tier", "standard"),
+                    priority=priority,
+                ),
+                lease_id=lease_id,
+                max_allowed_tokens=max_tokens,
+            )
+        finally:
+            reset(ctx_tok)
 
     async def ReleaseLease(self, request, context):
-        if not _lease_belongs(request.lease_id, request.tenant_id):
-            logger.warning(
-                "grpc release rejected: lease=%s not owned by tenant=%s",
-                request.lease_id,
-                request.tenant_id,
-            )
-            return pb.ReleaseLeaseResponse(success=False)
-        active = await self._concurrency.release(
-            request.tenant_id, request.lease_id, request.reason or "released"
-        )
-        ok = active >= 0
-        if ok:
-            await self._store.log_lease(
-                request.tenant_id, request.lease_id, "release", request.reason or "released"
-            )
-            mc.set_active_concurrency(request.tenant_id, active)
-        logger.info(
-            "grpc release lease=%s tenant=%s reason=%s ok=%s",
-            request.lease_id,
-            request.tenant_id,
-            request.reason,
-            ok,
-        )
-        return pb.ReleaseLeaseResponse(success=ok)
-
-    async def ReportUsage(self, request, context):
-        if request.lease_id and not _lease_belongs(request.lease_id, request.tenant_id):
-            logger.warning(
-                "grpc usage rejected: lease=%s not owned by tenant=%s",
-                request.lease_id,
-                request.tenant_id,
-            )
-            return pb.ReportUsageResponse(success=False, remaining_daily_quota=0)
-        total_tokens = int(request.prompt_tokens) + int(request.completion_tokens)
-        ledger_ok = True
-        if total_tokens > 0:
-            try:
-                await self._store.record_usage(
+        ctx_tok = _enter_tenant(request.tenant_id or "")
+        try:
+            if not _lease_belongs(request.lease_id, request.tenant_id):
+                logger.warning(
+                    "grpc release rejected: lease=%s not owned by tenant=%s",
+                    request.lease_id,
                     request.tenant_id,
-                    metric="tokens",
-                    value=total_tokens,
-                    source="grpc",
-                    model=request.model_name or None,
-                    user_id=None,
                 )
-            except Exception as exc:
-                logger.error("grpc ReportUsage ledger write failed: %s", exc)
-                ledger_ok = False
-        if self._cache is not None and total_tokens > 0 and ledger_ok:
-            await self._cache.record_token_usage(request.tenant_id, total_tokens)
-        if request.lease_id and request.release_after:
+                return pb.ReleaseLeaseResponse(success=False)
             active = await self._concurrency.release(
-                request.tenant_id, request.lease_id, "usage_reported"
+                request.tenant_id, request.lease_id, request.reason or "released"
             )
-            if active >= 0:
+            ok = active >= 0
+            if ok:
                 await self._store.log_lease(
-                    request.tenant_id, request.lease_id, "release", "usage_reported"
+                    request.tenant_id, request.lease_id, "release", request.reason or "released"
                 )
                 mc.set_active_concurrency(request.tenant_id, active)
-        daily_limit = _daily_limit_for(await self._store.get_quota(request.tenant_id))
-        remaining = (
-            await self._cache.remaining_quota(request.tenant_id, daily_limit)
-            if self._cache is not None
-            else daily_limit
-        )
-        if total_tokens > 0:
-            mc.record_tokens(
+            logger.info(
+                "grpc release lease=%s tenant=%s reason=%s ok=%s",
+                request.lease_id,
                 request.tenant_id,
-                _sanitize_label(request.model_name, "unknown"),
-                total_tokens,
-                "grpc",
+                request.reason,
+                ok,
             )
-        mc.set_quota_remaining(request.tenant_id, remaining)
-        logger.info(
-            "grpc usage tenant=%s model=%s tokens=%s remaining=%s ledger_ok=%s",
-            request.tenant_id,
-            request.model_name,
-            total_tokens,
-            remaining,
-            ledger_ok,
-        )
-        return pb.ReportUsageResponse(success=ledger_ok, remaining_daily_quota=remaining)
+            return pb.ReleaseLeaseResponse(success=ok)
+        finally:
+            reset(ctx_tok)
+
+    async def ReportUsage(self, request, context):
+        ctx_tok = _enter_tenant(request.tenant_id or "")
+        try:
+            if request.lease_id and not _lease_belongs(request.lease_id, request.tenant_id):
+                logger.warning(
+                    "grpc usage rejected: lease=%s not owned by tenant=%s",
+                    request.lease_id,
+                    request.tenant_id,
+                )
+                return pb.ReportUsageResponse(success=False, remaining_daily_quota=0)
+            total_tokens = int(request.prompt_tokens) + int(request.completion_tokens)
+            ledger_ok = True
+            if total_tokens > 0:
+                try:
+                    await self._store.record_usage(
+                        request.tenant_id,
+                        metric="tokens",
+                        value=total_tokens,
+                        source="grpc",
+                        model=request.model_name or None,
+                        user_id=None,
+                    )
+                except Exception as exc:
+                    logger.error("grpc ReportUsage ledger write failed: %s", exc)
+                    ledger_ok = False
+            if self._cache is not None and total_tokens > 0 and ledger_ok:
+                await self._cache.record_token_usage(request.tenant_id, total_tokens)
+            if request.lease_id and request.release_after:
+                active = await self._concurrency.release(
+                    request.tenant_id, request.lease_id, "usage_reported"
+                )
+                if active >= 0:
+                    await self._store.log_lease(
+                        request.tenant_id, request.lease_id, "release", "usage_reported"
+                    )
+                    mc.set_active_concurrency(request.tenant_id, active)
+            daily_limit = _daily_limit_for(await self._store.get_quota(request.tenant_id))
+            remaining = (
+                await self._cache.remaining_quota(request.tenant_id, daily_limit)
+                if self._cache is not None
+                else daily_limit
+            )
+            if total_tokens > 0:
+                mc.record_tokens(
+                    request.tenant_id,
+                    _sanitize_label(request.model_name, "unknown"),
+                    total_tokens,
+                    "grpc",
+                )
+            mc.set_quota_remaining(request.tenant_id, remaining)
+            logger.info(
+                "grpc usage tenant=%s model=%s tokens=%s remaining=%s ledger_ok=%s",
+                request.tenant_id,
+                request.model_name,
+                total_tokens,
+                remaining,
+                ledger_ok,
+            )
+            return pb.ReportUsageResponse(success=ledger_ok, remaining_daily_quota=remaining)
+        finally:
+            reset(ctx_tok)

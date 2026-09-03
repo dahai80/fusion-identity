@@ -91,6 +91,14 @@ async def require_service_token(
     except JwtError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     if not hmac.compare_digest(token, settings.service_token):
+        # D3: rotation dual-window — accept the previous service token during the
+        # grace window so callers can be rotated off the old token without a
+        # hard cutover. Both paths are constant-time compared; a match on the
+        # prev token is logged so the operator sees who is still on the old token.
+        prev = getattr(settings, "service_token_prev", None)
+        if prev and hmac.compare_digest(token, prev):
+            logger.warning("require_service_token: accepted via PREV token (rotation grace)")
+            return
         logger.warning("require_service_token: mismatch (fail-closed)")
         raise HTTPException(status_code=401, detail="invalid service token")
 

@@ -165,6 +165,7 @@ def _build_auth_service(settings: Settings, store: Any) -> AuthService:
         refresh_ttl=settings.refresh_ttl_seconds,
         key_ring=key_ring,
         kek=settings.kek,
+        kek_prev=settings.kek_prev,
         mfa_enforce_admin=settings.mfa_enforce_admin,
     )
 
