@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fusion-identity"
-version = "0.1.1"
+version = "0.2.0rc1"
 description = "Fusion tenant-identity service — JWT issuer + tenant registry + Postgres fusion_tenant (multi-tenant PRD §3)"
 requires-python = ">=3.12"
 license = { text = "MIT" }
