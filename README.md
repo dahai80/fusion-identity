@@ -63,7 +63,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_JWT_TTL` | no | `28800` (8h) | Access token TTL, seconds. |
 | `FUSION_IDENTITY_REFRESH_TTL` | no | `604800` (7d) | Refresh token TTL, seconds. |
 | `FUSION_BOOTSTRAP_ADMIN_USER` | no | — | Bootstrap `tenant_admin` username. |
-| `FUSION_BOOTSTRAP_ADMIN_PASS` | no | — | Bootstrap `tenant_admin` password. |
+| `FUSION_BOOTSTRAP_ADMIN_PASS` | no | — | Bootstrap `tenant_admin` password. **When set, must be >= 12 chars** (fail-closed) — the first admin is the only seed for a fresh tenant table, so a weak default defeats fail-closed. Unset → bootstrap skipped on an empty tenant table (operator seeds out-of-band). |
 | `FUSION_BOOTSTRAP_TENANTS` | no | — | JSON array of extra tenants to seed at bootstrap, e.g. `[{"tenant_id":"acme","display_name":"Acme","plan":"team"}]`. |
 | `FUSION_IDENTITY_LOG_LEVEL` | no | `INFO` | Log level. |
 | `FUSION_IDENTITY_LOG_JSON` | no | `0` | Emit structured JSON logs with `tenant_id`/`user_id` from the tenant context. |
@@ -182,7 +182,7 @@ SCIM `/Users` GET supports `startIndex`, `count`, `filter` (`attr eq "val"` subs
 
 The high-throughput authorization plane for inference gateways. Enabled when `FUSION_IDENTITY_GRPC_PORT>0` and `FUSION_IDENTITY_REDIS_URL` is set. Serves `fusion.identity.v1.IdentityService` on `127.0.0.1:<port>` with a gRPC health check (`grpc.health.v1`).
 
-Proto: [`fusion_identity/grpc/identity.proto`](fusion_identity/grpc/identity.proto).
+Proto: [`fusion_identity/grpc/identity.proto`](fusion_identity/grpc/identity.proto). Regenerate the Python stubs after editing the proto with [`scripts/gen_proto.sh`](scripts/gen_proto.sh) (requires `grpcio-tools` in the venv; idempotent — it also patches the relative import in `identity_pb2_grpc.py` to the package-qualified form).
 
 | RPC | Notes |
 |---|---|
@@ -241,12 +241,30 @@ Postgres DB `fusion_tenant`. Schema in [`deploy/sql/schema.sql`](deploy/sql/sche
 
 An `InMemoryStore` ships for tests and bootstrap; `build_app()` uses it when `FUSION_IDENTITY_USE_PGSTORE` is unset. Production sets that env and injects a `PgStore`, which runs idempotent migrations from [`migrations/`](migrations/) on startup (`ensure_schema`).
 
+### Row-Level Security — strong isolation layer (PRD red-line #3)
+
+Migration `0007_rls_strong_isolation.sql` is the **strong layer** of data isolation, defense-in-depth under the app-layer guard (`require_tenant_admin_of`). It enables + forces RLS on the 12 tenant-scoped tables (`tenants`, `tenant_members`, `api_keys`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `identity_providers`, `lease_log`). Each policy is gated on the `app.current_tenant` GUC: a row is visible only when `tenant_id = current_setting('app.current_tenant')` or the GUC is the `_system` sentinel (the platform/admin scope that spans tenants — needed for login, refresh, api-key-by-hash, the admin plane, and stats). Platform tables (`users`, `roles`, `user_mfa`, `migration_orphans`) are intentionally not under RLS; they are shared across tenants by PRD design and governed by the app layer.
+
+The migration also creates a dedicated non-superuser role `fusion_identity_app` (default password `change-me-operator-rotates` — **rotate before production**) and grants it least-privilege DML. **Superusers and `BYPASSRLS` roles bypass RLS by Postgres rule**, so the operator's own admin account does not enforce it — the service must connect as `fusion_identity_app` in production for RLS to bind. `ALTER DATABASE fusion_tenant SET app.current_tenant = '_system'` makes every session default to the platform scope, so the existing single-connection-pool service keeps working unchanged.
+
+The database default keeps the service functional today; **per-request tenant GUC activation** (narrowing `app.current_tenant` to the verified token's `tid` inside a request-scoped transaction so RLS becomes the primary fence) is a tracked follow-up. It requires `PgStore` to hold one connection across a request instead of acquiring per call. Until then `require_tenant_admin_of` remains the primary cross-tenant enforcement point and RLS is the backstop that fails closed if a query ever drops its `WHERE tenant_id` filter while running as the low-priv role. RLS is verified by `tests/test_rls_isolation.py` (4 cases, integration).
+
 ## Test
 
 ```bash
-pytest tests/ -v          # 115 cases, offline (InMemoryStore + fakeredis)
-pytest tests/ -m integration -v   # needs live Postgres fusion_tenant
+pytest tests/ -v          # 219 cases, offline (InMemoryStore + fakeredis)
+pytest tests/ -m integration -v   # 15 cases: PgStore lifecycle + Redis Lua real-run + RLS isolation
 ruff check . && ruff format --check .
+```
+
+Integration tests (`@pytest.mark.integration`) need a live `fusion_tenant` Postgres (apply `deploy/sql/schema.sql`) and a live Redis:
+
+```bash
+export FUSION_IDENTITY_DATABASE_URL="postgresql://<user>@127.0.0.1:5432/fusion_tenant"
+export FUSION_IDENTITY_REDIS_URL="redis://127.0.0.1:6379/0"
+# RLS isolation tests connect as the low-priv role created by migration 0007:
+export FUSION_IDENTITY_APP_ROLE_URL="postgresql://fusion_identity_app:<rotated-password>@127.0.0.1:5432/fusion_tenant"
+pytest tests/ -m integration -v   # PgStore lifecycle + Redis Lua real-run + RLS isolation
 ```
 
 ## Deploy

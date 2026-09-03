@@ -96,6 +96,32 @@ def test_load_settings_bad_jwt_algorithm_rejected():
         _clear_env(_CONFIG_KEYS)
 
 
+def test_load_settings_weak_bootstrap_pass_rejected():
+    # C1: a bootstrap admin password shorter than the minimum must fail-closed.
+    # The first admin is the only seed for a fresh tenant table; a weak default
+    # defeats fail-closed before any app-layer guard runs.
+    env = dict(_BASE_ENV)
+    env["FUSION_BOOTSTRAP_ADMIN_PASS"] = "adminpass"
+    _set_env(env)
+    try:
+        with pytest.raises(ConfigError):
+            load_settings()
+    finally:
+        _clear_env(_CONFIG_KEYS + ("FUSION_BOOTSTRAP_ADMIN_PASS",))
+
+
+def test_load_settings_strong_bootstrap_pass_accepted():
+    # C1: a sufficiently long bootstrap password loads successfully.
+    env = dict(_BASE_ENV)
+    env["FUSION_BOOTSTRAP_ADMIN_PASS"] = "strong-rotate-me-12chars"
+    _set_env(env)
+    try:
+        s = load_settings()
+        assert s.bootstrap_admin_pass == "strong-rotate-me-12chars"
+    finally:
+        _clear_env(_CONFIG_KEYS + ("FUSION_BOOTSTRAP_ADMIN_PASS",))
+
+
 def test_load_settings_non_int_port_rejected():
     # M8: a non-integer int env must raise ConfigError (not bare ValueError).
     env = dict(_BASE_ENV)

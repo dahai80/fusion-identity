@@ -127,6 +127,23 @@ def load_settings() -> Settings:
             "config: FUSION_IDENTITY_KEK equals JWT signing key — key isolation required"
         )
         raise ConfigError("FUSION_IDENTITY_KEK must differ from the JWT signing key")
+    bootstrap_admin_pass = os.environ.get("FUSION_BOOTSTRAP_ADMIN_PASS") or None
+    bootstrap_admin_user = os.environ.get("FUSION_BOOTSTRAP_ADMIN_USER") or None
+    # C1: reject weak bootstrap admin passwords — fail-closed. The first admin
+    # is the only seed for a fresh tenant table; a brute-forceable default like
+    # "adminpass" defeats fail-closed before any app-layer guard runs. Require
+    # >= 12 chars when set. Allow unset only because an empty tenant table with
+    # no creds skips bootstrap (operator seeds out-of-band), but when the
+    # operator DOES provide a password it must be strong.
+    _MIN_BOOTSTRAP_PASS_LEN = 12
+    if bootstrap_admin_pass is not None and len(bootstrap_admin_pass) < _MIN_BOOTSTRAP_PASS_LEN:
+        _logger_src.error(
+            "config: FUSION_BOOTSTRAP_ADMIN_PASS too short (need >=%d chars, fail-closed)",
+            _MIN_BOOTSTRAP_PASS_LEN,
+        )
+        raise ConfigError(
+            f"FUSION_BOOTSTRAP_ADMIN_PASS must be at least {_MIN_BOOTSTRAP_PASS_LEN} chars"
+        )
     return Settings(
         host=os.environ.get("FUSION_IDENTITY_HOST", DEFAULT_HOST),
         port=_int_env("FUSION_IDENTITY_PORT", DEFAULT_PORT),
@@ -139,8 +156,8 @@ def load_settings() -> Settings:
         jwt_ttl_seconds=_int_env("FUSION_IDENTITY_JWT_TTL", DEFAULT_JWT_TTL_SECONDS),
         refresh_ttl_seconds=_int_env("FUSION_IDENTITY_REFRESH_TTL", DEFAULT_REFRESH_TTL_SECONDS),
         service_token=service_token,
-        bootstrap_admin_user=os.environ.get("FUSION_BOOTSTRAP_ADMIN_USER") or None,
-        bootstrap_admin_pass=os.environ.get("FUSION_BOOTSTRAP_ADMIN_PASS") or None,
+        bootstrap_admin_user=bootstrap_admin_user,
+        bootstrap_admin_pass=bootstrap_admin_pass,
         bootstrap_tenants=os.environ.get("FUSION_BOOTSTRAP_TENANTS") or None,
         log_level=os.environ.get("FUSION_IDENTITY_LOG_LEVEL", "INFO"),
         log_json=os.environ.get("FUSION_IDENTITY_LOG_JSON", "0").strip() in ("1", "true", "yes"),
