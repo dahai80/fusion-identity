@@ -141,6 +141,11 @@ def _pkce_challenge(verifier: str) -> str:
 # /userinfo. Falls back to constructed paths when the IdP has no discovery doc
 # (legacy OAuth2 IdPs), so existing integrations do not break.
 _DISCOVERY: dict[str, dict[str, Any]] = {}
+# C2: PyJWKClient is cached per jwks_uri so the JWKS document is fetched once
+# per IdP, not on every callback (the prior per-call instantiation re-fetched
+# JWKS each time — a measurable hot-path cost). PyJWKClient itself caches the
+# parsed keys internally and refreshes on kid miss.
+_JWKS_CLIENTS: dict[str, Any] = {}
 
 
 async def _discovery(issuer_url: str) -> dict[str, str]:
@@ -202,7 +207,11 @@ async def _verify_id_token(
         raise HTTPException(status_code=502, detail="idp jwks_uri missing")
     signing_algos = ["RS256", "ES256", "RS384", "RS512"]
     try:
-        jwks_client = PyJWKClient(jwks_uri, timeout=10)
+        jwks_client = _JWKS_CLIENTS.get(jwks_uri)
+        if jwks_client is None:
+            jwks_client = PyJWKClient(jwks_uri, timeout=10)
+            _JWKS_CLIENTS[jwks_uri] = jwks_client
+            logger.info("oidc: PyJWKClient created for jwks_uri=%s", jwks_uri)
         signing_key = jwks_client.get_signing_key_from_jwt(id_token)
         claims = pyjwt.decode(
             id_token,

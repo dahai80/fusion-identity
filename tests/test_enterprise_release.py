@@ -74,9 +74,7 @@ def test_p3_2_stats_failure_surfaces_error_gauge():
     body = resp.text
     assert "fusion_identity_stats_error" in body
     # the error gauge must read 1, not 0
-    line = next(
-        raw for raw in body.splitlines() if raw.startswith("fusion_identity_stats_error")
-    )
+    line = next(raw for raw in body.splitlines() if raw.startswith("fusion_identity_stats_error"))
     assert line.split()[-1] == "1", line
 
 
@@ -166,8 +164,7 @@ def test_p1_4_redis_limiter_denies_after_threshold():
     with TestClient(app) as c:
         c.app.state.cache = fake_cache
         bodies = [
-            {"username": "admin", "password": "adminpass", "tenant_id": "default"}
-            for _ in range(2)
+            {"username": "admin", "password": "adminpass", "tenant_id": "default"} for _ in range(2)
         ]
         statuses = [c.post("/api/v1/auth/login", json=b).status_code for b in bodies]
         assert all(s == 200 for s in statuses), statuses

@@ -39,6 +39,28 @@ class PgStore:
             dsn=self._database_url, min_size=1, max_size=self._pool_max
         )
         logger.info("pgstore: pool ready")
+        # C3: RLS strong-layer guard. Superusers and BYPASSRLS roles bypass
+        # Postgres RLS, so a production connection as the operator's superuser
+        # account silently disables the strong isolation layer (red-line #3).
+        # Warn loudly by default; fail-closed when FUSION_IDENTITY_REQUIRE_RLS=1
+        # so an operator who has explicitly opted into RLS cannot accidentally
+        # deploy with a superuser DSN.
+        async with self._pool.acquire() as conn:
+            is_super = await conn.fetchval("SELECT current_setting('is_superuser')::boolean")
+        if is_super:
+            msg = (
+                "pgstore: connected as a superuser — Postgres RLS is BYPASSED. "
+                "Connect as the fusion_identity_app role (migration 0007) for the "
+                "strong isolation layer to bind."
+            )
+            if os.environ.get("FUSION_IDENTITY_REQUIRE_RLS", "0").strip() in ("1", "true", "yes"):
+                logger.error(msg)
+                await self._pool.close()
+                self._pool = None
+                raise StoreError(
+                    "FUSION_IDENTITY_REQUIRE_RLS=1 but connection is superuser (RLS bypassed)"
+                )
+            logger.warning(msg)
 
     async def close(self) -> None:
         if self._pool is not None:
