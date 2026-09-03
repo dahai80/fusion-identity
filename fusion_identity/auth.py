@@ -97,6 +97,8 @@ class StoreProto(Protocol):
 
     async def list_idps(self, tenant_id: str) -> list[dict[str, Any]]: ...
 
+    async def list_all_idps(self) -> list[dict[str, Any]]: ...
+
     async def delete_idp(self, idp_id: str) -> bool: ...
 
     async def upsert_mfa(
@@ -111,6 +113,8 @@ class StoreProto(Protocol):
     async def get_mfa(self, user_id: str, method: str) -> dict[str, Any] | None: ...
 
     async def list_mfa(self, user_id: str) -> list[dict[str, Any]]: ...
+
+    async def list_all_mfa(self) -> list[dict[str, Any]]: ...
 
     async def delete_mfa(self, user_id: str, method: str) -> bool: ...
 
@@ -127,6 +131,7 @@ class AuthService:
         refresh_ttl: int,
         key_ring: Any = None,
         kek: str | None = None,
+        kek_prev: str | None = None,
         mfa_enforce_admin: bool = False,
     ) -> None:
         self._store = store
@@ -135,6 +140,9 @@ class AuthService:
         self._ttl = ttl
         self._refresh_ttl = refresh_ttl
         self._kek = kek or signing_key
+        # D2: KEK rotation dual-window — old secrets still decrypt via kek_prev
+        # until the re-encrypt sweep converts them to the current kek.
+        self._kek_prev = kek_prev
         self._mfa_enforce_admin = mfa_enforce_admin
         if key_ring is not None:
             self._key_ring = key_ring
@@ -282,7 +290,7 @@ class AuthService:
                     expires_in=0,
                     mfa_required=True,
                 )
-            if not _verify_totp(mfa_rec, req.mfa_code, self._kek):
+            if not _verify_totp(mfa_rec, req.mfa_code, self._kek, self._kek_prev):
                 logger.warning("login: mfa code rejected user=%s", user["user_id"])
                 await self._record_failed_login(user, req.tenant_id)
                 raise _unauthorized("invalid mfa code")
@@ -639,7 +647,7 @@ class AuthService:
         rec = await self._store.get_mfa(user_id, req.method)
         if rec is None:
             raise _unauthorized("mfa not enrolled")
-        raw = decrypt_secret(rec["secret_enc"], self._kek)
+        raw = decrypt_secret(rec["secret_enc"], self._kek, self._kek_prev)
         if not pyotp.TOTP(raw).verify(req.code, valid_window=1):
             logger.warning("verify_mfa: bad code user=%s", user_id)
             raise _unauthorized("invalid mfa code")
@@ -725,12 +733,12 @@ class AuthService:
             raise
 
 
-def _verify_totp(mfa_rec: dict[str, Any], code: str, kek: str) -> bool:
+def _verify_totp(mfa_rec: dict[str, Any], code: str, kek: str, kek_prev: str | None = None) -> bool:
     import pyotp
 
     from fusion_identity.crypto import decrypt_secret
 
-    raw = decrypt_secret(mfa_rec["secret_enc"], kek)
+    raw = decrypt_secret(mfa_rec["secret_enc"], kek, kek_prev)
     return pyotp.TOTP(raw).verify(code, valid_window=1)
 
 

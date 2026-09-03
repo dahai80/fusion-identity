@@ -348,6 +348,12 @@ def _stub_jwks_client(monkeypatch, pyjwk):
             return pyjwk
 
     monkeypatch.setattr(pyjwt, "PyJWKClient", _StubClient)
+    # C2: the module-level _JWKS_CLIENTS cache would otherwise bypass the stub
+    # (a cached real client from a prior test survives across the random test
+    # order). Clear it so the stub is the only path.
+    import fusion_identity.routes.oidc as oidc_mod
+
+    monkeypatch.setattr(oidc_mod, "_JWKS_CLIENTS", {})
 
 
 async def test_p2_1_discovery_resolves_endpoints(monkeypatch):
@@ -456,3 +462,159 @@ async def test_p2_1_verify_id_token_accepts_valid(monkeypatch):
     claims = await oidc_mod._verify_id_token(id_token, disc, "fusion", "NONCE-XYZ")
     assert claims["sub"] == "usr_123"
     assert claims["email"] == "alice@example.com"
+
+
+# ---------------------------------------------------------------------------
+# D2: KEK online rotation — dual-window decrypt + re-encrypt sweep
+# ---------------------------------------------------------------------------
+
+
+_OLD_KEK = "old-kek-material-rotating-out"
+_NEW_KEK = "new-kek-material-rotating-in"
+_SVC_SYS = {"Authorization": f"Bearer {TEST_SERVICE_TOKEN}", "X-Tenant-Id": "_system"}
+
+
+def test_d2_dual_window_decrypt_old_kek_secret():
+    # A secret encrypted with the OLD kek must still decrypt after the operator
+    # rotates to the NEW kek, as long as kek_prev holds the old key. This is the
+    # grace window that keeps MFA/OIDC working mid-rotation without stop-the-world.
+    from fusion_identity.crypto import decrypt_secret, encrypt_secret
+
+    blob = encrypt_secret("super-secret", _OLD_KEK)
+    # new kek alone fails (wrong key) — but the dual window recovers via prev.
+    plain = decrypt_secret(blob, _NEW_KEK, _OLD_KEK)
+    assert plain == "super-secret"
+
+
+def test_d2_dual_window_rejects_when_no_prev():
+    # Without a prev kek, an old-key blob must fail closed (CryptoError), never
+    # silently return garbage — a rotated-away key with no grace window is a hard
+    # stop, which the operator must see as a decrypt failure.
+    from fusion_identity.crypto import CryptoError, decrypt_secret, encrypt_secret
+
+    blob = encrypt_secret("super-secret", _OLD_KEK)
+    try:
+        decrypt_secret(blob, _NEW_KEK, None)
+    except CryptoError:
+        return
+    raise AssertionError("old-key blob decrypted without a prev kek window")
+
+
+def test_d2_reencrypt_endpoint_migrates_idp_and_mfa():
+    # End-to-end: secrets encrypted under the OLD kek are re-encrypted to the NEW
+    # kek by the admin sweep. After the sweep, decryption with the NEW kek alone
+    # (no prev) succeeds — the secrets no longer depend on the retired key.
+    from fusion_identity.crypto import decrypt_secret, encrypt_secret
+
+    settings = _settings(kek=_NEW_KEK, kek_prev=_OLD_KEK)
+    store = InMemoryStore()
+    app = build_app(settings, store=store, run_bootstrap=True)
+    with TestClient(app) as c:
+        _admin_token(c)
+        # seed an IdP whose client_secret is encrypted with the OLD kek (as if
+        # created before the rotation). auto_provision so it is a full record.
+        old_blob = encrypt_secret("idp-secret-old-ke", _OLD_KEK)
+        import asyncio
+
+        asyncio.run(
+            store.create_idp(
+                "d2_idp",
+                "default",
+                type="oidc",
+                issuer_url="http://idp.d2/r",
+                client_id="cid",
+                client_secret_enc=old_blob,
+                auto_provision=True,
+            )
+        )
+        # seed an MFA factor encrypted with the OLD kek.
+        old_mfa = encrypt_secret("mfa-secret-old-ke", _OLD_KEK)
+        asyncio.run(store.upsert_mfa("usr_admin", "totp", secret_enc=old_mfa, enabled=True))
+
+        resp = c.post("/api/v1/admin/kek/reencrypt", headers=_SVC_SYS)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["idps"]["migrated"] == 1, body
+        assert body["mfa"]["migrated"] == 1, body
+
+    # After the sweep: the stored blobs decrypt with the NEW kek ALONE — the old
+    # key is no longer needed. This is the "close the window" guarantee.
+    idp = asyncio.run(store.get_idp("d2_idp"))
+    assert decrypt_secret(idp["client_secret_enc"], _NEW_KEK) == "idp-secret-old-ke"
+    mfa = asyncio.run(store.get_mfa("usr_admin", "totp"))
+    assert decrypt_secret(mfa["secret_enc"], _NEW_KEK) == "mfa-secret-old-ke"
+
+
+def test_d2_reencrypt_rejects_without_prev_window():
+    # Calling the sweep with no FUSION_IDENTITY_KEK_PREV configured is a 409 —
+    # there is no rotation window active, so a sweep is a no-op that would
+    # mislead the operator into thinking secrets were migrated.
+    settings = _settings(kek=_NEW_KEK, kek_prev=None)
+    store = InMemoryStore()
+    app = build_app(settings, store=store, run_bootstrap=True)
+    with TestClient(app) as c:
+        resp = c.post("/api/v1/admin/kek/reencrypt", headers=_SVC_SYS)
+        assert resp.status_code == 409, resp.text
+
+
+# ---------------------------------------------------------------------------
+# D3: service_token dual-window rotation — old+new accepted during grace
+# ---------------------------------------------------------------------------
+
+
+_OLD_SVC = "old-service-token-rotating-out-xxxxxxxx"
+_NEW_SVC = "new-service-token-rotating-in-yyyyyyyy"
+
+
+def test_d3_service_token_accepts_prev_during_window():
+    # During a rotation, callers still presenting the OLD service token must keep
+    # working — the dual window accepts both. A /verify call with the old token
+    # succeeds (200), not 401, so callers can be rotated off without a hard cut.
+    settings = _settings(service_token=_NEW_SVC, service_token_prev=_OLD_SVC)
+    store = InMemoryStore()
+    app = build_app(settings, store=store, run_bootstrap=True)
+    with TestClient(app) as c:
+        admin = _admin_token(c)
+        # /verify is service-token gated — exercise it with BOTH tokens.
+        for tok in (_NEW_SVC, _OLD_SVC):
+            resp = c.post(
+                "/api/v1/auth/verify",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"token": admin},
+            )
+            assert resp.status_code == 200, f"token {tok[:8]} rejected: {resp.text}"
+
+
+def test_d3_service_token_rejects_when_window_closed():
+    # Once the operator drops SERVICE_TOKEN_PREV, the old token must fail closed
+    # (401) — the retired token cannot authenticate, so rotation actually takes
+    # effect instead of silently keeping the old token alive forever.
+    settings = _settings(service_token=_NEW_SVC, service_token_prev=None)
+    store = InMemoryStore()
+    app = build_app(settings, store=store, run_bootstrap=True)
+    with TestClient(app) as c:
+        resp = c.post(
+            "/api/v1/auth/verify",
+            headers={"Authorization": f"Bearer {_OLD_SVC}"},
+            json={"token": "any"},
+        )
+        assert resp.status_code == 401, resp.text
+
+
+def test_d3_config_rejects_prev_equal_current(monkeypatch):
+    # A prev token equal to the current token is a no-op rotation — load_settings
+    # must reject it fail-closed so the operator does not think a window is active
+    # when it is not. Validated at the env-load boundary (same place as F9/F16).
+    from fusion_identity.config import ConfigError, load_settings
+
+    monkeypatch.setenv("FUSION_IDENTITY_JWT_KEY", TEST_JWT_KEY)
+    monkeypatch.setenv("FUSION_IDENTITY_SERVICE_TOKEN", _NEW_SVC)
+    monkeypatch.setenv("FUSION_IDENTITY_KEK", TEST_KEK)
+    monkeypatch.setenv("FUSION_IDENTITY_SERVICE_TOKEN_PREV", _NEW_SVC)
+    monkeypatch.delenv("FUSION_BOOTSTRAP_ADMIN_USER", raising=False)
+    monkeypatch.delenv("FUSION_BOOTSTRAP_ADMIN_PASS", raising=False)
+    try:
+        load_settings()
+    except ConfigError:
+        return
+    raise AssertionError("prev==current service token was accepted by load_settings")

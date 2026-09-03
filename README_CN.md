@@ -111,6 +111,22 @@ docker run -p 11470:11470 \
 
 生命周期由 `start.sh`（`start|stop|restart|status|log`）管理，兼容 fusion-supervisor。
 
+## 运维
+
+完整生产流程——备份/恢复、监控+告警规则、SLO 目标、密钥轮换（KEK + service token + JWT）、HA 前置条件、值班升级——见 **[`docs/ops-runbook.md`](docs/ops-runbook.md)**（英文）。
+
+### 密钥轮换（零停机，双窗口）
+
+**KEK**（加密 IdP `client_secret` + MFA `secret`）——设置 `FUSION_IDENTITY_KEK=<新>` + `FUSION_IDENTITY_KEK_PREV=<旧>`，重启，执行 `POST /api/v1/admin/kek/reencrypt`（service token，`X-Tenant-Id: _system`）扫一遍，再删除 `KEK_PREV` 重启。配置拒绝 `KEK_PREV == KEK` 或 `KEK_PREV == JWT_KEY`（密钥隔离）。
+
+**Service token**（网关 `/verify`、admin、SCIM、usage 上报）——设置 `FUSION_IDENTITY_SERVICE_TOKEN=<新>` + `FUSION_IDENTITY_SERVICE_TOKEN_PREV=<旧>`，重启（两 token 均接受，恒定时间比较），把调用方逐一从旧 token 切到新 token，再删除 `PREV` 重启。配置拒绝 `PREV == 当前` 或 `PREV` < 24 字节。
+
+两种轮换在使用旧（prev）密钥/token 时都打 warning 日志，操作员据此判断轮换是否完成。
+
+### HA 一致性
+
+服务在应用层多实例安全：两个共享同一 Postgres 的实例对租户可见性、jti 签发/吊销、哈希链审计日志、用量聚合均一致（由 `tests/test_ha_consistency.py` 验证，integration 标记）。Postgres HA（流复制 + 故障切换）与 Redis HA 是基础设施前置条件，见 runbook。
+
 ## License
 
 MIT

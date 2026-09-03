@@ -783,6 +783,11 @@ class InMemoryStore:
     async def list_idps(self, tenant_id: str) -> list[dict[str, Any]]:
         return [dict(r) for r in self._idps.values() if r["tenant_id"] == tenant_id]
 
+    async def list_all_idps(self) -> list[dict[str, Any]]:
+        # D2: cross-tenant sweep for the KEK re-encrypt rotation. Runs under the
+        # _system scope (admin, service-token gated) so every IdP secret is seen.
+        return [dict(r) for r in self._idps.values() if r.get("client_secret_enc")]
+
     async def delete_idp(self, idp_id: str) -> bool:
         if idp_id not in self._idps:
             return False
@@ -833,6 +838,11 @@ class InMemoryStore:
 
     async def list_mfa(self, user_id: str) -> list[dict[str, Any]]:
         return [dict(r) for r in self._mfa.values() if r["user_id"] == user_id]
+
+    async def list_all_mfa(self) -> list[dict[str, Any]]:
+        # D2: cross-tenant sweep for the KEK re-encrypt rotation. Returns every
+        # enrolled MFA factor with a stored secret so the sweep can re-encrypt it.
+        return [dict(r) for r in self._mfa.values() if r.get("secret_enc")]
 
     async def delete_mfa(self, user_id: str, method: str) -> bool:
         key = (user_id, method)

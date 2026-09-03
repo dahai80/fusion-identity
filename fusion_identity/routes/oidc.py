@@ -253,9 +253,12 @@ async def oidc_callback(idp_id: str, req: OidcCallbackRequest, request: Request)
         raise HTTPException(status_code=400, detail="state mismatch")
     code_verifier = st.get("code_verifier")
     nonce = st.get("nonce")
-    kek = get_settings(request).kek
+    settings = get_settings(request)
+    kek = settings.kek
     client_secret = (
-        decrypt_secret(idp["client_secret_enc"], kek) if idp["client_secret_enc"] else None
+        decrypt_secret(idp["client_secret_enc"], kek, settings.kek_prev)
+        if idp["client_secret_enc"]
+        else None
     )
     disc = await _discovery(idp["issuer_url"])
     token_url = disc["token_endpoint"]

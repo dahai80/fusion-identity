@@ -75,6 +75,8 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_GRPC_PORT` | no | `0` (disabled) | gRPC `IdentityService` port (PRD §3.1). Enabled only when `>0` AND a Redis URL is set. Default `50051` in compose. |
 | `FUSION_IDENTITY_LEASE_TTL` | no | `120` | Concurrency lease TTL in seconds (Redis-backed atomic locks). |
 | `FUSION_IDENTITY_DB_POOL_MAX` | no | `8` | Postgres connection pool max size (`PgStore` only). Size to expected HTTP+gRPC concurrency; production suggests 20-50. |
+| `FUSION_IDENTITY_KEK_PREV` | no | — | Previous KEK for online rotation dual-window. Set to the OLD key during a rotation; secrets still encrypted under it decrypt via this grace key. Must differ from `KEK` and `JWT_KEY`. Sweep with `POST /api/v1/admin/kek/reencrypt`, then drop. See [Operations](#operations). |
+| `FUSION_IDENTITY_SERVICE_TOKEN_PREV` | no | — | Previous service token for rotation dual-window. Both tokens accepted (constant-time) until callers are rotated off the old one; then drop to close the window. Must differ from the current token and be >= 24 bytes. See [Operations](#operations). |
 
 Without `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS`, bootstrap is skipped when the tenant table is empty — the operator must seed the first admin out-of-band (fail-closed).
 
@@ -303,6 +305,22 @@ python deploy/bench/bench_grpc.py --target 127.0.0.1:50051 --api-key fmu_... \
 Targets: **P99 < 2 ms** and **> 5000 QPS** for `AuthorizeAndAcquire` (lease acquire + release). Reports p50/p95/p99 + QPS and whether targets are met.
 
 Lifecycle is `start.sh` (`start|stop|restart|status|log|compose`) — fusion-supervisor compatible.
+
+## Operations
+
+Full production procedures — backup/restore, monitoring + alert rules, SLO targets, key rotation (KEK + service token + JWT), HA prerequisites, and on-call escalation — are in **[`docs/ops-runbook.md`](docs/ops-runbook.md)**.
+
+### Key rotation (zero-downtime, dual-window)
+
+**KEK** (encrypts IdP `client_secret` + MFA `secret` at rest) — set `FUSION_IDENTITY_KEK=<new>` + `FUSION_IDENTITY_KEK_PREV=<old>`, restart, sweep with `POST /api/v1/admin/kek/reencrypt` (service token, `X-Tenant-Id: _system`), then drop `KEK_PREV` and restart. Config rejects `KEK_PREV == KEK` or `KEK_PREV == JWT_KEY` (key isolation).
+
+**Service token** (gates `/verify`, admin, SCIM, usage emit) — set `FUSION_IDENTITY_SERVICE_TOKEN=<new>` + `FUSION_IDENTITY_SERVICE_TOKEN_PREV=<old>`, restart (both accepted, constant-time compared), rotate callers off the old token, then drop `PREV` and restart. Config rejects `PREV == current` or `PREV` < 24 bytes.
+
+Both rotations log a warning when the grace (prev) key/token is used, so the operator can see when rotation is complete. See the runbook for full step-by-step + rollback.
+
+### HA consistency
+
+The service is multi-instance safe at the application layer: two instances sharing one Postgres see consistent state for tenant visibility, jti issuance/revocation, the hash-chained audit log, and usage aggregation (verified by `tests/test_ha_consistency.py`, integration-marked). Postgres HA (streaming replication + failover) and Redis HA are infrastructure prerequisites — see the runbook.
 
 ## License
 

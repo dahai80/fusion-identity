@@ -175,6 +175,9 @@ def test_oidc_cold_vs_hot_callback_latency(monkeypatch):
     import fusion_identity.routes.oidc as oidc_mod
 
     monkeypatch.setattr(oidc_mod, "_DISCOVERY", {})
+    # C2: clear the per-jwks PyJWKClient cache so the stub instantiation count
+    # is deterministic (no cached client survives from a prior OIDC test).
+    monkeypatch.setattr(oidc_mod, "_JWKS_CLIENTS", {})
 
     settings = _settings()
     store = InMemoryStore()
