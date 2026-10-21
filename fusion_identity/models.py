@@ -254,3 +254,48 @@ class MfaStatusResponse(BaseModel):
     method: str
     enabled: bool
     enrolled_at: float | None = None
+
+
+class SessionIssueRequest(BaseModel):
+    sub: str = Field(default="web-shell", min_length=1, max_length=128)
+    tenant_id: str = Field(default="local", min_length=1, max_length=64)
+    role: str = Field(default="member")
+    ttl_seconds: int | None = Field(default=None, ge=60, le=86400)
+
+    @field_validator("role")
+    @classmethod
+    def _check_role(cls, v: str) -> str:
+        if v not in VALID_ROLES:
+            raise ValueError(f"role must be one of {VALID_ROLES}")
+        return v
+
+
+class SessionVerifyRequest(BaseModel):
+    token: str = Field(min_length=1)
+
+
+class DepartmentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    parent_id: str | None = Field(default=None, max_length=64)
+    tool_allowlist: list[str] = Field(default_factory=list)
+
+
+class DepartmentUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    parent_id: str | None = Field(default=None, max_length=64)
+    tool_allowlist: list[str] | None = None
+
+
+class AuditEventIn(BaseModel):
+    action: str = Field(min_length=1, max_length=128)
+    resource: str | None = Field(default=None, max_length=256)
+    user_id: str | None = Field(default=None, max_length=64)
+    severity: str = Field(default="INFO")
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("severity")
+    @classmethod
+    def _check_severity(cls, v: str) -> str:
+        if v.upper() not in ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"):
+            raise ValueError("severity must be a standard level (TRACE..FATAL)")
+        return v.upper()

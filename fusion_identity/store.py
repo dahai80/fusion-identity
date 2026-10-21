@@ -178,6 +178,7 @@ class InMemoryStore:
         self._idps: dict[str, dict[str, Any]] = {}
         self._mfa: dict[tuple[str, str], dict[str, Any]] = {}
         self._lease_log: list[dict[str, Any]] = []
+        self._departments: dict[tuple[str, str], dict[str, Any]] = {}
         # P1-2: per-tenant tail chain_hash so append_audit is O(1), not an O(n)
         # reverse scan every append (which made the whole audit append O(n²)).
         self._audit_tail_hash: dict[str, str] = {}
@@ -463,6 +464,56 @@ class InMemoryStore:
         q["updated_at"] = _now()
         return dict(q)
 
+    async def create_department(
+        self,
+        tenant_id: str,
+        name: str,
+        *,
+        parent_id: str | None = None,
+        tool_allowlist: list[str] | None = None,
+    ) -> dict[str, Any]:
+        # Issue #10: department structure + per-department tool permission
+        # profile consumed by admin consoles (e.g. fusion-cowork).
+        dept_id = "dept_" + secrets.token_hex(6)
+        rec = {
+            "dept_id": dept_id,
+            "tenant_id": tenant_id,
+            "name": name,
+            "parent_id": parent_id,
+            "tool_allowlist": list(tool_allowlist or []),
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        self._departments[(tenant_id, dept_id)] = rec
+        logger.info("create_department: %s tenant=%s", dept_id, tenant_id)
+        return dict(rec)
+
+    async def get_department(self, tenant_id: str, dept_id: str) -> dict[str, Any] | None:
+        d = self._departments.get((tenant_id, dept_id))
+        return dict(d) if d else None
+
+    async def list_departments(self, tenant_id: str) -> list[dict[str, Any]]:
+        return [dict(d) for d in self._departments.values() if d["tenant_id"] == tenant_id]
+
+    async def update_department(
+        self, tenant_id: str, dept_id: str, **fields: Any
+    ) -> dict[str, Any] | None:
+        d = self._departments.get((tenant_id, dept_id))
+        if not d:
+            return None
+        for k in ("name", "parent_id", "tool_allowlist"):
+            if k in fields and fields[k] is not None:
+                d[k] = fields[k]
+        d["updated_at"] = _now()
+        logger.info("update_department: %s tenant=%s", dept_id, tenant_id)
+        return dict(d)
+
+    async def delete_department(self, tenant_id: str, dept_id: str) -> bool:
+        removed = self._departments.pop((tenant_id, dept_id), None) is not None
+        if removed:
+            logger.info("delete_department: %s tenant=%s", dept_id, tenant_id)
+        return removed
+
     async def append_audit(
         self,
         tenant_id: str,
@@ -725,6 +776,40 @@ class InMemoryStore:
                 continue
             agg[u["metric"]] = agg.get(u["metric"], 0) + u["value"]
         return [{"metric": m, "value": v} for m, v in sorted(agg.items())]
+
+    async def usage_summary(
+        self,
+        tenant_id: str,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+    ) -> dict[str, Any]:
+        # Issue #10: aggregated usage report (totals per metric/source/model)
+        # for enterprise admin consoles.
+        totals: dict[str, int] = {}
+        by_source: dict[str, int] = {}
+        by_model: dict[str, int] = {}
+        events = 0
+        for u in self._usage:
+            if u["tenant_id"] != tenant_id:
+                continue
+            if since is not None and u["ts"] < since:
+                continue
+            if until is not None and u["ts"] > until:
+                continue
+            value = int(u.get("value", 0))
+            totals[u["metric"]] = totals.get(u["metric"], 0) + value
+            src = u.get("source") or "unknown"
+            by_source[src] = by_source.get(src, 0) + value
+            model = u.get("model") or "unspecified"
+            by_model[model] = by_model.get(model, 0) + value
+            events += 1
+        return {
+            "events": events,
+            "totals": totals,
+            "by_source": by_source,
+            "by_model": by_model,
+        }
 
     async def stats(self) -> dict[str, Any]:
         return {

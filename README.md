@@ -97,6 +97,28 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` and `X-Tenant-Id:
 | POST | `/logout` | bearer | `{refresh_token?}` — revokes access jti + the refresh token |
 | POST | `/password` | bearer | `{old_password,new_password}` — change own password (NIST 800-63B policy) |
 
+### Session tokens (`/api/v1/auth/session` — Union Web R-2)
+
+Gateway-issued browser session tokens for **single-tenant local mode** (fusion-web-shell does not carry its own auth; fusion-gateway issues + validates, the browser never talks to identity directly). Service-token gated, tenant-middleware exempt.
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/session` | service token | `{sub?="web-shell", tenant_id?="local", role?="member", ttl_seconds?(60..86400, default 43200)}` → `{access_token,jti,expires_in,role}`. The `local` tenant is auto-created (idempotent) on first use; any other tenant must already exist and be active (fail-closed). |
+| POST | `/session/verify` | service token | `{token}` → `{valid,sub,tid,tenant,role,scope,iat,exp,jti,type}` or 401. Validates signature, `type=session`, jti revocation, tenant status. |
+
+**Claims schema** (reserved — stable across local → multi-tenant rollout, no token format change later):
+
+| Claim | Meaning |
+|---|---|
+| `sub` | browser principal (default `web-shell`) |
+| `tid` / `tenant` | tenant id — reserved, fixed to `local` in local mode |
+| `role` | unified role (`tenant_admin`/`operator`/`member`/`viewer`) |
+| `scope` | `{resource}:{action}` list derived from the role |
+| `type` | token type — `session` (access/refresh tokens are rejected on this flow) |
+| `iat`/`nbf`/`exp`/`iss`/`aud`/`jti` | standard; `iss`+`aud` pinned to the identity deployment |
+
+A `session` token is rejected by `/verify`/`/introspect` (type mismatch) — it only validates on `/session/verify`. Revocation: `POST /api/v1/auth/revoke` with the session `jti` (tenant_admin) or `revoke_user_sessions`.
+
 ### MFA (`/api/v1/auth/mfa`)
 
 Self-service TOTP (RFC 6238) multi-factor. The TOTP secret is AES-GCM encrypted at rest under the KEK (`FUSION_IDENTITY_KEK`); only the raw secret + `otpauth://` URI are returned once at enroll time. All routes require a valid bearer token (the caller manages only their own factors, scoped by token `sub`).
@@ -130,8 +152,28 @@ Members: add-or-create (`POST .../members`, new users get `must_change_password=
 |---|---|---|---|
 | POST | `/usage` | service token | emit a usage metric `{metric,value,source,model?,user_id?}` (downstream services report rpm/tpm/tokens) |
 | GET | `/usage` | tenant_admin | aggregated usage (`since`/`until`/`metric` query params) |
+| GET | `/usage/summary` | tenant_admin | aggregated usage report (`?since=&until=`) → `{events,totals{metric},by_source,by_model}` — enterprise admin contract (issue #10) |
 | GET | `/config` | tenant_admin | non-sensitive tenant config (display_name, plan, status, quota) |
 | GET | `/export` | tenant_admin | full tenant export (members without secrets, api-keys, quota, usage); audited as `tenant.export`. `?format=csv` returns a CSV attachment (default `json`) |
+
+### Departments — under `/api/v1/tenants/{tenant_id}/departments` (issue #10)
+
+Enterprise admin contract: department structure + per-department tool permission profiles, consumed by admin consoles (e.g. fusion-cowork). All routes `tenant_admin` + path guard.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `` | `{name,parent_id?,tool_allowlist:[...]}` → department record (201) |
+| GET | `` | list tenant departments |
+| GET | `/{dept_id}` | get one (404 if foreign) |
+| PATCH | `/{dept_id}` | update name/parent_id/tool_allowlist |
+| DELETE | `/{dept_id}` | remove |
+
+### Audit event ingest + OTLP export — under `/api/v1/tenants/{tenant_id}/audit/...` (issue #10)
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/events` | service token | consumers (cowork, domain apps) push approval/permission/run events `{action,resource?,user_id?,severity?,detail?}` into the hash-chained tenant audit ledger; action is namespaced `external.*` |
+| GET | `/otlp` | tenant_admin or service token | OTLP/JSON logs export (`?limit=1..1000&since=`) — point a local OTel Collector at it for SIEM ingestion, fully offline/LAN |
 
 ### JWKS (`/.well-known/jwks.json`)
 

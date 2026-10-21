@@ -14,6 +14,8 @@ from fusion_identity.models import (
     PasswordChangeRequest,
     RefreshRequest,
     RevokeRequest,
+    SessionIssueRequest,
+    SessionVerifyRequest,
     TokenResponse,
     VerifyRequest,
     VerifyResponse,
@@ -104,6 +106,47 @@ async def change_password(
     return await svc.change_password(
         claims["sub"], req.old_password, req.new_password, tenant_id=claims["tid"]
     )
+
+
+@router.post("/session", dependencies=[Depends(require_service_token)])
+async def issue_session(
+    req: SessionIssueRequest, svc: AuthService = Depends(get_auth_service)
+) -> dict:
+    # Issue #9 (Union Web R-2): gateway-issued browser session token.
+    try:
+        return await svc.issue_session_token(
+            req.sub,
+            tenant_id=req.tenant_id,
+            role=req.role,
+            ttl_seconds=req.ttl_seconds,
+        )
+    except HTTPException as exc:
+        logger.info("issue_session: refused: %s", exc.detail)
+        raise
+
+
+@router.post("/session/verify", dependencies=[Depends(require_service_token)])
+async def verify_session(
+    req: SessionVerifyRequest, svc: AuthService = Depends(get_auth_service)
+) -> dict:
+    # Gateway-side validation of a shell session token (issue #9).
+    try:
+        claims = await svc.verify_session_token(req.token)
+    except JwtError as exc:
+        logger.info("verify_session: rejected token: %s", exc)
+        raise HTTPException(status_code=401, detail="invalid session token") from exc
+    return {
+        "valid": True,
+        "sub": claims["sub"],
+        "tid": claims["tid"],
+        "tenant": claims.get("tenant"),
+        "role": claims["role"],
+        "scope": claims.get("scope", []),
+        "iat": claims.get("iat"),
+        "exp": claims.get("exp"),
+        "jti": claims["jti"],
+        "type": claims.get("type"),
+    }
 
 
 @router.post(

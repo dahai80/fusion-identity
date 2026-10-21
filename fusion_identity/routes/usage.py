@@ -70,6 +70,29 @@ async def get_usage(
     return await store.aggregate_usage(tenant_id, since=since, until=until, metric=metric)
 
 
+@router.get("/usage/summary")
+async def get_usage_summary(
+    tenant_id: str,
+    store: InMemoryStore = Depends(get_store),
+    since: float | None = Query(default=None),
+    until: float | None = Query(default=None),
+    _claims: dict = Depends(_admin),
+) -> dict[str, Any]:
+    # Issue #10: aggregated usage report (totals per metric/source/model) for
+    # enterprise admin consoles.
+    t = await store.get_tenant(tenant_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="tenant not found")
+    summary = await store.usage_summary(tenant_id, since=since, until=until)
+    logger.info(
+        "get_usage_summary: tenant=%s events=%d by=%s",
+        tenant_id,
+        summary.get("events", 0),
+        _claims.get("sub"),
+    )
+    return {"tenant_id": tenant_id, "window": {"since": since, "until": until}, **summary}
+
+
 @router.get("/config")
 async def get_tenant_config(
     tenant_id: str,

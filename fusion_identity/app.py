@@ -120,6 +120,8 @@ TENANT_EXEMPT = frozenset(
         "/api/v1/auth/verify",
         "/api/v1/auth/refresh",
         "/api/v1/auth/introspect",
+        "/api/v1/auth/session",
+        "/api/v1/auth/session/verify",
         "/scim/v2/Users",
     }
 )
@@ -170,9 +172,21 @@ def _build_auth_service(settings: Settings, store: Any) -> AuthService:
     )
 
 
+def _package_version() -> str:
+    # Live-read the installed distribution version instead of a hardcoded
+    # literal that drifts from pyproject.toml on every release.
+    try:
+        from importlib.metadata import version
+
+        return version("fusion-identity")
+    except Exception:
+        logger.warning("build_app: fusion-identity metadata unavailable, fallback 0.0.0")
+        return "0.0.0"
+
+
 def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bool = True) -> Any:
     setup_logging("fusion_identity", level=settings.log_level, json_format=settings.log_json)
-    app = create_app("fusion-identity", version="0.1.0")
+    app = create_app("fusion-identity", version=_package_version())
     app.state.settings = settings
     app.state.store = store if store is not None else _build_store(settings)
     app.state.auth_service = _build_auth_service(settings, app.state.store)
@@ -185,6 +199,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.api_keys import router as api_keys_router
     from fusion_identity.routes.audit import router as audit_router
     from fusion_identity.routes.auth import router as auth_router
+    from fusion_identity.routes.departments import router as departments_router
     from fusion_identity.routes.health import router as health_router
     from fusion_identity.routes.idps import router as idps_router
     from fusion_identity.routes.jwks import router as jwks_router
@@ -204,6 +219,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(api_keys_router)
     app.include_router(quotas_router)
     app.include_router(audit_router)
+    app.include_router(departments_router)
     app.include_router(usage_router)
     app.include_router(metrics_router)
     app.include_router(jwks_router)
