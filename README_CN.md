@@ -86,6 +86,22 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 成员 add-or-create（`POST .../members`）、list/`DELETE`。API key `POST`/`GET`/`DELETE`。配额 `GET`/`PUT`（热更新）。审计 `GET`（`limit` 1..1000，仅自查）。
 
+### 会话 token（`/api/v1/auth/session` —— Union Web R-2，issue #9）
+
+网关为本地浏览器会话签发的 session token（单租户 local 模式，fusion-web-shell 不自带鉴权，浏览器不直连 identity）。service token 鉴权：
+
+- `POST /session`：`{sub?="web-shell", tenant_id?="local", role?="member", ttl_seconds?(60..86400，默认 43200)}` → `{access_token,jti,expires_in,role}`。`local` 租户首次使用时幂等自建；其他租户必须已存在且 active（fail-closed）。
+- `POST /session/verify`：`{token}` → `{valid,sub,tid,tenant,role,scope,iat,exp,jti,type}`，校验签名/`type=session`/jti 吊销/租户状态。
+
+claims 预留（`tid`/`tenant` 固定为 `local`），后续多租户扩展无需改 token 格式。session token 不能通过 `/verify`、`/introspect` 校验（type 不匹配）。
+
+### 企业管理契约（issue #10）
+
+- **部门**：`/api/v1/tenants/{tid}/departments` CRUD（`{name,parent_id?,tool_allowlist:[...]}`），tenant_admin + 路径守卫，供管理台消费。
+- **用量汇总**：`GET .../usage/summary` → `{events,totals{metric},by_source,by_model}`。
+- **审计事件接入**：`POST .../audit/events`（service token），下游推送审批/权限/运行事件，动作名归一为 `external.*`，写入哈希链审计账本。
+- **OTLP 导出**：`GET .../audit/otlp`（tenant_admin 或 service token），OTLP/JSON logs 格式，供本地 OTel Collector 接 SIEM，完全离线/内网可用。
+
 ## 数据库
 
 Postgres 库 `fusion_tenant`。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL）。9 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`audit_log`、`migration_orphans`。首次运行前用 `psql` 应用；`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。

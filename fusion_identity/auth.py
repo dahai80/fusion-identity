@@ -367,6 +367,81 @@ class AuthService:
             tenant_status=tenant_status or "active",
         )
 
+    SESSION_DEFAULT_TTL = 43200
+    SESSION_MAX_TTL = 86400
+
+    async def issue_session_token(
+        self,
+        sub: str,
+        *,
+        tenant_id: str = "local",
+        role: str = "member",
+        ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        # Issue #9 (Union Web R-2): gateway-issued browser session token for
+        # single-tenant local mode. The "local" tenant is created idempotently
+        # on first use; any other tenant must already exist and be active.
+        ttl = ttl_seconds or self.SESSION_DEFAULT_TTL
+        ttl = max(60, min(int(ttl), self.SESSION_MAX_TTL))
+        tenant_status = await self._store.get_tenant_status(tenant_id)
+        if tenant_status is None:
+            if tenant_id != "local":
+                logger.warning("issue_session_token: tenant=%s not found (fail-closed)", tenant_id)
+                raise _unauthorized("tenant not found")
+            with contextlib.suppress(StoreConflict):
+                await self._store.create_tenant(tenant_id, "Local (single-tenant mode)")
+                logger.info("issue_session_token: auto-created local tenant")
+            tenant_status = await self._store.get_tenant_status(tenant_id)
+        if tenant_status not in ("active",):
+            logger.warning(
+                "issue_session_token: tenant=%s not active (%s)", tenant_id, tenant_status
+            )
+            raise _unauthorized("tenant disabled")
+        scopes = _role_scopes(role)
+        access, jti = issue_token(
+            sub=sub,
+            tid=tenant_id,
+            role=role,
+            scopes=scopes,
+            signing_key=self._signing_key(),
+            issuer=self._issuer,
+            audience=self._audience,
+            ttl_seconds=ttl,
+            token_type="session",
+            algorithm=self._algorithm,
+            kid=self._kid,
+        )
+        await self._store.record_issued_jti(jti, tenant_id, sub)
+        await self._store.append_audit(
+            tenant_id,
+            sub,
+            jti,
+            role,
+            "auth.session_issue",
+            "session",
+            {"ttl_seconds": ttl, "issued_for": "gateway"},
+        )
+        logger.info("issue_session_token: sub=%s tid=%s ttl=%d jti=%s", sub, tenant_id, ttl, jti)
+        return {"access_token": access, "jti": jti, "expires_in": ttl, "role": role}
+
+    async def verify_session_token(self, token: str) -> dict[str, Any]:
+        # Gateway-only validation (issue #9): cryptographic verify + jti
+        # revocation + tenant status. No user/membership check — the browser
+        # principal is synthetic in local mode and may not exist in
+        # tenant_members; only trusted service callers reach this path.
+        claims = self._verify(token, token_type="session")
+        if await self._store.is_jti_revoked(claims["jti"]):
+            logger.warning("verify_session_token: revoked jti=%s", claims["jti"])
+            raise _unauthorized("revoked token")
+        tenant_status = await self._store.get_tenant_status(claims["tid"])
+        if tenant_status in (None, "disabled", "deleted"):
+            logger.warning(
+                "verify_session_token: tenant=%s not active (%s)", claims["tid"], tenant_status
+            )
+            raise _unauthorized("tenant disabled")
+        logger.debug("verify_session_token: ok sub=%s tid=%s", claims["sub"], claims["tid"])
+        return claims
+
     async def introspect(self, token: str) -> dict[str, Any]:
         from fastapi import HTTPException
 

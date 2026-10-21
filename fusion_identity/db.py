@@ -407,6 +407,77 @@ class PgStore:
         row = await self.fetchrow(sql, *params)
         return _decode_quota(row) if row else None
 
+    async def create_department(
+        self,
+        tenant_id: str,
+        name: str,
+        *,
+        parent_id: str | None = None,
+        tool_allowlist: list[str] | None = None,
+    ) -> dict[str, Any]:
+        row = await self.fetchrow(
+            """INSERT INTO departments (tenant_id, name, parent_id, tool_allowlist)
+               VALUES ($1, $2, $3, $4::jsonb)
+               RETURNING dept_id::text, tenant_id, name, parent_id,
+                         tool_allowlist, created_at, updated_at""",
+            tenant_id,
+            name,
+            parent_id,
+            json.dumps(list(tool_allowlist or [])),
+        )
+        logger.info("create_department: %s tenant=%s", row["dept_id"], tenant_id)
+        return dict(row)
+
+    async def get_department(self, tenant_id: str, dept_id: str) -> dict[str, Any] | None:
+        return await self.fetchrow(
+            """SELECT dept_id::text, tenant_id, name, parent_id,
+                      tool_allowlist, created_at, updated_at
+               FROM departments WHERE tenant_id=$1 AND dept_id=$2""",
+            tenant_id,
+            dept_id,
+        )
+
+    async def list_departments(self, tenant_id: str) -> list[dict[str, Any]]:
+        return await self.fetch(
+            """SELECT dept_id::text, tenant_id, name, parent_id,
+                      tool_allowlist, created_at, updated_at
+               FROM departments WHERE tenant_id=$1 ORDER BY created_at""",
+            tenant_id,
+        )
+
+    async def update_department(
+        self, tenant_id: str, dept_id: str, **fields: Any
+    ) -> dict[str, Any] | None:
+        col_map = {"name": "name", "parent_id": "parent_id", "tool_allowlist": "tool_allowlist"}
+        sets = ["updated_at=now()"]
+        params: list[Any] = [tenant_id, dept_id]
+        idx = 3
+        for k, col in col_map.items():
+            if k in fields and fields[k] is not None:
+                if k == "tool_allowlist":
+                    sets.append(f"{col}=${idx}::jsonb")
+                    params.append(json.dumps(fields[k]))
+                else:
+                    sets.append(f"{col}=${idx}")
+                    params.append(fields[k])
+                idx += 1
+        sql = (
+            f"UPDATE departments SET {', '.join(sets)} "
+            f"WHERE tenant_id=$1 AND dept_id=$2::uuid "
+            f"RETURNING dept_id::text, tenant_id, name, parent_id, "
+            f"tool_allowlist, created_at, updated_at"
+        )
+        row = await self.fetchrow(sql, *params)
+        return dict(row) if row else None
+
+    async def delete_department(self, tenant_id: str, dept_id: str) -> bool:
+        n = await self.fetchval(
+            "DELETE FROM departments WHERE tenant_id=$1 AND dept_id=$2::uuid", tenant_id, dept_id
+        )
+        if n:
+            logger.info("delete_department: %s tenant=%s", dept_id, tenant_id)
+        return bool(n)
+
     async def append_audit(
         self,
         tenant_id: str,
@@ -674,6 +745,51 @@ class PgStore:
             "ORDER BY bucket_hour ASC",
             *params,
         )
+
+    async def usage_summary(
+        self,
+        tenant_id: str,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+    ) -> dict[str, Any]:
+        # Issue #10: aggregated usage report (totals per metric/source/model).
+        conds = ["tenant_id=$1"]
+        params: list[Any] = [tenant_id]
+        idx = 2
+        if since is not None:
+            conds.append(f"bucket_hour >= to_timestamp(${idx})")
+            params.append(since)
+            idx += 1
+        if until is not None:
+            conds.append(f"bucket_hour <= to_timestamp(${idx})")
+            params.append(until)
+            idx += 1
+        rows = await self.fetch(
+            f"SELECT metric, source, model, sum(value) AS value, "
+            f"sum(CASE WHEN bucket_hour IS NOT NULL THEN 1 ELSE 0 END) AS buckets "
+            f"FROM usage_ledger WHERE {' AND '.join(conds)} "
+            "GROUP BY metric, source, model",
+            *params,
+        )
+        totals: dict[str, int] = {}
+        by_source: dict[str, int] = {}
+        by_model: dict[str, int] = {}
+        events = 0
+        for r in rows:
+            value = int(r.get("value", 0))
+            totals[r["metric"]] = totals.get(r["metric"], 0) + value
+            src = r.get("source") or "unknown"
+            by_source[src] = by_source.get(src, 0) + value
+            model = r.get("model") or "unspecified"
+            by_model[model] = by_model.get(model, 0) + value
+            events += int(r.get("buckets", 0))
+        return {
+            "events": events,
+            "totals": totals,
+            "by_source": by_source,
+            "by_model": by_model,
+        }
 
     async def stats(self) -> dict[str, Any]:
         counts = {
