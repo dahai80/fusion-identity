@@ -208,6 +208,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.mfa import router as mfa_router
     from fusion_identity.routes.oidc import router as oidc_router
     from fusion_identity.routes.quotas import router as quotas_router
+    from fusion_identity.routes.rbac import router as rbac_router
     from fusion_identity.routes.scim import router as scim_router
     from fusion_identity.routes.tenants import router as tenants_router
     from fusion_identity.routes.usage import router as usage_router
@@ -220,6 +221,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(quotas_router)
     app.include_router(audit_router)
     app.include_router(departments_router)
+    app.include_router(rbac_router)
     app.include_router(usage_router)
     app.include_router(metrics_router)
     app.include_router(jwks_router)

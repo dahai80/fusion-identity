@@ -46,6 +46,8 @@ class VerifyResponse(BaseModel):
     quota: dict[str, Any]
     tenant_status: str = "active"
     revoked: bool = False
+    write_classes: list[str] = Field(default_factory=list)
+    allowed_menus: list[str] = Field(default_factory=list)
 
 
 class RefreshRequest(BaseModel):
@@ -99,29 +101,18 @@ class TenantUpdate(BaseModel):
 
 
 class MemberAdd(BaseModel):
+    # Issue #12: role validation moved to the store layer — a role id may be
+    # built-in or a per-tenant custom role, so static enum checks fail-open
+    # nothing; the store is the single fail-closed authority.
     user_id: str = Field(min_length=1)
-    role: str = Field(min_length=1)
-
-    @field_validator("role")
-    @classmethod
-    def _check_role(cls, v: str) -> str:
-        if v not in VALID_ROLES:
-            raise ValueError(f"role must be one of {VALID_ROLES}")
-        return v
+    role: str = Field(min_length=1, max_length=64)
 
 
 class MemberCreate(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
     email: str | None = None
-    role: str = Field(min_length=1)
-
-    @field_validator("role")
-    @classmethod
-    def _check_role(cls, v: str) -> str:
-        if v not in VALID_ROLES:
-            raise ValueError(f"role must be one of {VALID_ROLES}")
-        return v
+    role: str = Field(min_length=1, max_length=64)
 
     @field_validator("password")
     @classmethod
@@ -130,14 +121,7 @@ class MemberCreate(BaseModel):
 
 
 class MemberRoleUpdate(BaseModel):
-    role: str = Field(min_length=1)
-
-    @field_validator("role")
-    @classmethod
-    def _check_role(cls, v: str) -> str:
-        if v not in VALID_ROLES:
-            raise ValueError(f"role must be one of {VALID_ROLES}")
-        return v
+    role: str = Field(min_length=1, max_length=64)
 
 
 class MemberStatusUpdate(BaseModel):
@@ -259,15 +243,8 @@ class MfaStatusResponse(BaseModel):
 class SessionIssueRequest(BaseModel):
     sub: str = Field(default="web-shell", min_length=1, max_length=128)
     tenant_id: str = Field(default="local", min_length=1, max_length=64)
-    role: str = Field(default="member")
+    role: str = Field(default="member", min_length=1, max_length=64)
     ttl_seconds: int | None = Field(default=None, ge=60, le=86400)
-
-    @field_validator("role")
-    @classmethod
-    def _check_role(cls, v: str) -> str:
-        if v not in VALID_ROLES:
-            raise ValueError(f"role must be one of {VALID_ROLES}")
-        return v
 
 
 class SessionVerifyRequest(BaseModel):
@@ -299,3 +276,30 @@ class AuditEventIn(BaseModel):
         if v.upper() not in ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"):
             raise ValueError("severity must be a standard level (TRACE..FATAL)")
         return v.upper()
+
+
+class RoleCreate(BaseModel):
+    # Issue #12 (E5): custom role granting write classes for capability-spine
+    # mutation gating. role_id validation (pattern, built-in collision) is in
+    # the store layer.
+    role_id: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=128)
+    write_classes: list[str] = Field(default_factory=list, max_length=64)
+
+
+class RoleUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=128)
+    write_classes: list[str] | None = Field(default=None, max_length=64)
+
+
+class RoleMenusUpdate(BaseModel):
+    menus: list[str] = Field(default_factory=list, max_length=64)
+
+
+class MenusAddRequest(BaseModel):
+    menus: list[str] = Field(min_length=1, max_length=256)
+
+
+class ApprovalValidateRequest(BaseModel):
+    requester_id: str = Field(min_length=1)
+    approver_id: str = Field(min_length=1)
