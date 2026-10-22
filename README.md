@@ -222,6 +222,31 @@ SCIM `/Users` GET supports `startIndex`, `count`, `filter` (`attr eq "val"` subs
 | GET | `/Groups?tenantId=` | service token | SCIM ListResponse of role-based groups (`tenant_admin`/`operator`/`member`/`viewer`), each with its member list; supports `startIndex`/`count`/`filter` |
 | GET | `/Groups/{group_id}?tenantId=` | service token | one role-group with its members |
 
+### RBAC contract — custom roles, write classes, menu matrix (issue #12, migration E5)
+
+Generalizes the fixed four-role model into a per-tenant RBAC contract so an admin shell can host a Users & Roles GUI unchanged. Built-in roles (`tenant_admin`/`operator`/`member`/`viewer`) are immutable; their write classes are derived deterministically from the permission seeds (every seeded resource with a `write` action). Custom roles are per-tenant, bounded (≤64 per tenant, ≤64 write classes each), and grant write classes that the capability-spine mutation gating intersects with.
+
+The **role ↔ menu matrix** is a runtime-editable policy: menus are declared by module manifests and registered per tenant; identity stores the matrix row per (tenant, role). Changes take effect on the next `POST /api/v1/auth/verify` call (next page load) — no frontend release needed. `POST .../roles/{role_id}/menus/reset` restores built-in defaults.
+
+The `verify` response is the enforcement surface and now carries `write_classes` + `allowed_menus` alongside `role`/`scopes`, so the shell and gateway enforce server-side — never client-only. A membership row whose role no longer resolves (deleted custom role) fails closed at verify. The **requester != approver** invariant for any approval flow is a first-class contract endpoint.
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| GET | `.../roles` | tenant_admin (path guard) | list built-in + custom roles with `write_classes` + current `menus` |
+| POST | `.../roles` | tenant_admin (path guard) | create custom role `{role_id,display_name,write_classes}`; built-in collision → 409 |
+| PATCH | `.../roles/{role_id}` | tenant_admin (path guard) | update custom role; built-in → 403 |
+| DELETE | `.../roles/{role_id}` | tenant_admin (path guard) | delete custom role; built-in → 403, still assigned to members → 409 |
+| GET | `.../roles/{role_id}/menus` | tenant_admin (path guard) | current matrix row (defaults if unset) |
+| PUT | `.../roles/{role_id}/menus` | tenant_admin (path guard) | set matrix row `{menus:[...]}`; unregistered menu → 409 |
+| POST | `.../roles/{role_id}/menus/reset` | tenant_admin (path guard) | reset to defaults |
+| GET | `.../menus` | tenant_admin (path guard) | known (registered) menu ids for the tenant |
+| POST | `.../menus` | tenant_admin (path guard) | register menu ids `{menus:[...]}` (≤256/tenant) |
+| POST | `.../approvals/validate` | tenant_admin (path guard) | `{requester_id,approver_id}` → 200 `{valid:true}`; equal → 403, non-member → 404 |
+
+Role assignment / enable / disable / password reset for users stay on the members plane (`/api/v1/tenants/{tid}/members...`); role validators now accept any resolvable role (built-in or that tenant's custom roles) with the store as the fail-closed authority. Member role guards (cannot demote/disable/remove the last `tenant_admin`, cannot change own role) are unchanged and apply to the custom-role paths too.
+
+Schema: `custom_roles`, `role_menu_matrix`, `known_menus` (migration `0009_rbac_custom_roles.sql`, RLS-isolated like all tenant tables).
+
 ## gRPC IdentityService (PRD §3.1)
 
 The high-throughput authorization plane for inference gateways. Enabled when `FUSION_IDENTITY_GRPC_PORT>0` and `FUSION_IDENTITY_REDIS_URL` is set. Serves `fusion.identity.v1.IdentityService` on `127.0.0.1:<port>` with a gRPC health check (`grpc.health.v1`).

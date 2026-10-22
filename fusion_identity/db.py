@@ -279,6 +279,9 @@ class PgStore:
         role: str,
         added_by: str | None = None,
     ) -> dict[str, Any]:
+        # Issue #12: role must be built-in or a custom role of THIS tenant.
+        if not await self.is_valid_role(tenant_id, role):
+            raise StoreConflict(f"unknown role {role}")
         try:
             return await self.fetchrow(
                 "INSERT INTO tenant_members(tenant_id, user_id, role, added_by) "
@@ -307,6 +310,9 @@ class PgStore:
         user_id: str,
         role: str,
     ) -> dict[str, Any] | None:
+        # Issue #12: role must be built-in or a custom role of THIS tenant.
+        if not await self.is_valid_role(tenant_id, role):
+            raise StoreConflict(f"unknown role {role}")
         return await self.fetchrow(
             "UPDATE tenant_members SET role=$3 WHERE tenant_id=$1 AND user_id=$2 RETURNING *",
             tenant_id,
@@ -477,6 +483,212 @@ class PgStore:
         if n:
             logger.info("delete_department: %s tenant=%s", dept_id, tenant_id)
         return bool(n)
+
+    async def is_valid_role(self, tenant_id: str, role: str) -> bool:
+        from fusion_identity.store import ROLES_SEED
+
+        if role in ROLES_SEED:
+            return True
+        return (
+            await self.fetchval(
+                "SELECT 1 FROM custom_roles WHERE tenant_id=$1 AND role_id=$2", tenant_id, role
+            )
+            is not None
+        )
+
+    async def get_role(self, tenant_id: str, role_id: str) -> dict[str, Any] | None:
+        from fusion_identity.store import ROLES_SEED, WRITE_CLASSES
+
+        if role_id in ROLES_SEED:
+            return {
+                "role_id": role_id,
+                "tenant_id": tenant_id,
+                "display_name": ROLES_SEED[role_id]["display_name"],
+                "write_classes": list(WRITE_CLASSES[role_id]),
+                "built_in": True,
+                "menus": await self.get_role_menus(tenant_id, role_id),
+            }
+        row = await self.fetchrow(
+            "SELECT role_id, tenant_id, display_name, write_classes, created_at, updated_at "
+            "FROM custom_roles WHERE tenant_id=$1 AND role_id=$2",
+            tenant_id,
+            role_id,
+        )
+        if row is None:
+            return None
+        rec = _decode_json(row, "write_classes")
+        rec["built_in"] = False
+        rec["menus"] = await self.get_role_menus(tenant_id, role_id)
+        return rec
+
+    async def list_roles(self, tenant_id: str) -> list[dict[str, Any]]:
+        from fusion_identity.store import ROLES_SEED
+
+        roles = [await self.get_role(tenant_id, r) for r in ROLES_SEED]
+        rows = await self.fetch(
+            "SELECT role_id FROM custom_roles WHERE tenant_id=$1 ORDER BY created_at", tenant_id
+        )
+        roles += [await self.get_role(tenant_id, r["role_id"]) for r in rows]
+        return roles
+
+    async def create_custom_role(
+        self,
+        tenant_id: str,
+        role_id: str,
+        display_name: str,
+        write_classes: list[str],
+    ) -> dict[str, Any]:
+        from fusion_identity.store import ROLES_SEED, _valid_id, _valid_write_classes
+
+        if not _valid_id(role_id):
+            raise StoreConflict(f"invalid role id {role_id!r}")
+        if role_id in ROLES_SEED:
+            raise StoreConflict(f"role {role_id} is built-in and immutable")
+        if not _valid_write_classes(write_classes):
+            raise StoreConflict("invalid write_classes")
+        try:
+            row = await self.fetchrow(
+                "INSERT INTO custom_roles(role_id, tenant_id, display_name, write_classes) "
+                "VALUES ($1,$2,$3,$4::jsonb) RETURNING role_id, tenant_id, display_name, "
+                "write_classes, created_at, updated_at",
+                role_id,
+                tenant_id,
+                display_name,
+                json.dumps(list(write_classes)),
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise StoreConflict(f"role {role_id} exists") from exc
+        logger.info("create_custom_role: role=%s tenant=%s", role_id, tenant_id)
+        return dict(_decode_json(row, "write_classes"), built_in=False)
+
+    async def update_custom_role(
+        self,
+        tenant_id: str,
+        role_id: str,
+        *,
+        display_name: str | None = None,
+        write_classes: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        from fusion_identity.store import ROLES_SEED, _valid_write_classes
+
+        if role_id in ROLES_SEED:
+            raise StoreConflict(f"role {role_id} is built-in and immutable")
+        sets = ["updated_at=now()"]
+        params: list[Any] = [tenant_id, role_id]
+        idx = 3
+        if display_name is not None:
+            sets.append(f"display_name=${idx}")
+            params.append(display_name)
+            idx += 1
+        if write_classes is not None:
+            if not _valid_write_classes(write_classes):
+                raise StoreConflict("invalid write_classes")
+            sets.append(f"write_classes=${idx}::jsonb")
+            params.append(json.dumps(list(write_classes)))
+            idx += 1
+        row = await self.fetchrow(
+            f"UPDATE custom_roles SET {', '.join(sets)} WHERE tenant_id=$1 AND role_id=$2 "
+            "RETURNING role_id, tenant_id, display_name, write_classes, created_at, updated_at",
+            *params,
+        )
+        return dict(_decode_json(row, "write_classes"), built_in=False) if row else None
+
+    async def delete_custom_role(self, tenant_id: str, role_id: str) -> bool:
+        from fusion_identity.store import ROLES_SEED
+
+        if role_id in ROLES_SEED:
+            raise StoreConflict(f"role {role_id} is built-in and immutable")
+        in_use = await self.count_members_by_role(tenant_id, role_id)
+        if in_use:
+            raise StoreConflict(f"role {role_id} still assigned to {in_use} member(s)")
+        n = await self.fetchval(
+            "DELETE FROM custom_roles WHERE tenant_id=$1 AND role_id=$2 RETURNING role_id",
+            tenant_id,
+            role_id,
+        )
+        if n:
+            await self.fetchval(
+                "DELETE FROM role_menu_matrix WHERE tenant_id=$1 AND role_id=$2",
+                tenant_id,
+                role_id,
+            )
+            logger.info("delete_custom_role: role=%s tenant=%s", role_id, tenant_id)
+        return n is not None
+
+    async def set_role_menus(self, tenant_id: str, role_id: str, menus: list[str]) -> list[str]:
+        from fusion_identity.store import (
+            DEFAULT_ROLE_MENUS,
+            MAX_MENUS_PER_ROLE,
+            _valid_id,
+        )
+
+        if not await self.is_valid_role(tenant_id, role_id):
+            raise StoreConflict(f"unknown role {role_id}")
+        if len(menus) > MAX_MENUS_PER_ROLE:
+            raise StoreConflict(f"menu limit {MAX_MENUS_PER_ROLE} per role")
+        known = set(await self.list_known_menus(tenant_id)) | {
+            m for defaults in DEFAULT_ROLE_MENUS.values() for m in defaults
+        }
+        for m in menus:
+            if not (isinstance(m, str) and _valid_id(m)):
+                raise StoreConflict(f"invalid menu id {m!r}")
+            if m not in known:
+                raise StoreConflict(f"menu {m} not registered for tenant")
+        await self.fetchval(
+            "INSERT INTO role_menu_matrix(tenant_id, role_id, menus) VALUES ($1,$2,$3::jsonb) "
+            "ON CONFLICT (tenant_id, role_id) DO UPDATE SET menus=$3::jsonb, updated_at=now()",
+            tenant_id,
+            role_id,
+            json.dumps(list(dict.fromkeys(menus))),
+        )
+        logger.info("set_role_menus: role=%s tenant=%s menus=%d", role_id, tenant_id, len(menus))
+        return list(dict.fromkeys(menus))
+
+    async def get_role_menus(self, tenant_id: str, role_id: str) -> list[str]:
+        from fusion_identity.store import DEFAULT_ROLE_MENUS
+
+        val = await self.fetchval(
+            "SELECT menus FROM role_menu_matrix WHERE tenant_id=$1 AND role_id=$2",
+            tenant_id,
+            role_id,
+        )
+        if val is not None:
+            return json.loads(val) if isinstance(val, str) else list(val)
+        return list(DEFAULT_ROLE_MENUS.get(role_id, []))
+
+    async def reset_role_menus(self, tenant_id: str, role_id: str) -> list[str]:
+        from fusion_identity.store import DEFAULT_ROLE_MENUS
+
+        if not await self.is_valid_role(tenant_id, role_id):
+            raise StoreConflict(f"unknown role {role_id}")
+        await self.fetchval(
+            "DELETE FROM role_menu_matrix WHERE tenant_id=$1 AND role_id=$2", tenant_id, role_id
+        )
+        logger.info("reset_role_menus: role=%s tenant=%s", role_id, tenant_id)
+        return list(DEFAULT_ROLE_MENUS.get(role_id, []))
+
+    async def add_known_menus(self, tenant_id: str, menus: list[str]) -> list[str]:
+        from fusion_identity.store import MAX_MENUS_PER_TENANT, _valid_id
+
+        if len(menus) > MAX_MENUS_PER_TENANT:
+            raise StoreConflict(f"menu limit {MAX_MENUS_PER_TENANT} per tenant")
+        for m in menus:
+            if not (isinstance(m, str) and _valid_id(m)):
+                raise StoreConflict(f"invalid menu id {m!r}")
+        for m in dict.fromkeys(menus):
+            await self.fetchval(
+                "INSERT INTO known_menus(tenant_id, menu) VALUES ($1,$2) "
+                "ON CONFLICT (tenant_id, menu) DO NOTHING",
+                tenant_id,
+                m,
+            )
+        return await self.list_known_menus(tenant_id)
+
+    async def list_known_menus(self, tenant_id: str) -> list[str]:
+        rows = await self.fetch(
+            "SELECT menu FROM known_menus WHERE tenant_id=$1 ORDER BY created_at", tenant_id
+        )
+        return [r["menu"] for r in rows]
 
     async def append_audit(
         self,
@@ -964,6 +1176,13 @@ def _decode_scopes(row: dict[str, Any]) -> dict[str, Any]:
     r = dict(row)
     if isinstance(r.get("scopes"), str):
         r["scopes"] = json.loads(r["scopes"])
+    return r
+
+
+def _decode_json(row: dict[str, Any], key: str) -> dict[str, Any]:
+    r = dict(row)
+    if isinstance(r.get(key), str):
+        r[key] = json.loads(r[key])
     return r
 
 

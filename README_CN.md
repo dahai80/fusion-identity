@@ -102,6 +102,31 @@ claims 预留（`tid`/`tenant` 固定为 `local`），后续多租户扩展无�
 - **审计事件接入**：`POST .../audit/events`（service token），下游推送审批/权限/运行事件，动作名归一为 `external.*`，写入哈希链审计账本。
 - **OTLP 导出**：`GET .../audit/otlp`（tenant_admin 或 service token），OTLP/JSON logs 格式，供本地 OTel Collector 接 SIEM，完全离线/内网可用。
 
+### RBAC 契约 — 自定义角色 + write class + 菜单矩阵（issue #12，迁移 E5）
+
+将固定四角色模型通用化为每租户 RBAC 契约，供管理台（fusion-web-shell）原样承载 Users & Roles 页面。内置角色（`tenant_admin`/`operator`/`member`/`viewer`）不可变，其 write class 由权限种子确定性推导（种子中有 `write` 动作的资源即一个 write class）。自定义角色按租户隔离（每租户 ≤64 个，每个 ≤64 个 write class），授予的 write class 与能力脊柱（capability spine）的变更门控相交。
+
+**角色 ↔ 菜单矩阵**是运行时可编辑策略：菜单由模块 manifest 声明、按租户注册，identity 只存 (tenant, role) 矩阵行。变更在下一次 `POST /api/v1/auth/verify`（下次页面加载）即生效，无需前端发版；`POST .../roles/{role_id}/menus/reset` 恢复内置默认。
+
+`verify` 响应是执行面，现同时携带 `write_classes` + `allowed_menus`（与 `role`/`scopes` 并列），shell 与网关做服务端执行——绝不仅靠前端。成员的角色无法解析（自定义角色被删）时 verify 直接 fail-closed。**审批人 ≠ 申请人**不变量成为一等契约端点。
+
+| Method | Path | Auth | 说明 |
+|---|---|---|---|
+| GET | `.../roles` | tenant_admin（路径守卫） | 列出内置 + 自定义角色（含 `write_classes` 与当前 `menus`） |
+| POST | `.../roles` | tenant_admin（路径守卫） | 创建自定义角色 `{role_id,display_name,write_classes}`；与内置冲突 → 409 |
+| PATCH | `.../roles/{role_id}` | tenant_admin（路径守卫） | 更新自定义角色；内置 → 403 |
+| DELETE | `.../roles/{role_id}` | tenant_admin（路径守卫） | 删除自定义角色；内置 → 403，仍有成员使用 → 409 |
+| GET | `.../roles/{role_id}/menus` | tenant_admin（路径守卫） | 当前矩阵行（未设置时为默认） |
+| PUT | `.../roles/{role_id}/menus` | tenant_admin（路径守卫） | 设置矩阵行 `{menus:[...]}`；未注册菜单 → 409 |
+| POST | `.../roles/{role_id}/menus/reset` | tenant_admin（路径守卫） | 重置为默认 |
+| GET | `.../menus` | tenant_admin（路径守卫） | 本租户已注册菜单 id |
+| POST | `.../menus` | tenant_admin（路径守卫） | 注册菜单 id `{menus:[...]}`（每租户 ≤256） |
+| POST | `.../approvals/validate` | tenant_admin（路径守卫） | `{requester_id,approver_id}` → 200 `{valid:true}`；相同 → 403，非成员 → 404 |
+
+用户的角色分配 / 启用 / 禁用 / 重置密码仍在 members 平面（`/api/v1/tenants/{tid}/members...`）；角色校验现在接受任何可解析角色（内置或本租户自定义），store 是唯一 fail-closed 权威。成员角色守卫（不可降级/禁用/移除最后一个 `tenant_admin`、不可改自己角色）不变，同样作用于自定义角色路径。
+
+Schema：`custom_roles`、`role_menu_matrix`、`known_menus`（迁移 `0009_rbac_custom_roles.sql`，与其他租户表一致启用 RLS）。
+
 ## 数据库
 
 Postgres 库 `fusion_tenant`。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL）。9 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`audit_log`、`migration_orphans`。首次运行前用 `psql` 应用；`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。

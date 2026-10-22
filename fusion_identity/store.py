@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 import time
 from typing import Any
@@ -55,6 +56,49 @@ DEFAULT_QUOTA = {
 LEGACY_SALT = "fusion-identity"
 LOCK_THRESHOLD = 5
 LOCK_DURATION_SECONDS = 15 * 60
+
+# Issue #12 (E5): write classes derived deterministically from the built-in
+# permission seeds — every resource with a "write" action becomes a write
+# class the capability-spine mutation gating can intersect with.
+WRITE_CLASSES = {
+    role: sorted(f"{res}:write" for res, acts in seed["permissions"].items() if "write" in acts)
+    for role, seed in ROLES_SEED.items()
+}
+
+# Issue #12 (E5): default role <-> menu matrix rows for built-in roles. Menus
+# themselves are declared by module manifests; identity only stores the matrix.
+DEFAULT_ROLE_MENUS = {
+    "tenant_admin": [
+        "dashboard",
+        "tenants",
+        "users",
+        "roles",
+        "quotas",
+        "usage",
+        "audit",
+        "settings",
+    ],
+    "operator": ["dashboard", "models", "tasks"],
+    "member": ["dashboard", "tasks"],
+    "viewer": ["dashboard", "models"],
+}
+
+# Bounds so a tenant_admin cannot balloon the RBAC policy unboundedly.
+MAX_CUSTOM_ROLES_PER_TENANT = 64
+MAX_WRITE_CLASSES_PER_ROLE = 64
+MAX_MENUS_PER_TENANT = 256
+MAX_MENUS_PER_ROLE = 64
+_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,63}$")
+
+
+def _valid_id(value: str) -> bool:
+    return bool(_ID_PATTERN.match(value))
+
+
+def _valid_write_classes(write_classes: list[str]) -> bool:
+    if len(write_classes) > MAX_WRITE_CLASSES_PER_ROLE:
+        return False
+    return all(isinstance(w, str) and _valid_id(w) for w in write_classes)
 
 
 def _gen_salt() -> str:
@@ -179,6 +223,10 @@ class InMemoryStore:
         self._mfa: dict[tuple[str, str], dict[str, Any]] = {}
         self._lease_log: list[dict[str, Any]] = []
         self._departments: dict[tuple[str, str], dict[str, Any]] = {}
+        # Issue #12 (E5): per-tenant custom roles + runtime menu matrix.
+        self._custom_roles: dict[tuple[str, str], dict[str, Any]] = {}
+        self._menu_matrix: dict[tuple[str, str], list[str]] = {}
+        self._known_menus: dict[str, list[str]] = {}
         # P1-2: per-tenant tail chain_hash so append_audit is O(1), not an O(n)
         # reverse scan every append (which made the whole audit append O(n²)).
         self._audit_tail_hash: dict[str, str] = {}
@@ -256,6 +304,11 @@ class InMemoryStore:
         for tid, _uid in list(self._members.keys()):
             if tid == tenant_id:
                 self._members.pop((tid, _uid), None)
+        for key in [k for k in self._custom_roles if k[0] == tenant_id]:
+            self._custom_roles.pop(key, None)
+        for key in [k for k in self._menu_matrix if k[0] == tenant_id]:
+            self._menu_matrix.pop(key, None)
+        self._known_menus.pop(tenant_id, None)
         for k in list(self._api_keys.values()):
             if k["tenant_id"] == tenant_id and not k["revoked_at"]:
                 k["revoked_at"] = _now()
@@ -334,7 +387,7 @@ class InMemoryStore:
     async def add_member(
         self, tenant_id: str, user_id: str, role: str, added_by: str | None = None
     ) -> dict[str, Any]:
-        if role not in ROLES_SEED:
+        if not await self.is_valid_role(tenant_id, role):
             raise StoreConflict(f"unknown role {role}")
         key = (tenant_id, user_id)
         self._members[key] = {
@@ -358,7 +411,7 @@ class InMemoryStore:
     async def update_member_role(
         self, tenant_id: str, user_id: str, role: str
     ) -> dict[str, Any] | None:
-        if role not in ROLES_SEED:
+        if not await self.is_valid_role(tenant_id, role):
             raise StoreConflict(f"unknown role {role}")
         m = self._members.get((tenant_id, user_id))
         if not m:
@@ -396,6 +449,158 @@ class InMemoryStore:
 
     async def remove_member(self, tenant_id: str, user_id: str) -> bool:
         return self._members.pop((tenant_id, user_id), None) is not None
+
+    async def is_valid_role(self, tenant_id: str, role: str) -> bool:
+        # Issue #12: a role id is valid if built-in or a custom role of THIS
+        # tenant. Cross-tenant custom role reuse is denied.
+        if role in ROLES_SEED:
+            return True
+        return (tenant_id, role) in self._custom_roles
+
+    async def get_role(self, tenant_id: str, role_id: str) -> dict[str, Any] | None:
+        if role_id in ROLES_SEED:
+            return {
+                "role_id": role_id,
+                "tenant_id": tenant_id,
+                "display_name": ROLES_SEED[role_id]["display_name"],
+                "write_classes": list(WRITE_CLASSES[role_id]),
+                "built_in": True,
+                "menus": await self.get_role_menus(tenant_id, role_id),
+            }
+        rec = self._custom_roles.get((tenant_id, role_id))
+        if rec is None:
+            return None
+        out = dict(rec)
+        out["built_in"] = False
+        out["menus"] = await self.get_role_menus(tenant_id, role_id)
+        return out
+
+    async def list_roles(self, tenant_id: str) -> list[dict[str, Any]]:
+        roles = [await self.get_role(tenant_id, r) for r in ROLES_SEED]
+        custom_ids = [rid for (tid, rid) in self._custom_roles if tid == tenant_id]
+        roles += [await self.get_role(tenant_id, rid) for rid in custom_ids]
+        return roles
+
+    async def create_custom_role(
+        self,
+        tenant_id: str,
+        role_id: str,
+        display_name: str,
+        write_classes: list[str],
+    ) -> dict[str, Any]:
+        if not _valid_id(role_id):
+            raise StoreConflict(f"invalid role id {role_id!r}")
+        if role_id in ROLES_SEED:
+            raise StoreConflict(f"role {role_id} is built-in and immutable")
+        tenant_custom = [k for k in self._custom_roles if k[0] == tenant_id]
+        if len(tenant_custom) >= MAX_CUSTOM_ROLES_PER_TENANT:
+            raise StoreConflict(f"custom role limit {MAX_CUSTOM_ROLES_PER_TENANT} reached")
+        if not _valid_write_classes(write_classes):
+            raise StoreConflict("invalid write_classes")
+        key = (tenant_id, role_id)
+        if key in self._custom_roles:
+            raise StoreConflict(f"role {role_id} exists")
+        now = _now()
+        self._custom_roles[key] = {
+            "role_id": role_id,
+            "tenant_id": tenant_id,
+            "display_name": display_name,
+            "write_classes": list(write_classes),
+            "created_at": now,
+            "updated_at": now,
+        }
+        logger.info(
+            "create_custom_role: role=%s tenant=%s wc=%d", role_id, tenant_id, len(write_classes)
+        )
+        return dict(self._custom_roles[key], built_in=False)
+
+    async def update_custom_role(
+        self,
+        tenant_id: str,
+        role_id: str,
+        *,
+        display_name: str | None = None,
+        write_classes: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        if role_id in ROLES_SEED:
+            raise StoreConflict(f"role {role_id} is built-in and immutable")
+        rec = self._custom_roles.get((tenant_id, role_id))
+        if rec is None:
+            return None
+        if display_name is not None:
+            rec["display_name"] = display_name
+        if write_classes is not None:
+            if not _valid_write_classes(write_classes):
+                raise StoreConflict("invalid write_classes")
+            rec["write_classes"] = list(write_classes)
+        rec["updated_at"] = _now()
+        return dict(rec, built_in=False)
+
+    async def delete_custom_role(self, tenant_id: str, role_id: str) -> bool:
+        if role_id in ROLES_SEED:
+            raise StoreConflict(f"role {role_id} is built-in and immutable")
+        key = (tenant_id, role_id)
+        if key not in self._custom_roles:
+            return False
+        in_use = sum(
+            1 for (tid, _), m in self._members.items() if tid == tenant_id and m["role"] == role_id
+        )
+        if in_use:
+            raise StoreConflict(f"role {role_id} still assigned to {in_use} member(s)")
+        del self._custom_roles[key]
+        self._menu_matrix.pop(key, None)
+        logger.info("delete_custom_role: role=%s tenant=%s", role_id, tenant_id)
+        return True
+
+    async def set_role_menus(self, tenant_id: str, role_id: str, menus: list[str]) -> list[str]:
+        if not await self.is_valid_role(tenant_id, role_id):
+            raise StoreConflict(f"unknown role {role_id}")
+        if len(menus) > MAX_MENUS_PER_ROLE:
+            raise StoreConflict(f"menu limit {MAX_MENUS_PER_ROLE} per role")
+        known = set(self._known_menus.get(tenant_id, [])) | {
+            m for defaults in DEFAULT_ROLE_MENUS.values() for m in defaults
+        }
+        for m in menus:
+            if not (isinstance(m, str) and _valid_id(m)):
+                raise StoreConflict(f"invalid menu id {m!r}")
+            if m not in known:
+                raise StoreConflict(f"menu {m} not registered for tenant")
+        self._menu_matrix[(tenant_id, role_id)] = list(dict.fromkeys(menus))
+        logger.info("set_role_menus: role=%s tenant=%s menus=%d", role_id, tenant_id, len(menus))
+        return list(self._menu_matrix[(tenant_id, role_id)])
+
+    async def get_role_menus(self, tenant_id: str, role_id: str) -> list[str]:
+        if (tenant_id, role_id) in self._menu_matrix:
+            return list(self._menu_matrix[(tenant_id, role_id)])
+        if role_id in DEFAULT_ROLE_MENUS:
+            return list(DEFAULT_ROLE_MENUS[role_id])
+        return []
+
+    async def reset_role_menus(self, tenant_id: str, role_id: str) -> list[str]:
+        if not await self.is_valid_role(tenant_id, role_id):
+            raise StoreConflict(f"unknown role {role_id}")
+        self._menu_matrix.pop((tenant_id, role_id), None)
+        default = list(DEFAULT_ROLE_MENUS.get(role_id, []))
+        logger.info("reset_role_menus: role=%s tenant=%s", role_id, tenant_id)
+        return default
+
+    async def add_known_menus(self, tenant_id: str, menus: list[str]) -> list[str]:
+        if len(menus) > MAX_MENUS_PER_TENANT:
+            raise StoreConflict(f"menu limit {MAX_MENUS_PER_TENANT} per tenant")
+        current = list(self._known_menus.get(tenant_id, []))
+        for m in menus:
+            if not (isinstance(m, str) and _valid_id(m)):
+                raise StoreConflict(f"invalid menu id {m!r}")
+            if m not in current:
+                current.append(m)
+        if len(current) > MAX_MENUS_PER_TENANT:
+            raise StoreConflict(f"menu limit {MAX_MENUS_PER_TENANT} per tenant")
+        self._known_menus[tenant_id] = current
+        logger.info("add_known_menus: tenant=%s total=%d", tenant_id, len(current))
+        return list(current)
+
+    async def list_known_menus(self, tenant_id: str) -> list[str]:
+        return list(self._known_menus.get(tenant_id, []))
 
     async def create_api_key(
         self, tenant_id: str, user_id: str | None, scopes: list[str]

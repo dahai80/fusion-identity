@@ -41,6 +41,9 @@ class StoreProto(Protocol):
     async def update_user(self, user_id: str, **fields: Any) -> dict[str, Any] | None: ...
     async def get_tenant_status(self, tenant_id: str) -> str | None: ...
     async def get_member_role(self, tenant_id: str, user_id: str) -> str | None: ...
+    async def is_valid_role(self, tenant_id: str, role: str) -> bool: ...
+    async def get_role(self, tenant_id: str, role_id: str) -> dict[str, Any] | None: ...
+    async def get_role_menus(self, tenant_id: str, role_id: str) -> list[str]: ...
     async def get_quota(self, tenant_id: str) -> dict[str, Any] | None: ...
     async def get_api_key_by_hash(self, key_hash: str) -> dict[str, Any] | None: ...
     async def is_jti_revoked(self, jti: str) -> bool: ...
@@ -359,12 +362,24 @@ class AuthService:
         await self._authorize(claims)
         tenant_status = await self._store.get_tenant_status(claims["tid"])
         quota = await self._store.get_quota(claims["tid"]) or {}
+        # Issue #12 (E5): the verify response is the enforcement surface —
+        # role + write classes + allowed menus so the shell and gateway enforce
+        # server-side, never client-only. A role that no longer resolves
+        # (custom role deleted while a token was in flight) fails closed.
+        role_rec = await self._store.get_role(claims["tid"], claims["role"])
+        if role_rec is None:
+            logger.warning(
+                "verify: role=%s no longer resolvable tid=%s — deny", claims["role"], claims["tid"]
+            )
+            raise _unauthorized("role no longer resolvable")
         return VerifyResponse(
             tid=claims["tid"],
             role=claims["role"],
             scopes=list(claims.get("scope", [])),
             quota=quota,
             tenant_status=tenant_status or "active",
+            write_classes=role_rec.get("write_classes", []),
+            allowed_menus=role_rec.get("menus", []),
         )
 
     SESSION_DEFAULT_TTL = 43200
@@ -397,6 +412,10 @@ class AuthService:
                 "issue_session_token: tenant=%s not active (%s)", tenant_id, tenant_status
             )
             raise _unauthorized("tenant disabled")
+        # Issue #12: role must resolve (built-in or per-tenant custom role).
+        if not await self._store.is_valid_role(tenant_id, role):
+            logger.warning("issue_session_token: invalid role=%s tid=%s", role, tenant_id)
+            raise _unauthorized("invalid role")
         scopes = _role_scopes(role)
         access, jti = issue_token(
             sub=sub,
