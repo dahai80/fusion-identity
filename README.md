@@ -77,6 +77,10 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_DB_POOL_MAX` | no | `8` | Postgres connection pool max size (`PgStore` only). Size to expected HTTP+gRPC concurrency; production suggests 20-50. |
 | `FUSION_IDENTITY_KEK_PREV` | no | — | Previous KEK for online rotation dual-window. Set to the OLD key during a rotation; secrets still encrypted under it decrypt via this grace key. Must differ from `KEK` and `JWT_KEY`. Sweep with `POST /api/v1/admin/kek/reencrypt`, then drop. See [Operations](#operations). |
 | `FUSION_IDENTITY_SERVICE_TOKEN_PREV` | no | — | Previous service token for rotation dual-window. Both tokens accepted (constant-time) until callers are rotated off the old one; then drop to close the window. Must differ from the current token and be >= 24 bytes. See [Operations](#operations). |
+| `FUSION_IDENTITY_WEBHOOK_URL` | no | — (disabled) | Outbound webhook endpoint for the lifecycle event outbox (issue #14). Requires `FUSION_IDENTITY_WEBHOOK_SECRET` — a URL without a secret refuses to start (fail-closed). Unset = pull-only (poll `GET /api/v1/admin/events`). |
+| `FUSION_IDENTITY_WEBHOOK_SECRET` | no | — | HMAC-SHA256 signing secret for webhook + post-provision hook payloads (`X-Fusion-Signature: sha256=<hex>`). |
+| `FUSION_IDENTITY_WEBHOOK_TICK` | no | `5` | Webhook worker poll interval, seconds. |
+| `FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS` | no | `5` | Delivery attempts before an event is dead-lettered (status `dead`, stays queryable in the outbox). |
 
 Without `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS`, bootstrap is skipped when the tenant table is empty — the operator must seed the first admin out-of-band (fail-closed).
 
@@ -294,6 +298,53 @@ Service-token gated cross-tenant management (operator/gateway use). Requests mus
 
 Quotas now also support `default_priority` and `allowed_modules` via `PUT /api/v1/tenants/{tenant_id}/quotas`.
 
+## Provisioning automation (issue #14, migration `0010_provisioning.sql`)
+
+One-shot tenant provisioning for SaaS control planes (CharacterVoiceAgent is the first consumer) — replaces 3+ separate admin calls with no transactional guarantee and no events.
+
+### One-shot provisioning (M-A) — `POST /api/v1/admin/tenants/provision`
+
+Service-token gated. Single call: tenant + plan-mapped quota + seed admin + API key.
+
+```json
+{
+    "tenant_id": "cva",                  // optional — auto-generated `tnt_*` when omitted
+    "display_name": "CharacterVoiceAgent",
+    "plan": "pro",                       // resolves a plan quota template (M-C)
+    "quotas": {"concurrent": 8},         // optional per-tenant overrides (beat the template)
+    "seed_admin": {"username": "cva_admin", "password": "..."},  // password omitted → generated, returned once, must_change_password=true
+    "api_key": {"scopes": ["inference"]},  // optional — raw fmu_ key returned once
+    "hook_url": "http://control-plane/register"  // optional generic post-provision hook (M-D)
+}
+```
+
+Response: `{tenant, quota, admin, api_key, hook?, idempotent_replay}`. The raw API key appears only in this response (and the signed hook payload) — never in outbox events.
+
+**Idempotency**: send an `Idempotency-Key` header — replaying the same key returns the original result with `idempotent_replay: true` and creates nothing new. The seed-admin username is pre-checked before the tenant is created, so a conflict cannot orphan a half-provisioned tenant.
+
+### Plan quota templates (M-C)
+
+`plan` maps deterministically to quota template values. Built-ins: `free`, `starter`, `standard`, `pro`, `enterprise`. Effective quota = template + per-tenant overrides. Admin-managed at runtime:
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/v1/admin/plan-templates` | list all templates |
+| GET | `/api/v1/admin/plan-templates/{plan}` | one template (404 if unknown) |
+| PUT | `/api/v1/admin/plan-templates/{plan}` | upsert `{quota: {...}}` — create or override |
+
+**Note**: the `tpm` quota field is the **daily token limit** (legacy field name, kept for compatibility — the gRPC plane enforces it as a per-day counter).
+
+### Lifecycle events (M-B) — outbox + webhook
+
+All lifecycle mutations append to a transactional event outbox (`event_outbox` table, migration 0010): `tenant.created`, `tenant.quota_changed`, `tenant.status_changed`, `apikey.created`, `apikey.revoked`.
+
+- **Pull**: `GET /api/v1/admin/events?cursor=<seq>&limit=100` (service token) — returns events plus `next_cursor` for incremental polling.
+- **Push**: set `FUSION_IDENTITY_WEBHOOK_URL` + `FUSION_IDENTITY_WEBHOOK_SECRET` and a background worker drains the outbox to the endpoint with HMAC-SHA256 signatures (`X-Fusion-Signature: sha256=<hex>` of the exact request body, plus `X-Fusion-Event` / `X-Fusion-Event-Id` headers). Failed deliveries retry each tick; after `WEBHOOK_MAX_ATTEMPTS` the event is dead-lettered (`status=dead`) and stays queryable for reprocessing.
+
+### Post-provision hook (M-D, optional)
+
+`hook_url` in the provision request: identity POSTs `{"event": "provision.completed", "data": {tenant, quota, admin, api_key}}` to the URL, signed with the same HMAC scheme. Generic — the control plane can register the tenant's key in fusion-gateway (or any downstream) straight from the payload, no polling, no gateway-specific code in identity.
+
 ## Metrics
 
 `GET /metrics` (no auth, Prometheus text format) exposes the store gauges plus labeled Prometheus counters from the gRPC plane:
@@ -306,7 +357,7 @@ Quotas now also support `default_priority` and `allowed_modules` via `PUT /api/v
 
 ## Database
 
-Postgres DB `fusion_tenant`. Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 15 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative).
+Postgres DB `fusion_tenant`. Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 23 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
 
 An `InMemoryStore` ships for tests and bootstrap; `build_app()` uses it when `FUSION_IDENTITY_USE_PGSTORE` is unset. Production sets that env and injects a `PgStore`, which runs idempotent migrations from [`migrations/`](migrations/) on startup (`ensure_schema`).
 

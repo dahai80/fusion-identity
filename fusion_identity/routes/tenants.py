@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from fusion_identity.deps import get_store, invalidate_tenant_cache, require_tenant_admin_of
+from fusion_identity.events import EVENT_TENANT_STATUS_CHANGED, emit_event
 from fusion_identity.models import TenantUpdate
 from fusion_identity.store import InMemoryStore, StoreConflict
 
@@ -60,6 +61,12 @@ async def update_tenant(
             "tenant.status_change",
             "tenant",
             {"status": fields["status"]},
+        )
+        await emit_event(
+            store,
+            EVENT_TENANT_STATUS_CHANGED,
+            tenant_id,
+            {"tenant_id": tenant_id, "status": fields["status"]},
         )
     await invalidate_tenant_cache(request, tenant_id)
     return t

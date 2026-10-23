@@ -207,6 +207,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.metrics import router as metrics_router
     from fusion_identity.routes.mfa import router as mfa_router
     from fusion_identity.routes.oidc import router as oidc_router
+    from fusion_identity.routes.provisioning import router as provisioning_router
     from fusion_identity.routes.quotas import router as quotas_router
     from fusion_identity.routes.rbac import router as rbac_router
     from fusion_identity.routes.scim import router as scim_router
@@ -230,6 +231,8 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(scim_router)
     app.include_router(mfa_router)
     app.include_router(admin_router)
+    app.include_router(provisioning_router)
+    app.state.webhook_worker = None
 
     def _verify_jwt(token: str) -> dict[str, Any] | None:
         try:
@@ -294,9 +297,30 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
                 # with F13 (redis) / F14 (store) fail-closed semantics.
                 logger.error("build_app: grpc start failed, aborting startup (%s)", exc)
                 raise
+        # Issue #14 (M-B): push plane — drain the event outbox to the signed
+        # webhook endpoint when configured; without it consumers pull via
+        # GET /api/v1/admin/events.
+        if settings.webhook_url and settings.webhook_secret:
+            from fusion_identity.events import WebhookWorker
+
+            app.state.webhook_worker = WebhookWorker(
+                app.state.store,
+                settings.webhook_url,
+                settings.webhook_secret,
+                tick_seconds=settings.webhook_tick_seconds,
+                max_attempts=settings.webhook_max_attempts,
+            )
+            app.state.webhook_worker.start()
+            logger.info("build_app: webhook worker started url=%s", settings.webhook_url)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        if app.state.webhook_worker is not None:
+            try:
+                await app.state.webhook_worker.stop()
+            except Exception as exc:
+                logger.warning("webhook worker stop: %s", exc)
+            app.state.webhook_worker = None
         if app.state.grpc_server is not None:
             try:
                 await app.state.grpc_server.stop(grace=2.0)

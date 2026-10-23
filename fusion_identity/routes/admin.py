@@ -14,6 +14,14 @@ from fusion_identity.deps import (
     invalidate_tenant_cache,
     require_service_token,
 )
+from fusion_identity.events import (
+    EVENT_APIKEY_CREATED,
+    EVENT_APIKEY_REVOKED,
+    EVENT_TENANT_CREATED,
+    EVENT_TENANT_QUOTA_CHANGED,
+    EVENT_TENANT_STATUS_CHANGED,
+    emit_event,
+)
 from fusion_identity.store import InMemoryStore, StoreConflict
 
 logger = logging.getLogger(__name__)
@@ -88,6 +96,12 @@ async def admin_create_tenant(
     if quota_fields:
         await store.put_quota(body.tenant_id, **quota_fields)
     await invalidate_tenant_cache(request, body.tenant_id)
+    await emit_event(
+        store,
+        EVENT_TENANT_CREATED,
+        body.tenant_id,
+        {"tenant_id": body.tenant_id, "plan": body.plan, "display_name": body.display_name},
+    )
     logger.info("admin_create_tenant: %s plan=%s", body.tenant_id, body.plan)
     return t
 
@@ -115,6 +129,20 @@ async def admin_update_tenant(
     if quota_fields:
         await store.put_quota(tenant_id, **quota_fields)
     await invalidate_tenant_cache(request, tenant_id)
+    if body.status is not None:
+        await emit_event(
+            store,
+            EVENT_TENANT_STATUS_CHANGED,
+            tenant_id,
+            {"tenant_id": tenant_id, "status": body.status},
+        )
+    if quota_fields:
+        await emit_event(
+            store,
+            EVENT_TENANT_QUOTA_CHANGED,
+            tenant_id,
+            {"tenant_id": tenant_id, "quota": quota_fields},
+        )
     logger.info("admin_update_tenant: %s", tenant_id)
     return t
 
@@ -142,6 +170,12 @@ async def admin_create_api_key(
         raise HTTPException(status_code=404, detail="tenant not found")
     raw, record = await store.create_api_key(tenant_id, body.user_id, scopes=body.scopes)
     logger.info("admin_create_api_key: tenant=%s user=%s", tenant_id, body.user_id)
+    await emit_event(
+        store,
+        EVENT_APIKEY_CREATED,
+        tenant_id,
+        {"tenant_id": tenant_id, "key_id": record["key_id"], "prefix": record["prefix"]},
+    )
     safe = {k: v for k, v in record.items() if k != "key_hash"}
     safe["raw_key"] = raw
     return safe
@@ -181,6 +215,12 @@ async def _revoke_tenant_api_key(
                 ),
             ) from exc
     logger.warning("admin_revoke_api_key: tenant=%s key=%s", tenant_id, key_id)
+    await emit_event(
+        store,
+        EVENT_APIKEY_REVOKED,
+        tenant_id,
+        {"tenant_id": tenant_id, "key_id": key_id},
+    )
 
 
 @router.delete("/tenants/{tenant_id}/api-keys/{key_id}")

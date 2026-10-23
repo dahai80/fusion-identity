@@ -413,6 +413,132 @@ class PgStore:
         row = await self.fetchrow(sql, *params)
         return _decode_quota(row) if row else None
 
+    # ------------------------------------------------------------------
+    # Issue #14: provisioning plane — plan templates / idempotency / outbox
+    # ------------------------------------------------------------------
+
+    async def list_plan_templates(self) -> list[dict[str, Any]]:
+        rows = await self.fetch("SELECT plan, quota, updated_at FROM plan_templates ORDER BY plan")
+        return [
+            {
+                "plan": r["plan"],
+                "quota": _decode_jsonb(r.get("quota")),
+                "updated_at": _iso(r.get("updated_at")),
+            }
+            for r in rows
+        ]
+
+    async def get_plan_template(self, plan: str) -> dict[str, Any] | None:
+        row = await self.fetchrow("SELECT quota FROM plan_templates WHERE plan=$1", plan)
+        return _decode_jsonb(row.get("quota")) if row else None
+
+    async def put_plan_template(self, plan: str, quota: dict[str, Any]) -> dict[str, Any]:
+        from fusion_identity.store import StoreConflict, _valid_id
+
+        if not _valid_id(plan):
+            raise StoreConflict(f"invalid plan id {plan!r}")
+        merged = dict(await self.get_plan_template(plan) or {})
+        if not merged:
+            from fusion_identity.store import DEFAULT_QUOTA
+
+            merged = dict(DEFAULT_QUOTA)
+        for k in (
+            "rpm",
+            "tpm",
+            "concurrent",
+            "storage_mb",
+            "allowed_models",
+            "allowed_modules",
+            "default_priority",
+        ):
+            if k in quota and quota[k] is not None:
+                merged[k] = quota[k]
+        await self.execute(
+            "INSERT INTO plan_templates(plan, quota, updated_at) VALUES ($1,$2::jsonb, now()) "
+            "ON CONFLICT (plan) DO UPDATE SET quota=excluded.quota, updated_at=now()",
+            plan,
+            json.dumps(merged),
+        )
+        logger.info("put_plan_template: plan=%s", plan)
+        return dict(merged)
+
+    async def get_idempotency(self, idem_key: str) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            "SELECT idem_key, endpoint, response, created_at FROM idempotency_keys "
+            "WHERE idem_key=$1",
+            idem_key,
+        )
+        if not row:
+            return None
+        out = dict(row)
+        out["response"] = _decode_jsonb(row.get("response"))
+        out["created_at"] = _iso(row.get("created_at"))
+        return out
+
+    async def put_idempotency(self, idem_key: str, endpoint: str, response: dict[str, Any]) -> None:
+        await self.execute(
+            "INSERT INTO idempotency_keys(idem_key, endpoint, response) VALUES ($1,$2,$3::jsonb) "
+            "ON CONFLICT (idem_key) DO NOTHING",
+            idem_key,
+            endpoint,
+            json.dumps(response),
+        )
+        logger.info("put_idempotency: key=%s endpoint=%s", idem_key, endpoint)
+
+    async def append_event(
+        self, event_type: str, tenant_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        import secrets as _s
+
+        event_id = "evt_" + _s.token_hex(8)
+        row = await self.fetchrow(
+            "INSERT INTO event_outbox(event_id, event_type, tenant_id, payload) "
+            "VALUES ($1,$2,$3,$4::jsonb) RETURNING event_id, seq, event_type, tenant_id, "
+            "payload, status, attempts, created_at, updated_at",
+            event_id,
+            event_type,
+            tenant_id,
+            json.dumps(payload),
+        )
+        logger.info("append_event: %s tenant=%s seq=%s", event_type, tenant_id, row["seq"])
+        return _decode_event(row)
+
+    async def list_events(self, cursor: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT event_id, seq, event_type, tenant_id, payload, status, attempts, "
+            "created_at, updated_at FROM event_outbox WHERE seq > $1 ORDER BY seq LIMIT $2",
+            cursor,
+            limit,
+        )
+        return [_decode_event(r) for r in rows]
+
+    async def pending_events(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT event_id, seq, event_type, tenant_id, payload, status, attempts, "
+            "created_at, updated_at FROM event_outbox WHERE status='pending' "
+            "ORDER BY seq LIMIT $1",
+            limit,
+        )
+        return [_decode_event(r) for r in rows]
+
+    async def mark_event(self, event_id: str, status: str, attempts: int | None = None) -> bool:
+        if attempts is not None:
+            val = await self.fetchval(
+                "UPDATE event_outbox SET status=$2, attempts=$3, updated_at=now() "
+                "WHERE event_id=$1 RETURNING event_id",
+                event_id,
+                status,
+                attempts,
+            )
+        else:
+            val = await self.fetchval(
+                "UPDATE event_outbox SET status=$2, updated_at=now() "
+                "WHERE event_id=$1 RETURNING event_id",
+                event_id,
+                status,
+            )
+        return val is not None
+
     async def create_department(
         self,
         tenant_id: str,
@@ -1192,6 +1318,25 @@ def _decode_quota(row: dict[str, Any]) -> dict[str, Any]:
         r["allowed_models"] = json.loads(r["allowed_models"])
     if isinstance(r.get("allowed_modules"), str):
         r["allowed_modules"] = json.loads(r["allowed_modules"])
+    return r
+
+
+def _decode_jsonb(value: Any) -> Any:
+    # asyncpg returns jsonb as str unless a codec is registered; decode both.
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _decode_event(row: dict[str, Any]) -> dict[str, Any]:
+    r = dict(row)
+    r["payload"] = _decode_jsonb(r.get("payload"))
+    r["created_at"] = _iso(r.get("created_at"))
+    r["updated_at"] = _iso(r.get("updated_at"))
     return r
 
 

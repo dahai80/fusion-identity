@@ -55,6 +55,10 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_BOOTSTRAP_ADMIN_USER` | 否 | — | 引导 `tenant_admin` 用户名。 |
 | `FUSION_BOOTSTRAP_ADMIN_PASS` | 否 | — | 引导 `tenant_admin` 密码。 |
 | `FUSION_IDENTITY_LOG_LEVEL` | 否 | `INFO` | 日志级别。 |
+| `FUSION_IDENTITY_WEBHOOK_URL` | 否 | —（关闭） | 生命周期事件 outbox 的出站 webhook 端点（issue #14）。必须同时设置 `FUSION_IDENTITY_WEBHOOK_SECRET`，否则拒绝启动（fail-closed）。不设 = 仅拉模式（轮询 `GET /api/v1/admin/events`）。 |
+| `FUSION_IDENTITY_WEBHOOK_SECRET` | 否 | — | webhook + 开通后钩子负载的 HMAC-SHA256 签名密钥（`X-Fusion-Signature: sha256=<hex>`）。 |
+| `FUSION_IDENTITY_WEBHOOK_TICK` | 否 | `5` | webhook worker 轮询间隔，秒。 |
+| `FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS` | 否 | `5` | 投递尝试次数上限，超过后事件进入死信（`status=dead`，仍在 outbox 可查）。 |
 
 未设 `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` 且租户表为空时跳过引导 —— 操作员需自行建第一个 admin（fail-closed）。
 
@@ -127,9 +131,25 @@ claims 预留（`tid`/`tenant` 固定为 `local`），后续多租户扩展无�
 
 Schema：`custom_roles`、`role_menu_matrix`、`known_menus`（迁移 `0009_rbac_custom_roles.sql`，与其他租户表一致启用 RLS）。
 
+### 租户开通自动化 — 一次性开通 + 生命周期事件（issue #14，迁移 `0010_provisioning.sql`）
+
+面向 SaaS 控制面（首个消费者 CharacterVoiceAgent）的一次性租户开通，取代过去 3+ 个无事务保证、无事件的分散 admin 调用。
+
+**一次性开通（M-A）**：`POST /api/v1/admin/tenants/provision`（service token 门控）。单次调用完成：租户 + 按套餐映射的配额 + 种子管理员 + API key。请求体 `{tenant_id?, display_name, plan, quotas?, seed_admin?{username, password?}, api_key?{scopes}, hook_url?}` —— `tenant_id` 省略则自动生成；`seed_admin.password` 省略则生成随机密码（仅返回一次，`must_change_password=true`）；原始 `fmu_` key 仅出现在响应（及签名钩子负载）中，绝不进 outbox 事件。
+
+**幂等**：带 `Idempotency-Key` 头重放同一 key 返回原始结果（`idempotent_replay: true`），不产生重复租户。种子管理员用户名在建租户前预检，冲突不会留下半开通的孤儿租户。
+
+**套餐配额模板（M-C）**：`plan` 确定性映射配额模板，内置 `free`/`starter`/`standard`/`pro`/`enterprise`；生效配额 = 模板 + 每租户覆盖。运行时管理：`GET/PUT /api/v1/admin/plan-templates[/{plan}]`。注意 `tpm` 字段是**每日 token 上限**（历史字段名，gRPC 面按日计数器执行）。
+
+**生命周期事件（M-B）**：所有生命周期变更写入事务性事件 outbox（`event_outbox` 表）：`tenant.created`、`tenant.quota_changed`、`tenant.status_changed`、`apikey.created`、`apikey.revoked`。
+- 拉模式：`GET /api/v1/admin/events?cursor=<seq>&limit=100`，返回 `next_cursor` 增量轮询。
+- 推模式：设置 `FUSION_IDENTITY_WEBHOOK_URL` + `SECRET` 后后台 worker 以 HMAC-SHA256 签名（`X-Fusion-Signature`，及 `X-Fusion-Event`/`X-Fusion-Event-Id` 头）投递；失败按 tick 重试，超过上限进入死信（可查可重放）。
+
+**开通后钩子（M-D，可选）**：请求带 `hook_url` 时，identity 向该 URL POST `{"event": "provision.completed", "data": {tenant, quota, admin, api_key}}`（同一 HMAC 签名）。控制面可直接从负载把租户 key 注册进 fusion-gateway 等下游 —— 无需轮询，identity 内无任何网关专用代码。
+
 ## 数据库
 
-Postgres 库 `fusion_tenant`。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL）。9 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`audit_log`、`migration_orphans`。首次运行前用 `psql` 应用；`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
+Postgres 库 `fusion_tenant`。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。23 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
 
 附带 `InMemoryStore` 供测试与引导；未注入 Postgres store 时 `build_app()` 用它。
 
