@@ -93,6 +93,14 @@ class Settings:
     # restarts to close the window. Same fail-closed + isolation rules as the
     # current token.
     service_token_prev: str | None = None
+    # Issue #14 (M-B): optional outbound webhook plane. When BOTH url and
+    # secret are set, a background worker drains the event outbox to the
+    # endpoint with HMAC-SHA256 signatures (retry + dead-letter). Unset =
+    # pull-only (consumers poll GET /api/v1/admin/events?cursor=).
+    webhook_url: str = ""
+    webhook_secret: str = ""
+    webhook_tick_seconds: int = 5
+    webhook_max_attempts: int = 5
 
 
 def load_settings() -> Settings:
@@ -191,6 +199,15 @@ def load_settings() -> Settings:
         raise ConfigError(
             f"FUSION_BOOTSTRAP_ADMIN_PASS must be at least {_MIN_BOOTSTRAP_PASS_LEN} chars"
         )
+    # Issue #14: a webhook URL without a secret would push tenant lifecycle
+    # data unsigned — fail-closed, the push plane requires both.
+    webhook_url = os.environ.get("FUSION_IDENTITY_WEBHOOK_URL", "").strip()
+    webhook_secret = os.environ.get("FUSION_IDENTITY_WEBHOOK_SECRET", "").strip()
+    if webhook_url and not webhook_secret:
+        _logger_src.error(
+            "config: FUSION_IDENTITY_WEBHOOK_URL set but FUSION_IDENTITY_WEBHOOK_SECRET unset"
+        )
+        raise ConfigError("FUSION_IDENTITY_WEBHOOK_SECRET is required when WEBHOOK_URL is set")
     return Settings(
         host=os.environ.get("FUSION_IDENTITY_HOST", DEFAULT_HOST),
         port=_int_env("FUSION_IDENTITY_PORT", DEFAULT_PORT),
@@ -235,4 +252,8 @@ def load_settings() -> Settings:
         jwt_keyring_path=os.environ.get("FUSION_IDENTITY_JWT_KEYRING_PATH", ""),
         db_pool_max=_int_env("FUSION_IDENTITY_DB_POOL_MAX", DEFAULT_DB_POOL_MAX),
         service_token_prev=service_token_prev,
+        webhook_url=webhook_url,
+        webhook_secret=webhook_secret,
+        webhook_tick_seconds=_int_env("FUSION_IDENTITY_WEBHOOK_TICK", 5),
+        webhook_max_attempts=_int_env("FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS", 5),
     )

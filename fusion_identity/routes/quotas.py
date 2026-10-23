@@ -10,6 +10,7 @@ from fusion_identity.deps import (
     invalidate_tenant_api_keys_cache,
     require_tenant_admin_of,
 )
+from fusion_identity.events import EVENT_TENANT_QUOTA_CHANGED, emit_event
 from fusion_identity.models import QuotaUpdate
 from fusion_identity.store import InMemoryStore
 
@@ -55,4 +56,10 @@ async def put_quota(
             status_code=500,
             detail="quota updated but cache invalidation failed — may serve stale quota",
         ) from exc
+    await emit_event(
+        store,
+        EVENT_TENANT_QUOTA_CHANGED,
+        tenant_id,
+        {"tenant_id": tenant_id, "quota": q},
+    )
     return q

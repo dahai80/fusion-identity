@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from fusion_identity.deps import get_cache, get_store, require_tenant_admin_of
+from fusion_identity.events import EVENT_APIKEY_CREATED, EVENT_APIKEY_REVOKED, emit_event
 from fusion_identity.models import ApiKeyCreate, ApiKeyResponse
 from fusion_identity.store import InMemoryStore
 
@@ -51,6 +52,12 @@ async def create_api_key(
         "api_key",
         {"key_id": rec["key_id"]},
     )
+    await emit_event(
+        store,
+        EVENT_APIKEY_CREATED,
+        tenant_id,
+        {"tenant_id": tenant_id, "key_id": rec["key_id"], "prefix": rec["prefix"]},
+    )
     return ApiKeyResponse(
         key_id=rec["key_id"],
         raw_key=raw,
@@ -95,5 +102,11 @@ async def revoke_api_key(
         "apikey.revoke",
         "api_key",
         {"key_id": key_id},
+    )
+    await emit_event(
+        store,
+        EVENT_APIKEY_REVOKED,
+        tenant_id,
+        {"tenant_id": tenant_id, "key_id": key_id},
     )
     return {"revoked": ok}

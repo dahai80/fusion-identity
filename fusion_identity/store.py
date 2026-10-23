@@ -53,6 +53,54 @@ DEFAULT_QUOTA = {
     "default_priority": 0,
 }
 
+# Issue #14 (M-C): named quota templates keyed by plan. `tpm` is the DAILY
+# token limit (legacy field name, kept for compatibility). Effective quota on
+# provisioning = template(plan) + per-tenant overrides. Admin-managed at
+# runtime via PUT /api/v1/admin/plan-templates/{plan}.
+PLAN_TEMPLATES = {
+    "free": {
+        "rpm": 10,
+        "tpm": 20000,
+        "concurrent": 2,
+        "storage_mb": 1024,
+        "allowed_models": [],
+        "allowed_modules": [],
+        "default_priority": 0,
+    },
+    "starter": {
+        "rpm": 30,
+        "tpm": 50000,
+        "concurrent": 3,
+        "storage_mb": 5120,
+        "allowed_models": [],
+        "allowed_modules": [],
+        "default_priority": 0,
+    },
+    "standard": dict(DEFAULT_QUOTA),
+    "pro": {
+        "rpm": 200,
+        "tpm": 1000000,
+        "concurrent": 16,
+        "storage_mb": 51200,
+        "allowed_models": [],
+        "allowed_modules": [],
+        "default_priority": 1,
+    },
+    "enterprise": {
+        "rpm": 1000,
+        "tpm": 10000000,
+        "concurrent": 64,
+        "storage_mb": 204800,
+        "allowed_models": [],
+        "allowed_modules": [],
+        "default_priority": 2,
+    },
+}
+
+EVENT_STATUS_PENDING = "pending"
+EVENT_STATUS_DELIVERED = "delivered"
+EVENT_STATUS_DEAD = "dead"
+
 LEGACY_SALT = "fusion-identity"
 LOCK_THRESHOLD = 5
 LOCK_DURATION_SECONDS = 15 * 60
@@ -230,6 +278,14 @@ class InMemoryStore:
         # P1-2: per-tenant tail chain_hash so append_audit is O(1), not an O(n)
         # reverse scan every append (which made the whole audit append O(n²)).
         self._audit_tail_hash: dict[str, str] = {}
+        # Issue #14: provisioning plane — plan templates, idempotency keys,
+        # lifecycle event outbox.
+        self._plan_templates: dict[str, dict[str, Any]] = {
+            k: dict(v) for k, v in PLAN_TEMPLATES.items()
+        }
+        self._idempotency: dict[str, dict[str, Any]] = {}
+        self._events: list[dict[str, Any]] = []
+        self._event_seq = 0
         logger.info(
             "InMemoryStore initialized (roles seeded=%d) — NOT for production", len(self._roles)
         )
@@ -668,6 +724,91 @@ class InMemoryStore:
                 q[k] = fields[k]
         q["updated_at"] = _now()
         return dict(q)
+
+    # ------------------------------------------------------------------
+    # Issue #14: provisioning plane — plan templates / idempotency / outbox
+    # ------------------------------------------------------------------
+
+    async def list_plan_templates(self) -> list[dict[str, Any]]:
+        return [
+            {"plan": plan, "quota": dict(q), "updated_at": None}
+            for plan, q in self._plan_templates.items()
+        ]
+
+    async def get_plan_template(self, plan: str) -> dict[str, Any] | None:
+        q = self._plan_templates.get(plan)
+        return dict(q) if q else None
+
+    async def put_plan_template(self, plan: str, quota: dict[str, Any]) -> dict[str, Any]:
+        if not _valid_id(plan):
+            raise StoreConflict(f"invalid plan id {plan!r}")
+        merged = dict(self._plan_templates.get(plan, DEFAULT_QUOTA))
+        for k in (
+            "rpm",
+            "tpm",
+            "concurrent",
+            "storage_mb",
+            "allowed_models",
+            "allowed_modules",
+            "default_priority",
+        ):
+            if k in quota and quota[k] is not None:
+                merged[k] = quota[k]
+        self._plan_templates[plan] = merged
+        logger.info("put_plan_template: plan=%s", plan)
+        return dict(merged)
+
+    async def get_idempotency(self, idem_key: str) -> dict[str, Any] | None:
+        rec = self._idempotency.get(idem_key)
+        return dict(rec) if rec else None
+
+    async def put_idempotency(self, idem_key: str, endpoint: str, response: dict[str, Any]) -> None:
+        self._idempotency[idem_key] = {
+            "idem_key": idem_key,
+            "endpoint": endpoint,
+            "response": response,
+            "created_at": _now(),
+        }
+        logger.info("put_idempotency: key=%s endpoint=%s", idem_key, endpoint)
+
+    async def append_event(
+        self, event_type: str, tenant_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        self._event_seq += 1
+        event_id = "evt_" + secrets.token_hex(8)
+        rec = {
+            "event_id": event_id,
+            "seq": self._event_seq,
+            "event_type": event_type,
+            "tenant_id": tenant_id,
+            "payload": payload,
+            "status": EVENT_STATUS_PENDING,
+            "attempts": 0,
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        self._events.append(rec)
+        # P1-2: cap the outbox; oldest evicted from the front.
+        if len(self._events) > _AUDIT_CAP:
+            self._events = self._events[-_AUDIT_CAP:]
+        logger.info("append_event: %s tenant=%s seq=%d", event_type, tenant_id, rec["seq"])
+        return dict(rec)
+
+    async def list_events(self, cursor: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        return [dict(e) for e in self._events if e["seq"] > cursor][:limit]
+
+    async def pending_events(self, limit: int = 20) -> list[dict[str, Any]]:
+        return [dict(e) for e in self._events if e["status"] == EVENT_STATUS_PENDING][:limit]
+
+    async def mark_event(self, event_id: str, status: str, attempts: int | None = None) -> bool:
+        for e in self._events:
+            if e["event_id"] == event_id:
+                e["status"] = status
+                if attempts is not None:
+                    e["attempts"] = attempts
+                e["updated_at"] = _now()
+                return True
+        return False
 
     async def create_department(
         self,
