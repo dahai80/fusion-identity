@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from fusion_identity.crypto import encrypt_secret
-from fusion_identity.deps import get_settings, require_tenant_admin_of
+from fusion_identity.deps import get_settings, require_permission_of
 from fusion_identity.models import IdpCreate, IdpResponse, IdpUpdate
 from fusion_identity.store import StoreConflict
 
@@ -23,7 +23,7 @@ def _settings(request: Request) -> Any:
 async def list_idps(
     tenant_id: str,
     request: Request,
-    _: dict[str, Any] = Depends(require_tenant_admin_of("tenant_id")),
+    _: dict[str, Any] = Depends(require_permission_of("idps", "read")),
 ) -> list[dict[str, Any]]:
     store = request.app.state.store
     rows = await store.list_idps(tenant_id)
@@ -36,7 +36,7 @@ async def create_idp(
     tenant_id: str,
     req: IdpCreate,
     request: Request,
-    _: dict[str, Any] = Depends(require_tenant_admin_of("tenant_id")),
+    _: dict[str, Any] = Depends(require_permission_of("idps", "write")),
 ) -> dict[str, Any]:
     store = request.app.state.store
     tenant = await store.get_tenant(tenant_id)
@@ -70,7 +70,7 @@ async def get_idp(
     tenant_id: str,
     idp_id: str,
     request: Request,
-    _: dict[str, Any] = Depends(require_tenant_admin_of("tenant_id")),
+    _: dict[str, Any] = Depends(require_permission_of("idps", "read")),
 ) -> dict[str, Any]:
     store = request.app.state.store
     rec = await store.get_idp(idp_id)
@@ -87,7 +87,7 @@ async def update_idp(
     idp_id: str,
     req: IdpUpdate,
     request: Request,
-    _: dict[str, Any] = Depends(require_tenant_admin_of("tenant_id")),
+    _: dict[str, Any] = Depends(require_permission_of("idps", "write")),
 ) -> dict[str, Any]:
     store = request.app.state.store
     rec = await store.get_idp(idp_id)
@@ -122,7 +122,7 @@ async def delete_idp(
     tenant_id: str,
     idp_id: str,
     request: Request,
-    _: dict[str, Any] = Depends(require_tenant_admin_of("tenant_id")),
+    _: dict[str, Any] = Depends(require_permission_of("idps", "delete")),
 ) -> dict[str, Any]:
     store = request.app.state.store
     rec = await store.get_idp(idp_id)

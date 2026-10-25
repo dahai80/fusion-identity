@@ -4,19 +4,23 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from fusion_identity.deps import get_store, invalidate_tenant_cache, require_tenant_admin_of
+from fusion_identity.deps import get_store, invalidate_tenant_cache, require_permission_of
 from fusion_identity.events import EVENT_TENANT_STATUS_CHANGED, emit_event
 from fusion_identity.models import TenantUpdate
 from fusion_identity.store import InMemoryStore, StoreConflict
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["tenants"])
 
-_self = require_tenant_admin_of("tenant_id")
+# Issue #16: explicit permission points — tenant info is readable by every
+# built-in role, mutation (status change) stays tenant_admin-only via the
+# matrix (no non-admin row for "tenants": "write").
+_read = require_permission_of("tenants", "read")
+_write = require_permission_of("tenants", "write")
 
 
 @router.get("")
 async def list_tenants_self(
-    _claims: dict = Depends(_self),
+    _claims: dict = Depends(_read),
     store: InMemoryStore = Depends(get_store),
 ) -> list[dict[str, Any]]:
     tid = _claims["tid"]
@@ -27,7 +31,7 @@ async def list_tenants_self(
 async def get_tenant(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_self),
+    _claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     t = await store.get_tenant(tenant_id)
     if not t:
@@ -41,7 +45,7 @@ async def update_tenant(
     body: TenantUpdate,
     request: Request,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_self),
+    _claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     fields = body.model_dump(exclude_none=True)
     if not fields:

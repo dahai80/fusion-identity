@@ -251,6 +251,26 @@ Role assignment / enable / disable / password reset for users stay on the member
 
 Schema: `custom_roles`, `role_menu_matrix`, `known_menus` (migration `0009_rbac_custom_roles.sql`, RLS-isolated like all tenant tables).
 
+### Permission points — enforced per-role matrix (issue #16)
+
+Every tenant-scoped route declares an explicit `(resource, action)` permission point via `require_permission[_of]` dependency factories in `deps.py`; the store is the authority (built-in matrix `BUILTIN_ROLE_MATRIX` in `store.py`, custom roles resolved through their `write_classes`). **Deny-by-default**: a role with no matrix entry for the resource is refused — `idps`/`rbac` have no non-admin rows, so they are `tenant_admin`-only. A custom role is granted every action on a resource when its write classes contain `{resource}:write` (write implies read/delete), and nothing otherwise. Cross-tenant guards (token `tid` vs `X-Tenant-Id` vs path) are unchanged.
+
+Enforced matrix for the built-in roles (`r` = read/GET, `w` = write/POST/PUT/PATCH, `d` = delete/DELETE):
+
+| Resource (routes) | viewer | member | operator | tenant_admin |
+|---|---|---|---|---|
+| `tenants` — `GET /tenants...`, `PATCH /tenants/{id}` | r | r | r | r w |
+| `members` — `.../members...` | — | — | r | r w d |
+| `api_keys` — `.../api-keys...` | — | — | r w d | r w d |
+| `quotas` — `.../quotas` | r | r | r | r w |
+| `audit` — `.../audit...` | — | — | r | r |
+| `usage` — `.../usage`, `/usage/summary`, `/config`, `/export` | r | r | r | r |
+| `departments` — `.../departments...` | r | r w | r w d | r w d |
+| `idps` — `.../idps...` | — | — | — | r w d |
+| `rbac` — `.../roles...`, `.../menus...`, `.../approvals/validate` | — | — | — | r w d |
+
+Self-service routes (`POST /api/v1/auth/password`, `logout`, `revoke`, all of `/api/v1/auth/mfa`) are any-authenticated (own user only). The admin/provisioning planes stay service-token gated. Matrix + deny-by-default are asserted by `tests/test_rbac_matrix.py` (per-role 200/403 per route class + a guard-inventory test proving zero tenant-scoped routes with implicit access).
+
 ## gRPC IdentityService (PRD §3.1)
 
 The high-throughput authorization plane for inference gateways. Enabled when `FUSION_IDENTITY_GRPC_PORT>0` and `FUSION_IDENTITY_REDIS_URL` is set. Serves `fusion.identity.v1.IdentityService` on `127.0.0.1:<port>` with a gRPC health check (`grpc.health.v1`).

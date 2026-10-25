@@ -131,6 +131,26 @@ claims 预留（`tid`/`tenant` 固定为 `local`），后续多租户扩展无�
 
 Schema：`custom_roles`、`role_menu_matrix`、`known_menus`（迁移 `0009_rbac_custom_roles.sql`，与其他租户表一致启用 RLS）。
 
+### 权限点 — 按角色矩阵真实执行（issue #16）
+
+每条租户内路由通过 `deps.py` 的 `require_permission[_of]` 依赖工厂声明显式 `(resource, action)` 权限点；store 是权威（内置矩阵 `BUILTIN_ROLE_MATRIX` 在 `store.py`，自定义角色经其 `write_classes` 解析）。**默认拒绝**：矩阵中无该资源条目的角色一律 403 —— `idps`/`rbac` 无非管理员行，仅 `tenant_admin` 可用。自定义角色当其 write class 含 `{resource}:write` 时获得该资源全部动作（write 蕴含 read/delete），否则无任何权限。跨租户守卫（token `tid` 与 `X-Tenant-Id`、路径三方一致）不变。
+
+内置角色执行矩阵（`r` = 读/GET，`w` = 写/POST/PUT/PATCH，`d` = 删/DELETE）：
+
+| 资源（路由） | viewer | member | operator | tenant_admin |
+|---|---|---|---|---|
+| `tenants` — `GET /tenants...`、`PATCH /tenants/{id}` | r | r | r | r w |
+| `members` — `.../members...` | — | — | r | r w d |
+| `api_keys` — `.../api-keys...` | — | — | r w d | r w d |
+| `quotas` — `.../quotas` | r | r | r | r w |
+| `audit` — `.../audit...` | — | — | r | r |
+| `usage` — `.../usage`、`/usage/summary`、`/config`、`/export` | r | r | r | r |
+| `departments` — `.../departments...` | r | r w | r w d | r w d |
+| `idps` — `.../idps...` | — | — | — | r w d |
+| `rbac` — `.../roles...`、`.../menus...`、`.../approvals/validate` | — | — | — | r w d |
+
+自助路由（`POST /api/v1/auth/password`、`logout`、`revoke`、全部 `/api/v1/auth/mfa`）为任意已认证用户（仅操作本人）。admin/provisioning 平面保持 service token 门控。矩阵 + 默认拒绝由 `tests/test_rbac_matrix.py` 断言（每类路由逐角色 200/403 + 守卫清单测试证明零隐式可访问的租户内路由）。
+
 ### 租户开通自动化 — 一次性开通 + 生命周期事件（issue #14，迁移 `0010_provisioning.sql`）
 
 面向 SaaS 控制面（首个消费者 CharacterVoiceAgent）的一次性租户开通，取代过去 3+ 个无事务保证、无事件的分散 admin 调用。

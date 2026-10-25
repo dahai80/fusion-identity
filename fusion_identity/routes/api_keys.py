@@ -5,14 +5,18 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from fusion_identity.deps import get_cache, get_store, require_tenant_admin_of
+from fusion_identity.deps import get_cache, get_store, require_permission_of
 from fusion_identity.events import EVENT_APIKEY_CREATED, EVENT_APIKEY_REVOKED, emit_event
 from fusion_identity.models import ApiKeyCreate, ApiKeyResponse
 from fusion_identity.store import InMemoryStore
 
 logger = logging.getLogger(__name__)
 
-_admin = require_tenant_admin_of("tenant_id")
+# Issue #16: permission points — keys are operational (operator full access
+# per matrix), reads for auditor-style roles when granted.
+_read = require_permission_of("api_keys", "read")
+_write = require_permission_of("api_keys", "write")
+_delete = require_permission_of("api_keys", "delete")
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/api-keys", tags=["api-keys"])
 
 # M1: fields that must never leave the store on a list/export. key_hash is a
@@ -29,7 +33,7 @@ def _scrub_api_key(rec: dict[str, Any]) -> dict[str, Any]:
 async def list_api_keys(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> list[dict[str, Any]]:
     keys = await store.list_api_keys(tenant_id)
     return [_scrub_api_key(k) for k in keys]
@@ -40,7 +44,7 @@ async def create_api_key(
     tenant_id: str,
     body: ApiKeyCreate,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_write),
 ) -> ApiKeyResponse:
     raw, rec = await store.create_api_key(tenant_id, _claims.get("sub"), body.scopes)
     await store.append_audit(
@@ -73,7 +77,7 @@ async def revoke_api_key(
     key_id: str,
     request: Request,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_delete),
 ) -> dict[str, bool]:
     rec = next((k for k in await store.list_api_keys(tenant_id) if k["key_id"] == key_id), None)
     if not rec:
