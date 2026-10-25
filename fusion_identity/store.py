@@ -113,6 +113,34 @@ WRITE_CLASSES = {
     for role, seed in ROLES_SEED.items()
 }
 
+# Issue #16 (Phase 2): identity-plane permission matrix for the built-in
+# roles. Resources are identity's own tenant-scoped surfaces; actions are
+# read (GET) / write (POST/PUT/PATCH) / delete (DELETE). The store is the
+# role authority (issue #12) — deps.py consults this table, never the JWT
+# role claim alone. tenant_admin is implicit-full and not listed.
+BUILTIN_ROLE_MATRIX = {
+    "operator": {
+        "tenants": ("read",),
+        "members": ("read",),
+        "api_keys": ("read", "write", "delete"),
+        "quotas": ("read",),
+        "audit": ("read",),
+        "usage": ("read",),
+        "departments": ("read", "write", "delete"),
+    },
+    "member": {
+        "tenants": ("read",),
+        "usage": ("read",),
+        "departments": ("read", "write"),
+    },
+    "viewer": {
+        "tenants": ("read",),
+        "quotas": ("read",),
+        "usage": ("read",),
+        "departments": ("read",),
+    },
+}
+
 # Issue #12 (E5): default role <-> menu matrix rows for built-in roles. Menus
 # themselves are declared by module manifests; identity only stores the matrix.
 DEFAULT_ROLE_MENUS = {

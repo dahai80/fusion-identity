@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from fusion_identity.deps import get_store, require_tenant_admin_of
+from fusion_identity.deps import get_store, require_permission_of
 from fusion_identity.models import (
     ApprovalValidateRequest,
     MenusAddRequest,
@@ -16,7 +16,12 @@ from fusion_identity.models import (
 from fusion_identity.store import InMemoryStore, StoreConflict
 
 logger = logging.getLogger(__name__)
-_admin = require_tenant_admin_of("tenant_id")
+# Issue #16: RBAC policy management stays tenant_admin-only via the matrix
+# (no non-admin row for "rbac"); reads are explicit so the guard inventory
+# test can prove no route is implicitly accessible.
+_read = require_permission_of("rbac", "read")
+_write = require_permission_of("rbac", "write")
+_delete = require_permission_of("rbac", "delete")
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}", tags=["rbac"])
 
 
@@ -24,7 +29,7 @@ router = APIRouter(prefix="/api/v1/tenants/{tenant_id}", tags=["rbac"])
 async def list_roles(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> list[dict[str, Any]]:
     # Issue #12 (E5): built-in roles are fixed; per-tenant custom roles carry
     # write classes. Menus are the current matrix row for each role.
@@ -36,7 +41,7 @@ async def create_role(
     tenant_id: str,
     body: RoleCreate,
     store: InMemoryStore = Depends(get_store),
-    claims: dict = Depends(_admin),
+    claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     try:
         rec = await store.create_custom_role(
@@ -63,7 +68,7 @@ async def update_role(
     role_id: str,
     body: RoleUpdate,
     store: InMemoryStore = Depends(get_store),
-    claims: dict = Depends(_admin),
+    claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     try:
         rec = await store.update_custom_role(
@@ -96,7 +101,7 @@ async def delete_role(
     tenant_id: str,
     role_id: str,
     store: InMemoryStore = Depends(get_store),
-    claims: dict = Depends(_admin),
+    claims: dict = Depends(_delete),
 ) -> dict[str, bool]:
     try:
         ok = await store.delete_custom_role(tenant_id, role_id)
@@ -124,7 +129,7 @@ async def get_role_menus(
     tenant_id: str,
     role_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     rec = await store.get_role(tenant_id, role_id)
     if rec is None:
@@ -138,7 +143,7 @@ async def set_role_menus(
     role_id: str,
     body: RoleMenusUpdate,
     store: InMemoryStore = Depends(get_store),
-    claims: dict = Depends(_admin),
+    claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     # Issue #12 (E5): runtime-editable role <-> menu matrix. Takes effect on
     # the next verify call (next page load) — no frontend release needed.
@@ -164,7 +169,7 @@ async def reset_role_menus(
     tenant_id: str,
     role_id: str,
     store: InMemoryStore = Depends(get_store),
-    claims: dict = Depends(_admin),
+    claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     try:
         menus = await store.reset_role_menus(tenant_id, role_id)
@@ -186,7 +191,7 @@ async def reset_role_menus(
 async def list_menus(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     return {"menus": await store.list_known_menus(tenant_id)}
 
@@ -196,7 +201,7 @@ async def add_menus(
     tenant_id: str,
     body: MenusAddRequest,
     store: InMemoryStore = Depends(get_store),
-    claims: dict = Depends(_admin),
+    claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     # Issue #12 (E5): menus are declared by module manifests; the admin
     # registers new menu ids here so the matrix editor can map them.
@@ -221,7 +226,7 @@ async def validate_approval(
     tenant_id: str,
     body: ApprovalValidateRequest,
     store: InMemoryStore = Depends(get_store),
-    claims: dict = Depends(_admin),
+    claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     # Issue #12 (E5): the requester != approver invariant is part of the
     # identity contract for any approval flow. Enforced server-side here so

@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from fusion_identity.deps import get_store, require_tenant_admin_of
+from fusion_identity.deps import get_store, require_permission_of
 from fusion_identity.models import (
     MemberCreate,
     MemberRoleUpdate,
@@ -16,7 +16,11 @@ from fusion_identity.models import (
 from fusion_identity.store import InMemoryStore, StoreConflict
 
 logger = logging.getLogger(__name__)
-_admin = require_tenant_admin_of("tenant_id")
+# Issue #16: permission points — member roster readable by operator, all
+# member management writes/deletes tenant_admin-only via the matrix.
+_read = require_permission_of("members", "read")
+_write = require_permission_of("members", "write")
+_delete = require_permission_of("members", "delete")
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/members", tags=["members"])
 
 
@@ -24,7 +28,7 @@ router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/members", tags=["members"
 async def list_members(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> list[dict[str, Any]]:
     return await store.list_members(tenant_id)
 
@@ -34,7 +38,7 @@ async def add_or_create_member(
     tenant_id: str,
     body: MemberCreate,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     existing = await store.get_user_by_username(body.username)
     if existing is None:
@@ -80,7 +84,7 @@ async def add_existing_member_by_proof(
     tenant_id: str,
     body: MemberCreate,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     """L21: add a pre-existing platform user to this tenant, proving ownership
     with the user's current password. Without proof a tenant_admin could
@@ -117,7 +121,7 @@ async def update_member_role(
     user_id: str,
     body: MemberRoleUpdate,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     if user_id == _claims.get("sub"):
         raise HTTPException(status_code=403, detail="cannot change own role")
@@ -151,7 +155,7 @@ async def update_member_status(
     user_id: str,
     body: MemberStatusUpdate,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     # L20: this route mutates the global user.status (platform identity). It
     # MUST be gated on the user being a member of THIS tenant, otherwise a
@@ -192,7 +196,7 @@ async def reset_member_password(
     user_id: str,
     body: PasswordResetRequest,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_write),
 ) -> dict[str, bool]:
     # L20: password reset is a credential reset on the platform identity, but
     # it must only be actionable by an admin of a tenant the user belongs to.
@@ -231,7 +235,7 @@ async def remove_member(
     tenant_id: str,
     user_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_delete),
 ) -> dict[str, bool]:
     if user_id == _claims.get("sub"):
         raise HTTPException(status_code=403, detail="cannot remove self")

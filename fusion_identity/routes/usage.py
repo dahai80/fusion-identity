@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from fusion_identity.deps import get_store, require_service_token, require_tenant_admin_of
+from fusion_identity.deps import get_store, require_permission_of, require_service_token
 from fusion_identity.models import UsageEmit, UsageRecord
 from fusion_identity.store import InMemoryStore
 
@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}", tags=["usage"])
 
-_admin = require_tenant_admin_of("tenant_id")
+# Issue #16: usage data is readable tenant-wide; ingest stays service-token.
+_read = require_permission_of("usage", "read")
 
 # M1: credential/secret fields that must never appear in an export.
 _EXPORT_DENYLIST = ("password_hash", "password_hash_v", "salt", "key_hash", "raw_key")
@@ -65,7 +66,7 @@ async def get_usage(
     since: float | None = Query(default=None),
     until: float | None = Query(default=None),
     metric: str | None = Query(default=None),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> list[dict[str, Any]]:
     return await store.aggregate_usage(tenant_id, since=since, until=until, metric=metric)
 
@@ -76,7 +77,7 @@ async def get_usage_summary(
     store: InMemoryStore = Depends(get_store),
     since: float | None = Query(default=None),
     until: float | None = Query(default=None),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     # Issue #10: aggregated usage report (totals per metric/source/model) for
     # enterprise admin consoles.
@@ -97,7 +98,7 @@ async def get_usage_summary(
 async def get_tenant_config(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     t = await store.get_tenant(tenant_id)
     if not t:
@@ -120,7 +121,7 @@ async def export_tenant(
     format: str = Query(default="json", pattern="^(json|csv)$"),
     since: float | None = Query(default=None, description="usage epoch-seconds lower bound"),
     until: float | None = Query(default=None, description="usage epoch-seconds upper bound"),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> Any:
     t = await store.get_tenant(tenant_id)
     if not t:

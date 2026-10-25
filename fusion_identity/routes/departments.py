@@ -5,13 +5,17 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from fusion_identity.deps import get_store, require_tenant_admin_of
+from fusion_identity.deps import get_store, require_permission_of
 from fusion_identity.models import DepartmentCreate, DepartmentUpdate
 from fusion_identity.store import InMemoryStore
 
 logger = logging.getLogger(__name__)
 
-_admin = require_tenant_admin_of("tenant_id")
+# Issue #16: departments readable tenant-wide, write for member/operator,
+# delete operator+admin via the matrix.
+_read = require_permission_of("departments", "read")
+_write = require_permission_of("departments", "write")
+_delete = require_permission_of("departments", "delete")
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/departments", tags=["departments"])
 
 
@@ -20,7 +24,7 @@ async def create_department(
     tenant_id: str,
     body: DepartmentCreate,
     store: InMemoryStore = Depends(get_store),
-    claims: dict = Depends(_admin),
+    claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     t = await store.get_tenant(tenant_id)
     if not t:
@@ -41,7 +45,7 @@ async def create_department(
 async def list_departments(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> list[dict[str, Any]]:
     return await store.list_departments(tenant_id)
 
@@ -51,7 +55,7 @@ async def get_department(
     tenant_id: str,
     dept_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     rec = await store.get_department(tenant_id, dept_id)
     if not rec:
@@ -65,7 +69,7 @@ async def update_department(
     dept_id: str,
     body: DepartmentUpdate,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     rec = await store.update_department(
         tenant_id,
@@ -84,7 +88,7 @@ async def delete_department(
     tenant_id: str,
     dept_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_delete),
 ) -> dict[str, Any]:
     if not await store.delete_department(tenant_id, dept_id):
         raise HTTPException(status_code=404, detail="department not found")

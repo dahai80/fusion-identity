@@ -9,15 +9,16 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fusion_identity.deps import (
     get_settings,
     get_store,
+    require_permission_of,
     require_service_token,
-    require_tenant_admin_of,
 )
 from fusion_identity.models import AuditEventIn
 from fusion_identity.store import InMemoryStore
 
 logger = logging.getLogger(__name__)
 
-_admin = require_tenant_admin_of("tenant_id")
+# Issue #16: audit log is read-only for operator + tenant_admin via matrix.
+_read = require_permission_of("audit", "read")
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/audit", tags=["audit"])
 
 
@@ -37,14 +38,17 @@ async def require_admin_or_service(
             token = ""
         if token and hmac.compare_digest(token, get_settings(request).service_token):
             return {"role": "service", "tid": x_tenant_id}
-    return await _admin(request, x_tenant_id=x_tenant_id, authorization=authorization)
+    return await _read(request, x_tenant_id=x_tenant_id, authorization=authorization)
+
+
+require_admin_or_service.__fusion_guard__ = ("audit", "read")
 
 
 @router.get("")
 async def list_audit(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
     limit: int = 100,
     since: float | None = None,
     until: float | None = None,
@@ -65,7 +69,7 @@ async def list_audit(
 async def verify_audit(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     return await store.verify_audit_chain(tenant_id)
 

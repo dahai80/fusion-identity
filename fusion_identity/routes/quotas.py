@@ -8,14 +8,17 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fusion_identity.deps import (
     get_store,
     invalidate_tenant_api_keys_cache,
-    require_tenant_admin_of,
+    require_permission_of,
 )
 from fusion_identity.events import EVENT_TENANT_QUOTA_CHANGED, emit_event
 from fusion_identity.models import QuotaUpdate
 from fusion_identity.store import InMemoryStore
 
 logger = logging.getLogger(__name__)
-_admin = require_tenant_admin_of("tenant_id")
+# Issue #16: quota visibility is broad (viewer can read); hot-update is
+# tenant_admin-only via the matrix.
+_read = require_permission_of("quotas", "read")
+_write = require_permission_of("quotas", "write")
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/quotas", tags=["quotas"])
 
 
@@ -23,7 +26,7 @@ router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/quotas", tags=["quotas"])
 async def get_quota(
     tenant_id: str,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_read),
 ) -> dict[str, Any]:
     q = await store.get_quota(tenant_id)
     if not q:
@@ -37,7 +40,7 @@ async def put_quota(
     body: QuotaUpdate,
     request: Request,
     store: InMemoryStore = Depends(get_store),
-    _claims: dict = Depends(_admin),
+    _claims: dict = Depends(_write),
 ) -> dict[str, Any]:
     fields = body.model_dump(exclude_none=True)
     if not fields:
