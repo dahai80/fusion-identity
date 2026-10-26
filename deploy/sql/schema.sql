@@ -166,6 +166,8 @@ CREATE TABLE audit_log (
 );
 CREATE INDEX audit_log_tenant_ts_idx ON audit_log(tenant_id, ts DESC);
 CREATE INDEX audit_log_seq_idx       ON audit_log(seq);
+-- 0011: business-app audit events (issue #18) — detail JSONB filter support
+CREATE INDEX audit_log_detail_gin    ON audit_log USING GIN (detail jsonb_path_ops);
 
 -- migration_orphans (§9.3, fail-visible)
 CREATE TABLE migration_orphans (
