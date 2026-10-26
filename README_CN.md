@@ -106,6 +106,16 @@ claims 预留（`tid`/`tenant` 固定为 `local`），后续多租户扩展无�
 - **审计事件接入**：`POST .../audit/events`（service token），下游推送审批/权限/运行事件，动作名归一为 `external.*`，写入哈希链审计账本。
 - **OTLP 导出**：`GET .../audit/otlp`（tenant_admin 或 service token），OTLP/JSON logs 格式，供本地 OTel Collector 接 SIEM，完全离线/内网可用。
 
+### 业务应用审计事件 API（issue #18）— `/api/v1/tenants/{tenant_id}/audit/...`
+
+领域应用（如 ai-speech-exam 的 AI 调用、专家审批/驳回、人工改分）把审计事件追加进 identity 的哈希链账本 —— 防篡改证据留在 identity，业务应用不自建链。
+
+- **追加事件**：`POST .../audit/business-events`（service token）。必填字段：`actor`、`action`、`object_id`、`trace_id`、`timestamp`（unix epoch，允许 ±5 分钟时钟偏差），外加模式自由的 `payload` 与可选 `severity`。动作名归一为 `external.*`；`actor`→`user_id`、`object_id`→`resource`，其余进哈希覆盖的 `detail` JSONB。返回 `{seq, chain_hash, action, ts, trace_id}`。
+- **合规查询**：`GET .../audit/business-events`（tenant_admin，audit 读权限），支持 `?actor=&action=&object_id=&trace_id=&since=&until=&limit=1..1000` 组合过滤，返回 `{events, count, truncated}`；内部（非业务）审计行不会混入。
+- **合规导出**：`GET .../audit/export`（tenant_admin 或 service token），一次往返返回账本切片（`?since=&until=&limit=`）加链校验结论：`{tenant_id, generated_at, chain:{valid,broken_at}, count, events}`。
+
+Postgres：迁移 `0011_business_audit_gin.sql` 为 `audit_log.detail` 加 GIN 索引（`jsonb_path_ops`），trace_id/actor/object_id 过滤走索引。
+
 ### RBAC 契约 — 自定义角色 + write class + 菜单矩阵（issue #12，迁移 E5）
 
 将固定四角色模型通用化为每租户 RBAC 契约，供管理台（fusion-web-shell）原样承载 Users & Roles 页面。内置角色（`tenant_admin`/`operator`/`member`/`viewer`）不可变，其 write class 由权限种子确定性推导（种子中有 `write` 动作的资源即一个 write class）。自定义角色按租户隔离（每租户 ≤64 个，每个 ≤64 个 write class），授予的 write class 与能力脊柱（capability spine）的变更门控相交。

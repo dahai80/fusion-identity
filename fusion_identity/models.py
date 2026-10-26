@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -276,6 +277,33 @@ class AuditEventIn(BaseModel):
         if v.upper() not in ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"):
             raise ValueError("severity must be a standard level (TRACE..FATAL)")
         return v.upper()
+
+
+class BusinessAuditEventIn(BaseModel):
+    # Issue #18: business-app audit events (ai-speech-exam G7) — schema-flexible
+    # payload with required fields actor/action/object_id/trace_id/timestamp.
+    actor: str = Field(min_length=1, max_length=128)
+    action: str = Field(min_length=1, max_length=128)
+    object_id: str = Field(min_length=1, max_length=256)
+    trace_id: str = Field(min_length=1, max_length=128)
+    timestamp: float
+    severity: str = Field(default="INFO")
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("severity")
+    @classmethod
+    def _check_severity(cls, v: str) -> str:
+        if v.upper() not in ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"):
+            raise ValueError("severity must be a standard level (TRACE..FATAL)")
+        return v.upper()
+
+    @field_validator("timestamp")
+    @classmethod
+    def _check_timestamp(cls, v: float) -> float:
+        now = time.time()
+        if v <= 0 or v > now + 300:
+            raise ValueError("timestamp must be a unix epoch within 5 minutes of now")
+        return v
 
 
 class RoleCreate(BaseModel):

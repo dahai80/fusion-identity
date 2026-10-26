@@ -179,6 +179,21 @@ Enterprise admin contract: department structure + per-department tool permission
 | POST | `/events` | service token | consumers (cowork, domain apps) push approval/permission/run events `{action,resource?,user_id?,severity?,detail?}` into the hash-chained tenant audit ledger; action is namespaced `external.*` |
 | GET | `/otlp` | tenant_admin or service token | OTLP/JSON logs export (`?limit=1..1000&since=`) — point a local OTel Collector at it for SIEM ingestion, fully offline/LAN |
 
+### Business-app audit events (issue #18) — under `/api/v1/tenants/{tenant_id}/audit/...`
+
+Domain apps (e.g. ai-speech-exam: AI invocations, expert approvals/rejections, human score
+overrides) append audit events into the identity hash chain — tamper evidence stays here,
+apps never self-maintain chains.
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/business-events` | service token | append one event. Required fields: `actor`, `action`, `object_id`, `trace_id`, `timestamp` (unix epoch, ±5 min skew), plus schema-flexible `payload` and optional `severity`. Action is namespaced `external.*`; `actor`→`user_id`, `object_id`→`resource`; the rest ride in the chain-hashed `detail` JSONB. Returns `{seq, chain_hash, action, ts, trace_id}`. |
+| GET | `/business-events` | tenant_admin (audit read) | compliance query — filter by `?actor=&action=&object_id=&trace_id=&since=&until=&limit=1..1000`; returns `{events, count, truncated}`. Internal (non-business) audit rows never match. |
+| GET | `/export` | tenant_admin or service token | compliance export — full ledger slice (`?since=&until=&limit=`) plus the live chain-verification verdict in one round trip: `{tenant_id, generated_at, chain:{valid,broken_at}, count, events}`. |
+
+Postgres: migration `0011_business_audit_gin.sql` adds a GIN index (`jsonb_path_ops`) on
+`audit_log.detail` so trace_id/actor/object_id filters stay index-backed.
+
 ### JWKS (`/.well-known/jwks.json`)
 
 | Method | Path | Auth | Notes |

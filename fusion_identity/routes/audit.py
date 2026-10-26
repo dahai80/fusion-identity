@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -12,7 +13,7 @@ from fusion_identity.deps import (
     require_permission_of,
     require_service_token,
 )
-from fusion_identity.models import AuditEventIn
+from fusion_identity.models import AuditEventIn, BusinessAuditEventIn
 from fusion_identity.store import InMemoryStore
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,179 @@ async def ingest_event(
     )
     logger.info("ingest_event: tenant=%s action=%s seq=%s", tenant_id, action, rec.get("seq"))
     return {"seq": rec.get("seq"), "chain_hash": rec.get("chain_hash"), "action": action}
+
+
+_BIZ_SOURCE = "business"
+_BIZ_PAGE = 1000
+_BIZ_MAX_PAGES = 20
+
+
+@router.post("/business-events", status_code=201)
+async def append_business_event(
+    tenant_id: str,
+    body: BusinessAuditEventIn,
+    store: InMemoryStore = Depends(get_store),
+    _svc: None = Depends(require_service_token),
+) -> dict[str, Any]:
+    # Issue #18: business apps (e.g. ai-speech-exam) append audit events into
+    # the identity hash chain — tamper evidence stays here, apps never
+    # self-maintain chains. Required fields map onto chain-covered storage:
+    # actor -> user_id, object_id -> resource, the rest ride in detail.
+    t = await store.get_tenant(tenant_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="tenant not found")
+    action = body.action if body.action.startswith("external.") else f"external.{body.action}"
+    detail = {
+        "source": _BIZ_SOURCE,
+        "trace_id": body.trace_id,
+        "client_ts": body.timestamp,
+        "actor": body.actor,
+        "object_id": body.object_id,
+        "severity": body.severity,
+        "payload": body.payload,
+    }
+    rec = await store.append_audit(
+        tenant_id, body.actor, None, "service", action, body.object_id, detail
+    )
+    logger.info(
+        "append_business_event: tenant=%s actor=%s action=%s trace=%s seq=%s",
+        tenant_id,
+        body.actor,
+        action,
+        body.trace_id,
+        rec.get("seq"),
+    )
+    return {
+        "seq": rec.get("seq"),
+        "chain_hash": rec.get("chain_hash"),
+        "action": action,
+        "ts": rec.get("ts"),
+        "trace_id": body.trace_id,
+    }
+
+
+def _biz_match(
+    a: dict[str, Any],
+    actor: str | None,
+    action: str | None,
+    object_id: str | None,
+    trace_id: str | None,
+) -> bool:
+    detail = a.get("detail") or {}
+    if not isinstance(detail, dict) or detail.get("source") != _BIZ_SOURCE:
+        return False
+    if actor is not None and a.get("user_id") != actor:
+        return False
+    if action is not None and not str(a.get("action", "")).endswith(action):
+        return False
+    if object_id is not None and a.get("resource") != object_id:
+        return False
+    if trace_id is not None:
+        return detail.get("trace_id") == trace_id
+    return True
+
+
+async def _biz_query(
+    store: InMemoryStore,
+    tenant_id: str,
+    *,
+    actor: str | None,
+    action: str | None,
+    object_id: str | None,
+    trace_id: str | None,
+    since: float | None,
+    until: float | None,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    # Filtered scan: walk the ledger newest-first page by page until `limit`
+    # matches accumulate or the ledger is exhausted. `truncated` reports the
+    # latter case so compliance callers know to narrow filters.
+    out: list[dict[str, Any]] = []
+    cursor: int | None = None
+    for _ in range(_BIZ_MAX_PAGES):
+        rows = await store.list_audit(
+            tenant_id, limit=_BIZ_PAGE, since=since, until=until, cursor=cursor
+        )
+        if not rows:
+            return out, False
+        for a in rows:
+            if _biz_match(a, actor, action, object_id, trace_id):
+                out.append(a)
+                if len(out) >= limit:
+                    return out, False
+        cursor = rows[-1]["id"]
+    logger.warning(
+        "_biz_query: tenant=%s hit page cap (%d pages) — narrow filters", tenant_id, _BIZ_MAX_PAGES
+    )
+    return out, True
+
+
+@router.get("/business-events")
+async def list_business_events(
+    tenant_id: str,
+    store: InMemoryStore = Depends(get_store),
+    _claims: dict = Depends(_read),
+    actor: str | None = Query(default=None),
+    action: str | None = Query(default=None),
+    object_id: str | None = Query(default=None),
+    trace_id: str | None = Query(default=None),
+    since: float | None = Query(default=None),
+    until: float | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+) -> dict[str, Any]:
+    # Issue #18: compliance query surface — filter business events by any
+    # combination of actor / action / object_id / trace_id plus time window.
+    events, truncated = await _biz_query(
+        store,
+        tenant_id,
+        actor=actor,
+        action=action,
+        object_id=object_id,
+        trace_id=trace_id,
+        since=since,
+        until=until,
+        limit=limit,
+    )
+    logger.info(
+        "list_business_events: tenant=%s count=%d filters(actor=%s action=%s obj=%s trace=%s)",
+        tenant_id,
+        len(events),
+        actor,
+        action,
+        object_id,
+        trace_id,
+    )
+    return {"events": events, "count": len(events), "truncated": truncated}
+
+
+@router.get("/export")
+async def export_audit(
+    tenant_id: str,
+    store: InMemoryStore = Depends(get_store),
+    claims: dict = Depends(require_admin_or_service),
+    since: float | None = Query(default=None),
+    until: float | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=10000),
+) -> dict[str, Any]:
+    # Issue #18: compliance export — full audit ledger slice plus the live
+    # chain-verification verdict, so a reviewer can prove integrity of the
+    # exact exported window's underlying chain in one round trip.
+    chain = await store.verify_audit_chain(tenant_id)
+    events = await store.list_audit(tenant_id, limit=limit, since=since, until=until)
+    logger.info(
+        "export_audit: tenant=%s count=%d chain_valid=%s by=%s",
+        tenant_id,
+        len(events),
+        chain.get("valid"),
+        claims.get("sub"),
+    )
+    return {
+        "tenant_id": tenant_id,
+        "generated_at": time.time(),
+        "chain": chain,
+        "count": len(events),
+        "events": events,
+    }
 
 
 @router.get("/otlp")
