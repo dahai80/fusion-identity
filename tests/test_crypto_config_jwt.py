@@ -145,6 +145,30 @@ def test_load_settings_valid():
         _clear_env(_CONFIG_KEYS)
 
 
+def test_load_settings_port_env_override_via_core_resolver():
+    # Issue #20: FUSION_IDENTITY_PORT flows through fusion_core.config
+    # service_port (bare app name "identity") — same env var, same value.
+    env = dict(_BASE_ENV)
+    env["FUSION_IDENTITY_PORT"] = "12345"
+    _set_env(env)
+    try:
+        s = load_settings()
+        assert s.port == 12345
+    finally:
+        _clear_env(_CONFIG_KEYS)
+
+
+def test_load_settings_port_default_when_unset():
+    # Issue #20: unset port falls back to the registered default 11470.
+    os.environ.pop("FUSION_IDENTITY_PORT", None)
+    _set_env(dict(_BASE_ENV))
+    try:
+        s = load_settings()
+        assert s.port == 11470
+    finally:
+        _clear_env(_CONFIG_KEYS)
+
+
 def test_crypto_hkdf_roundtrip():
     # F16: HKDF-derived KEK still round-trips encrypt/decrypt.
     kek = "operator-kek-material"

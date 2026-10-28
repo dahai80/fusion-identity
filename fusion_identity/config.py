@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from fusion_core.config import service_port as _core_service_port
+
 _logger_src = __import__("logging").getLogger(__name__)
 
 DEFAULT_HOST = "127.0.0.1"
@@ -48,6 +50,19 @@ def _int_env(name: str, default: int) -> int:
     except ValueError as exc:
         _logger_src.error("config: %s=%r is not an integer", name, raw)
         raise ConfigError(f"invalid int for {name}: {raw!r}") from exc
+
+
+def _core_port(default: int) -> int:
+    # Issue #20: HTTP port resolution delegates to fusion_core.config
+    # (single-point resolution, config-conventions §2). Bare app name
+    # "identity" — service_port prepends the FUSION_ prefix itself, so passing
+    # the full service name would double it (fusion-core#34). ValueError wraps
+    # to ConfigError so fail-closed startup (M8) keeps one exception type.
+    try:
+        return _core_service_port("identity", default=default)
+    except ValueError as exc:
+        _logger_src.error("config: %s", exc)
+        raise ConfigError(str(exc)) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,7 +225,7 @@ def load_settings() -> Settings:
         raise ConfigError("FUSION_IDENTITY_WEBHOOK_SECRET is required when WEBHOOK_URL is set")
     return Settings(
         host=os.environ.get("FUSION_IDENTITY_HOST", DEFAULT_HOST),
-        port=_int_env("FUSION_IDENTITY_PORT", DEFAULT_PORT),
+        port=_core_port(DEFAULT_PORT),
         database_url=os.environ.get("FUSION_IDENTITY_DATABASE_URL", DEFAULT_DATABASE_URL),
         use_pgstore=os.environ.get("FUSION_IDENTITY_USE_PGSTORE", "0").strip()
         in ("1", "true", "yes"),
