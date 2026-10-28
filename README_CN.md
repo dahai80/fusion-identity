@@ -46,7 +46,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_JWT_KEY` | **是** | — | HS256 签名密钥。缺则拒绝启动。 |
 | `FUSION_IDENTITY_SERVICE_TOKEN` | **是** | — | 门控 `/verify` 的共享令牌。 |
 | `FUSION_IDENTITY_HOST` | 否 | `127.0.0.1` | 绑定地址。 |
-| `FUSION_IDENTITY_PORT` | 否 | `11470` | 监听端口。 |
+| `FUSION_IDENTITY_PORT` | 否 | `11470` | 监听端口。经 `fusion_core.config.service_port` 单点解析（config-conventions §2，issue #20）。 |
 | `FUSION_IDENTITY_DATABASE_URL` | 否 | `postgresql://127.0.0.1:5432/fusion_tenant` | Postgres 连接串。 |
 | `FUSION_IDENTITY_JWT_ISSUER` | 否 | `fusion-identity` | JWT `iss`。 |
 | `FUSION_IDENTITY_JWT_AUDIENCE` | 否 | `fusion-cluster` | JWT `aud`。 |

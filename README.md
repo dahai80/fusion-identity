@@ -56,7 +56,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_JWT_ALGORITHM` | no | `HS256` | JWT signing algorithm — `HS256` or `RS256`. |
 | `FUSION_IDENTITY_JWT_PRIVATE_KEY_PEM` | no | — | RS256 private key PEM (generated at startup if unset). |
 | `FUSION_IDENTITY_HOST` | no | `127.0.0.1` | Bind address. |
-| `FUSION_IDENTITY_PORT` | no | `11470` | Listen port. |
+| `FUSION_IDENTITY_PORT` | no | `11470` | Listen port. Resolved via `fusion_core.config.service_port` (single-point resolution, config-conventions §2 — issue #20). |
 | `FUSION_IDENTITY_DATABASE_URL` | no | `postgresql://127.0.0.1:5432/fusion_tenant` | Postgres connection. |
 | `FUSION_IDENTITY_JWT_ISSUER` | no | `fusion-identity` | JWT `iss` claim. |
 | `FUSION_IDENTITY_JWT_AUDIENCE` | no | `fusion-cluster` | JWT `aud` claim. |
