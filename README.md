@@ -57,6 +57,8 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_JWT_PRIVATE_KEY_PEM` | no | — | RS256 private key PEM (generated at startup if unset). |
 | `FUSION_IDENTITY_HOST` | no | `127.0.0.1` | Bind address. |
 | `FUSION_IDENTITY_PORT` | no | `11470` | Listen port. Resolved via `fusion_core.config.service_port` (single-point resolution, config-conventions §2 — issue #20). |
+| `FUSION_REGISTRY` | no | `~/fusion/architecture/port-registry.yaml` | Port registry path for the register-then-start self-check (issue #23). A missing file warns and continues (standalone deploy outside the workspace). |
+| `FUSION_SKIP_REGISTRY_CHECK` | no | `0` | When `1`, bypass the registry self-check (start proceeds even on an unregistered port). |
 | `FUSION_IDENTITY_DATABASE_URL` | no | `postgresql://127.0.0.1:5432/fusion_tenant` | Postgres connection. |
 | `FUSION_IDENTITY_JWT_ISSUER` | no | `fusion-identity` | JWT `iss` claim. |
 | `FUSION_IDENTITY_JWT_AUDIENCE` | no | `fusion-cluster` | JWT `aud` claim. |
@@ -457,7 +459,9 @@ python deploy/bench/bench_grpc.py --target 127.0.0.1:50051 --api-key fmu_... \
 
 Targets: **P99 < 2 ms** and **> 5000 QPS** for `AuthorizeAndAcquire` (lease acquire + release). Reports p50/p95/p99 + QPS and whether targets are met.
 
-Lifecycle is `start.sh` (`start|stop|restart|status|log|compose`) — fusion-supervisor compatible.
+Lifecycle is `start.sh` (`start|stop|restart|status|log|registry-check|compose`) — fusion-supervisor compatible.
+
+Before binding, `start` runs a **register-then-start self-check** (issue #23, config Phase 3.3): it confirms the listen port is registered for `fusion-identity` in `port-registry.yaml` and **refuses to start** if the entry is missing or the port differs — so an unregistered port fails at start instead of only being caught later by CI `check-ports`. `FUSION_SKIP_REGISTRY_CHECK=1` bypasses the check; a missing registry file warns and continues (standalone deploy). `./start.sh registry-check` runs the check alone.
 
 ## Operations
 

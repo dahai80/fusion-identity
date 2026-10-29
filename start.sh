@@ -34,12 +34,37 @@ _log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$SERVICE_NAME] $*"; }
 
 _is_running() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; }
 
+# Issue #23 (config Phase 3.3): register-then-start self-check. The service
+# refuses to start on a port missing from port-registry.yaml so an unregistered
+# port fails at start instead of being caught later by CI check-ports.
+# FUSION_SKIP_REGISTRY_CHECK=1 bypasses; a missing registry file warns and
+# continues (standalone deploy outside the workspace).
+_registry_check() {
+    local port="${FUSION_IDENTITY_PORT:-$DEFAULT_PORT}"
+    local registry="${FUSION_REGISTRY:-$HOME/fusion/architecture/port-registry.yaml}"
+    if [ ! -f "$registry" ]; then
+        _log "WARN: port-registry.yaml not found at $registry — registry self-check skipped"
+        return 0
+    fi
+    if grep -A3 "^  ${SERVICE_NAME}:" "$registry" 2>/dev/null | grep -q "port: ${port}$"; then
+        _log "registry self-check ok: port ${port} registered for ${SERVICE_NAME}"
+        return 0
+    fi
+    if [ "${FUSION_SKIP_REGISTRY_CHECK:-}" = "1" ]; then
+        _log "WARN: registry check bypassed (FUSION_SKIP_REGISTRY_CHECK=1) — port ${port} unverified"
+        return 0
+    fi
+    _log "ERROR: port ${port} for ${SERVICE_NAME} not registered in $registry — refusing to start"
+    return 1
+}
+
 start() {
     if _is_running; then
         _log "already running (pid $(cat "$PID_FILE"))"
         return 0
     fi
     _log "starting on ${FUSION_IDENTITY_HOST:-$DEFAULT_HOST}:${FUSION_IDENTITY_PORT:-$DEFAULT_PORT}"
+    _registry_check || return 1
     # shellcheck disable=SC1090
     source "$VENV_DIR/bin/activate" 2>/dev/null || true
     nohup fusion-identity >>"$LOG_FILE" 2>&1 &
@@ -121,6 +146,7 @@ case "${1:-status}" in
     restart) stop; start ;;
     status) status ;;
     log) log "${2:-}" "${3:-}" ;;
+    registry-check) _registry_check ;;
     compose) compose "$@" ;;
-    *) echo "Usage: $0 {start|stop|restart|status|log [-f]|compose {up|down|logs}}" >&2; exit 64 ;;
+    *) echo "Usage: $0 {start|stop|restart|status|log [-f]|registry-check|compose {up|down|logs}}" >&2; exit 64 ;;
 esac
