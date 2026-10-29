@@ -47,6 +47,8 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_SERVICE_TOKEN` | **是** | — | 门控 `/verify` 的共享令牌。 |
 | `FUSION_IDENTITY_HOST` | 否 | `127.0.0.1` | 绑定地址。 |
 | `FUSION_IDENTITY_PORT` | 否 | `11470` | 监听端口。经 `fusion_core.config.service_port` 单点解析（config-conventions §2，issue #20）。 |
+| `FUSION_REGISTRY` | 否 | `~/fusion/architecture/port-registry.yaml` | 端口注册表路径，用于「先登记后启动」自检（issue #23）。文件缺失时告警并继续（工作区外的独立部署）。 |
+| `FUSION_SKIP_REGISTRY_CHECK` | 否 | `0` | 设为 `1` 时跳过注册表自检（未登记端口也放行启动）。 |
 | `FUSION_IDENTITY_DATABASE_URL` | 否 | `postgresql://127.0.0.1:5432/fusion_tenant` | Postgres 连接串。 |
 | `FUSION_IDENTITY_JWT_ISSUER` | 否 | `fusion-identity` | JWT `iss`。 |
 | `FUSION_IDENTITY_JWT_AUDIENCE` | 否 | `fusion-cluster` | JWT `aud`。 |
@@ -200,7 +202,9 @@ docker run -p 11470:11470 \
   fusion-identity:0.1.0
 ```
 
-生命周期由 `start.sh`（`start|stop|restart|status|log`）管理，兼容 fusion-supervisor。
+生命周期由 `start.sh`（`start|stop|restart|status|log|registry-check`）管理，兼容 fusion-supervisor。
+
+绑定前，`start` 会执行**「先登记后启动」自检**（issue #23，config Phase 3.3）：确认监听端口已在 `port-registry.yaml` 中登记给 `fusion-identity`，若条目缺失或端口不符则**拒绝启动** —— 让未登记端口在启动时即失败，而不是拖到 CI `check-ports` 才暴露。`FUSION_SKIP_REGISTRY_CHECK=1` 可跳过自检；注册表文件缺失时告警并继续（独立部署）。`./start.sh registry-check` 可单独运行该检查。
 
 ## 运维
 
