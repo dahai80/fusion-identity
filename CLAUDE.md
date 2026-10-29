@@ -25,7 +25,7 @@ export FUSION_BOOTSTRAP_ADMIN_USER=admin
 export FUSION_BOOTSTRAP_ADMIN_PASS=adminpass
 ```
 
-Without bootstrap creds and an empty tenant table, bootstrap is skipped — operator must seed first admin out-of-band.
+Bootstrap runs only when the tenant table is empty. On an **empty** table with `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` unset, startup **refuses to start** (fail-closed — a fresh install must be seeded with a first admin; the service will not come up un-administerable). Bootstrap is a no-op when the table is **non-empty** (the operator pre-seeded the first admin out-of-band, e.g. via `psql`), so the service starts without those vars in that case.
 
 Full env table (host/port/db/issuer/audience/TTL/refresh/log-level) is in `README.md`.
 

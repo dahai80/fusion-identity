@@ -63,7 +63,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_JWT_TTL` | no | `28800` (8h) | Access token TTL, seconds. |
 | `FUSION_IDENTITY_REFRESH_TTL` | no | `604800` (7d) | Refresh token TTL, seconds. |
 | `FUSION_BOOTSTRAP_ADMIN_USER` | no | — | Bootstrap `tenant_admin` username. |
-| `FUSION_BOOTSTRAP_ADMIN_PASS` | no | — | Bootstrap `tenant_admin` password. **When set, must be >= 12 chars** (fail-closed) — the first admin is the only seed for a fresh tenant table, so a weak default defeats fail-closed. Unset → bootstrap skipped on an empty tenant table (operator seeds out-of-band). |
+| `FUSION_BOOTSTRAP_ADMIN_PASS` | no | — | Bootstrap `tenant_admin` password. **When set, must be >= 12 chars** (fail-closed) — the first admin is the only seed for a fresh tenant table, so a weak default defeats fail-closed. **Required on a fresh install** (empty tenant table): unset here makes startup refuse to start (fail-closed). Only a table already seeded out-of-band (non-empty) skips bootstrap. |
 | `FUSION_BOOTSTRAP_TENANTS` | no | — | JSON array of extra tenants to seed at bootstrap, e.g. `[{"tenant_id":"acme","display_name":"Acme","plan":"team"}]`. |
 | `FUSION_IDENTITY_LOG_LEVEL` | no | `INFO` | Log level. |
 | `FUSION_IDENTITY_LOG_JSON` | no | `0` | Emit structured JSON logs with `tenant_id`/`user_id` from the tenant context. |
@@ -82,7 +82,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_WEBHOOK_TICK` | no | `5` | Webhook worker poll interval, seconds. |
 | `FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS` | no | `5` | Delivery attempts before an event is dead-lettered (status `dead`, stays queryable in the outbox). |
 
-Without `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS`, bootstrap is skipped when the tenant table is empty — the operator must seed the first admin out-of-band (fail-closed).
+Bootstrap runs only when the tenant table is empty. On an **empty** table with `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` unset, startup **refuses to start** (fail-closed — a fresh install must be seeded with a first admin; the service will not come up un-administerable). Bootstrap is a no-op when the table is **non-empty** (the operator pre-seeded the first admin out-of-band, e.g. via `psql`), so the service starts without those vars in that case.
 
 ## API
 

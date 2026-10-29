@@ -60,7 +60,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_WEBHOOK_TICK` | 否 | `5` | webhook worker 轮询间隔，秒。 |
 | `FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS` | 否 | `5` | 投递尝试次数上限，超过后事件进入死信（`status=dead`，仍在 outbox 可查）。 |
 
-未设 `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` 且租户表为空时跳过引导 —— 操作员需自行建第一个 admin（fail-closed）。
+引导仅在租户表为空时运行。租户表**非空**（操作员已带外建好首个 admin，例如通过 `psql`）时跳过引导，无需凭证即可启动。租户表**为空**且未设 `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` 时，服务**拒绝启动**（fail-closed —— 全新安装必须带外播种首个 admin，否则无人可管理）。
 
 ## API
 

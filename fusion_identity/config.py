@@ -202,9 +202,11 @@ def load_settings() -> Settings:
     # C1: reject weak bootstrap admin passwords — fail-closed. The first admin
     # is the only seed for a fresh tenant table; a brute-forceable default like
     # "adminpass" defeats fail-closed before any app-layer guard runs. Require
-    # >= 12 chars when set. Allow unset only because an empty tenant table with
-    # no creds skips bootstrap (operator seeds out-of-band), but when the
-    # operator DOES provide a password it must be strong.
+    # >= 12 chars when set. Allow unset (None) here — the empty-vs-non-empty
+    # decision and fail-closed enforcement live in bootstrap() (auth.py): a
+    # non-empty table (operator pre-seeded out-of-band) skips bootstrap and
+    # starts fine; an empty table with no creds refuses to start. When a
+    # password IS provided it must be strong.
     _MIN_BOOTSTRAP_PASS_LEN = 12
     if bootstrap_admin_pass is not None and len(bootstrap_admin_pass) < _MIN_BOOTSTRAP_PASS_LEN:
         _logger_src.error(

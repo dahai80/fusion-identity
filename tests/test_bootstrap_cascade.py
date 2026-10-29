@@ -89,8 +89,8 @@ def test_bootstrap_tenants_via_build_app():
 async def test_bootstrap_missing_creds_empty_table_fail_closed():
     # T9/F15: empty tenant table + no bootstrap creds → fail-closed. The service
     # refuses to start (RuntimeError) rather than silently coming up with no
-    # admin, which would lock operators out. CLAUDE.md's "skip" note describes
-    # the operator-seeding path; the F15 fix makes the code enforce it loudly.
+    # admin, which would lock operators out. CLAUDE.md/README document the same
+    # fail-closed contract; the F15 fix makes the code enforce it loudly.
     store = InMemoryStore()
     with pytest.raises(RuntimeError, match="FUSION_BOOTSTRAP_ADMIN"):
         await bootstrap(store, "", "")
