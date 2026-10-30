@@ -1,5 +1,5 @@
--- 0001_baseline: fusion_tenant v1 schema (multi-tenant-0902.md §5)
--- Applied against connected fusion_tenant DB. CREATE DATABASE is operator's job.
+-- 0001_baseline: identity v1 schema (multi-tenant-0902.md §5)
+-- Applied against the connected DB (fusion_identity since issue #26). CREATE DATABASE is operator's job.
 
 CREATE TABLE IF NOT EXISTS tenants (
     tenant_id    TEXT PRIMARY KEY,

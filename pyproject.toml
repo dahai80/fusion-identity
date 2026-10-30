@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fusion-identity"
-version = "0.2.8"
-description = "Fusion tenant-identity service — JWT issuer + tenant registry + Postgres fusion_tenant (multi-tenant PRD §3)"
+version = "0.2.9"
+description = "Fusion tenant-identity service — JWT issuer + tenant registry + Postgres fusion_identity (multi-tenant PRD §3)"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "dahai80" }]
@@ -48,7 +48,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-m 'not integration'"
 markers = [
-    "integration: real Postgres fusion_tenant tests (run with -m integration)",
+    "integration: real Postgres fusion_identity tests (run with -m integration)",
 ]
 
 [tool.ruff]

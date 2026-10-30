@@ -10,7 +10,7 @@ fusion-identity is the **sole JWT issuer** and tenant registry. Outage = all Fus
 - REST on `11470`, gRPC `IdentityService` on `50051` (only when `FUSION_IDENTITY_REDIS_URL` set).
 - **Fail-closed**: missing required env, invalid/expired token, missing membership, missing tenant_id → 401 or refuse to start. No default-tenant degradation.
 - Two backends: `InMemoryStore` (dev/test default) or `PgStore` (production — inject via `FUSION_IDENTITY_USE_PGSTORE=1` + `FUSION_IDENTITY_DATABASE_URL`). Production MUST use PgStore.
-- Postgres DB `fusion_tenant`, schema in `deploy/sql/schema.sql`, 9 tables.
+- Postgres DB `fusion_identity` (issue #26: single canonical DB; legacy `fusion_tenant` archived to /Users/dahai/db-archive/ and dropped), schema in `deploy/sql/schema.sql`.
 
 ## Health endpoints
 
@@ -34,14 +34,14 @@ These targets assume a single Postgres primary + Redis on the same host. HA Post
 
 ## Backup and restore
 
-### Database (fusion_tenant) — the source of truth
+### Database (fusion_identity) — the source of truth
 
 All tenant state, users, memberships, API keys, quotas, audit, usage, jti ledgers, refresh tokens live in Postgres. The service holds no durable state outside Postgres (Redis is cache + concurrency only — rebuildable).
 
 **Logical backup (pg_dump) — daily snapshot:**
 ```bash
-pg_dump -Fc -Z 6 -f /var/backups/fusion_tenant_$(date +%F).dump \
-    "postgresql://fusion_identity_app:$PASS@127.0.0.1:5432/fusion_tenant"
+pg_dump -Fc -Z 6 -f /var/backups/fusion_identity_$(date +%F).dump \
+    "postgresql://fusion_identity_app:$PASS@127.0.0.1:5432/fusion_identity"
 # retain 14 days; verify restore into a scratch DB weekly
 ```
 
@@ -52,8 +52,8 @@ Configure Postgres WAL archiving (`archive_mode=on`, `archive_command` to durabl
 1. Stop identity service: `./start.sh stop`
 2. Restore DB to target point (pg_restore for dump, or PITR for WAL):
    ```bash
-   createdb fusion_tenant_restore
-   pg_restore -d fusion_tenant_restore /var/backups/fusion_tenant_YYYY-MM-DD.dump
+   createdb fusion_identity_restore
+   pg_restore -d fusion_identity_restore /var/backups/fusion_identity_YYYY-MM-DD.dump
    ```
 3. Validate row counts + audit chain integrity:
    ```sql

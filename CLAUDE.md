@@ -44,11 +44,11 @@ Entry point: `fusion-identity` console script → `fusion_identity.app:main` →
 ```bash
 pytest tests/ -v                       # offline, InMemoryStore (default excludes `integration`)
 pytest tests/test_auth.py::test_login -v   # single test
-pytest tests/ -m integration -v        # needs live Postgres fusion_tenant (apply deploy/sql/schema.sql first)
+pytest tests/ -m integration -v        # needs live Postgres fusion_identity (apply deploy/sql/schema.sql first)
 ruff check . && ruff format --check .  # line-length 100, rules: E F W I UP B SIM; B008 ignored in routes/ and deps.py
 ```
 
-Tests use Starlette `TestClient` against `build_app(store=InMemoryStore(), run_bootstrap=True)`. Fixtures in `tests/conftest.py` build a settings/store/app/client stack and expose `admin_token` (logs in `admin:adminpass` against the bootstrapped `default` tenant). Integration tests hit a real `fusion_tenant` DB — mark them `@pytest.mark.integration`.
+Tests use Starlette `TestClient` against `build_app(store=InMemoryStore(), run_bootstrap=True)`. Fixtures in `tests/conftest.py` build a settings/store/app/client stack and expose `admin_token` (logs in `admin:adminpass` against the bootstrapped `default` tenant). Integration tests hit a real `fusion_identity` DB (issue #26: single canonical DB, legacy `fusion_tenant` retired) — mark them `@pytest.mark.integration`.
 
 ## Architecture
 
@@ -129,7 +129,7 @@ Pydantic v2 request/response schemas. No DB models — store layer uses plain di
 
 ## Database
 
-Postgres DB `fusion_tenant`, schema in `deploy/sql/schema.sql` (PRD Appendix A.1, independent of cowork RLS DB). 9 tables. Apply with `psql` before first run. `PgStore.ensure_schema` only warns — DDL is operator/CI responsibility.
+Postgres DB `fusion_identity` — single canonical DB (issue #26, DB-2; legacy `fusion_tenant` retired). Schema in `deploy/sql/schema.sql` (PRD Appendix A.1, independent of cowork RLS DB). 9 tables. Apply with `psql` before first run. `PgStore.ensure_schema` only warns — DDL is operator/CI responsibility.
 
 ## Conventions
 

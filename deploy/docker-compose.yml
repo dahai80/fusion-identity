@@ -10,7 +10,7 @@ services:
     ports:
       - "127.0.0.1:5433:5432"
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "fusion_tenant"]
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "fusion_identity"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -41,7 +41,7 @@ services:
     environment:
       FUSION_IDENTITY_HOST: "0.0.0.0"
       FUSION_IDENTITY_PORT: "11470"
-      FUSION_IDENTITY_DATABASE_URL: "postgresql://postgres:${FUSION_IDENTITY_PG_PASSWORD:-pgpassword}@postgres:5432/fusion_tenant"
+      FUSION_IDENTITY_DATABASE_URL: "postgresql://postgres:${FUSION_IDENTITY_PG_PASSWORD:-pgpassword}@postgres:5432/fusion_identity"
       FUSION_IDENTITY_USE_PGSTORE: "1"
       FUSION_IDENTITY_REDIS_URL: "redis://redis:6379/0"
       FUSION_IDENTITY_GRPC_PORT: "50051"

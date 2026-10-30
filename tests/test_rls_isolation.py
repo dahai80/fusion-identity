@@ -8,12 +8,14 @@ import pytest
 
 logger = logging.getLogger(__name__)
 
-PG_URL = os.environ.get("FUSION_IDENTITY_DATABASE_URL", "postgresql://127.0.0.1:5432/fusion_tenant")
+PG_URL = os.environ.get(
+    "FUSION_IDENTITY_DATABASE_URL", "postgresql://127.0.0.1:5432/fusion_identity"
+)
 # The low-priv role created by migration 0007. The operator may rotate its
 # password; the test falls back to the migration default when this env is unset.
 APP_ROLE_URL = os.environ.get(
     "FUSION_IDENTITY_APP_ROLE_URL",
-    "postgresql://fusion_identity_app:change-me-operator-rotates@127.0.0.1:5432/fusion_tenant",
+    "postgresql://fusion_identity_app:change-me-operator-rotates@127.0.0.1:5432/fusion_identity",
 )
 
 pytestmark = pytest.mark.integration
