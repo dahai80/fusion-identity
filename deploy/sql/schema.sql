@@ -1,8 +1,12 @@
--- fusion_tenant schema — tenant-identity service (multi-tenant-prd-0901 Appendix A.1)
+-- fusion_identity schema — tenant-identity service (multi-tenant-prd-0901 Appendix A.1)
 -- Verbatim from PRD §A.1, extended per multi-tenant-0902.md §5. Independent of cowork RLS business DB.
-CREATE DATABASE fusion_tenant;
+-- Issue #26 (DB-2): fusion_identity is the single canonical database. The
+-- legacy fusion_tenant name is retired; the CREATE is guarded so re-running
+-- against an existing install does not fail.
+SELECT 'CREATE DATABASE fusion_identity'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'fusion_identity')\gexec
 
-\c fusion_tenant
+\c fusion_identity
 
 -- tenants
 CREATE TABLE tenants (

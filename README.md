@@ -59,7 +59,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_PORT` | no | `11470` | Listen port. Resolved via `fusion_core.config.service_port` (single-point resolution, config-conventions §2 — issue #20). |
 | `FUSION_REGISTRY` | no | `~/fusion/architecture/port-registry.yaml` | Port registry path for the register-then-start self-check (issue #23). A missing file warns and continues (standalone deploy outside the workspace). |
 | `FUSION_SKIP_REGISTRY_CHECK` | no | `0` | When `1`, bypass the registry self-check (start proceeds even on an unregistered port). |
-| `FUSION_IDENTITY_DATABASE_URL` | no | `postgresql://127.0.0.1:5432/fusion_tenant` | Postgres connection. |
+| `FUSION_IDENTITY_DATABASE_URL` | no | `postgresql://127.0.0.1:5432/fusion_identity` | Postgres connection. The default and production env agree on the single canonical DB (issue #26, DB-2). |
 | `FUSION_IDENTITY_JWT_ISSUER` | no | `fusion-identity` | JWT `iss` claim. |
 | `FUSION_IDENTITY_JWT_AUDIENCE` | no | `fusion-cluster` | JWT `aud` claim. |
 | `FUSION_IDENTITY_JWT_TTL` | no | `28800` (8h) | Access token TTL, seconds. |
@@ -394,15 +394,32 @@ All lifecycle mutations append to a transactional event outbox (`event_outbox` t
 
 ## Database
 
-Postgres DB `fusion_tenant`. Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 23 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
+Postgres DB `fusion_identity` — the single canonical database (issue #26, DB conventions DB-2: one app, one database; the legacy `fusion_tenant` default is retired). Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 23 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
 
 An `InMemoryStore` ships for tests and bootstrap; `build_app()` uses it when `FUSION_IDENTITY_USE_PGSTORE` is unset. Production sets that env and injects a `PgStore`, which runs idempotent migrations from [`migrations/`](migrations/) on startup (`ensure_schema`).
+
+### Retiring the legacy `fusion_tenant` database (issue #26)
+
+Deployments that ever ran on the old default `fusion_tenant` should merge any rows into `fusion_identity` before the legacy DB is dropped. `fusion_tenant` held no rows on this machine, so the archive below is a safety net only:
+
+```bash
+# 1. Archive the legacy DB (custom-format dump, verified restore into a scratch DB)
+pg_dump -Fc -Z 6 -f /Users/dahai/db-archive/fusion_tenant_$(date +%F).dump \
+    "postgresql://127.0.0.1:5432/fusion_tenant"
+createdb fusion_tenant_verify
+pg_restore -d fusion_tenant_verify /Users/dahai/db-archive/fusion_tenant_YYYY-MM-DD.dump
+# 2. Verify per-table row counts against expectations, merge any missing rows
+#    into fusion_identity, then drop the scratch + legacy databases:
+dropdb fusion_tenant_verify
+dropdb fusion_tenant
+```
+
 
 ### Row-Level Security — strong isolation layer (PRD red-line #3)
 
 Migration `0007_rls_strong_isolation.sql` is the **strong layer** of data isolation, defense-in-depth under the app-layer guard (`require_tenant_admin_of`). It enables + forces RLS on the 12 tenant-scoped tables (`tenants`, `tenant_members`, `api_keys`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `identity_providers`, `lease_log`). Each policy is gated on the `app.current_tenant` GUC: a row is visible only when `tenant_id = current_setting('app.current_tenant')` or the GUC is the `_system` sentinel (the platform/admin scope that spans tenants — needed for login, refresh, api-key-by-hash, the admin plane, and stats). Platform tables (`users`, `roles`, `user_mfa`, `migration_orphans`) are intentionally not under RLS; they are shared across tenants by PRD design and governed by the app layer.
 
-The migration also creates a dedicated non-superuser role `fusion_identity_app` (default password `change-me-operator-rotates` — **rotate before production**) and grants it least-privilege DML. **Superusers and `BYPASSRLS` roles bypass RLS by Postgres rule**, so the operator's own admin account does not enforce it — the service must connect as `fusion_identity_app` in production for RLS to bind. `ALTER DATABASE fusion_tenant SET app.current_tenant = '_system'` makes every session default to the platform scope, so the existing single-connection-pool service keeps working unchanged.
+The migration also creates a dedicated non-superuser role `fusion_identity_app` (default password `change-me-operator-rotates` — **rotate before production**) and grants it least-privilege DML. **Superusers and `BYPASSRLS` roles bypass RLS by Postgres rule**, so the operator's own admin account does not enforce it — the service must connect as `fusion_identity_app` in production for RLS to bind. The database-level default `app.current_tenant = '_system'` (set by `0007` on fresh installs and healed by `0012_single_database_convergence.sql` on existing ones — both target `current_database()`, never a hard-coded name) makes every session default to the platform scope, so the existing single-connection-pool service keeps working unchanged.
 
 The database default keeps the service functional today; **per-request tenant GUC activation** (narrowing `app.current_tenant` to the verified token's `tid` inside a request-scoped transaction so RLS becomes the primary fence) is a tracked follow-up. It requires `PgStore` to hold one connection across a request instead of acquiring per call. Until then `require_tenant_admin_of` remains the primary cross-tenant enforcement point and RLS is the backstop that fails closed if a query ever drops its `WHERE tenant_id` filter while running as the low-priv role. RLS is verified by `tests/test_rls_isolation.py` (4 cases, integration).
 
@@ -414,13 +431,13 @@ pytest tests/ -m integration -v   # 15 cases: PgStore lifecycle + Redis Lua real
 ruff check . && ruff format --check .
 ```
 
-Integration tests (`@pytest.mark.integration`) need a live `fusion_tenant` Postgres (apply `deploy/sql/schema.sql`) and a live Redis:
+Integration tests (`@pytest.mark.integration`) need a live `fusion_identity` Postgres (apply `deploy/sql/schema.sql`) and a live Redis:
 
 ```bash
-export FUSION_IDENTITY_DATABASE_URL="postgresql://<user>@127.0.0.1:5432/fusion_tenant"
+export FUSION_IDENTITY_DATABASE_URL="postgresql://<user>@127.0.0.1:5432/fusion_identity"
 export FUSION_IDENTITY_REDIS_URL="redis://127.0.0.1:6379/0"
 # RLS isolation tests connect as the low-priv role created by migration 0007:
-export FUSION_IDENTITY_APP_ROLE_URL="postgresql://fusion_identity_app:<rotated-password>@127.0.0.1:5432/fusion_tenant"
+export FUSION_IDENTITY_APP_ROLE_URL="postgresql://fusion_identity_app:<rotated-password>@127.0.0.1:5432/fusion_identity"
 pytest tests/ -m integration -v   # PgStore lifecycle + Redis Lua real-run + RLS isolation
 ```
 

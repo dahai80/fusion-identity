@@ -13,7 +13,11 @@ DEFAULT_JWT_ISSUER = "fusion-identity"
 DEFAULT_JWT_AUDIENCE = "fusion-cluster"
 DEFAULT_JWT_TTL_SECONDS = 8 * 3600
 DEFAULT_REFRESH_TTL_SECONDS = 7 * 24 * 3600
-DEFAULT_DATABASE_URL = "postgresql://127.0.0.1:5432/fusion_tenant"
+# Issue #26 (DB-2: one app, one database): canonical DB is fusion_identity,
+# matching the service name and the production env. The legacy fusion_tenant
+# default caused a split-brain — an instance started without the env var
+# silently landed on a second live database.
+DEFAULT_DATABASE_URL = "postgresql://127.0.0.1:5432/fusion_identity"
 DEFAULT_LOGIN_LIMIT = 10
 DEFAULT_LOGIN_WINDOW = 60
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"

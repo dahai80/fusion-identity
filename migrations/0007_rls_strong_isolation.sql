@@ -18,7 +18,20 @@
 -- Default the GUC at the database level so every session starts in the
 -- platform sentinel scope (sees all tenants) unless a caller explicitly
 -- narrows it. Fail-safe: an unset GUC must not silently hide everything.
-ALTER DATABASE fusion_tenant SET app.current_tenant = '_system';
+-- Issue #26: target the connected database dynamically — the previous
+-- hard-coded "ALTER DATABASE fusion_tenant" mis-targeted when migrations
+-- ran against fusion_identity (ALTER DATABASE reaches any DB from any
+-- connection), leaving the production DB without the platform-scope
+-- default, and it would outright fail on a fresh install once the legacy
+-- fusion_tenant database is retired.
+DO $$
+BEGIN
+    EXECUTE format(
+        'ALTER DATABASE %I SET app.current_tenant = %L',
+        current_database(), '_system'
+    );
+END
+$$;
 
 -- Dedicated non-superuser role the service should connect as in production.
 -- Superusers bypass RLS, so the operator's own admin account does NOT enforce

@@ -49,7 +49,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_PORT` | 否 | `11470` | 监听端口。经 `fusion_core.config.service_port` 单点解析（config-conventions §2，issue #20）。 |
 | `FUSION_REGISTRY` | 否 | `~/fusion/architecture/port-registry.yaml` | 端口注册表路径，用于「先登记后启动」自检（issue #23）。文件缺失时告警并继续（工作区外的独立部署）。 |
 | `FUSION_SKIP_REGISTRY_CHECK` | 否 | `0` | 设为 `1` 时跳过注册表自检（未登记端口也放行启动）。 |
-| `FUSION_IDENTITY_DATABASE_URL` | 否 | `postgresql://127.0.0.1:5432/fusion_tenant` | Postgres 连接串。 |
+| `FUSION_IDENTITY_DATABASE_URL` | 否 | `postgresql://127.0.0.1:5432/fusion_identity` | Postgres 连接串。默认值与生产环境一致，单一权威库（issue #26，DB-2）。 |
 | `FUSION_IDENTITY_JWT_ISSUER` | 否 | `fusion-identity` | JWT `iss`。 |
 | `FUSION_IDENTITY_JWT_AUDIENCE` | 否 | `fusion-cluster` | JWT `aud`。 |
 | `FUSION_IDENTITY_JWT_TTL` | 否 | `28800`（8h） | access token TTL，秒。 |
@@ -181,15 +181,31 @@ Schema：`custom_roles`、`role_menu_matrix`、`known_menus`（迁移 `0009_rbac
 
 ## 数据库
 
-Postgres 库 `fusion_tenant`。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。23 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
+Postgres 库 `fusion_identity` —— 单一权威库（issue #26，DB 规范 DB-2：一应用一库；旧 `fusion_tenant` 默认值已废弃）。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。23 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
 
 附带 `InMemoryStore` 供测试与引导；未注入 Postgres store 时 `build_app()` 用它。
+
+### 旧库 `fusion_tenant` 退役（issue #26）
+
+曾在旧默认库 `fusion_tenant` 上运行过的部署，需先把数据合并进 `fusion_identity` 再删旧库。本机 `fusion_tenant` 为零行，以下归档仅为安全网：
+
+```bash
+# 1. 归档旧库（custom-format dump，恢复到临时库验证）
+pg_dump -Fc -Z 6 -f /Users/dahai/db-archive/fusion_tenant_$(date +%F).dump \
+    "postgresql://127.0.0.1:5432/fusion_tenant"
+createdb fusion_tenant_verify
+pg_restore -d fusion_tenant_verify /Users/dahai/db-archive/fusion_tenant_YYYY-MM-DD.dump
+# 2. 逐表核对行数，缺失行合并进 fusion_identity，再删临时库与旧库：
+dropdb fusion_tenant_verify
+dropdb fusion_tenant
+```
+
 
 ## 测试
 
 ```bash
 pytest tests/ -v          # 20 用例，离线（InMemoryStore）
-pytest tests/ -m integration -v   # 需要在线 Postgres fusion_tenant
+pytest tests/ -m integration -v   # 需要在线 Postgres fusion_identity
 ruff check . && ruff format --check .
 ```
 

@@ -10,7 +10,8 @@ from fusion_identity.db import PgStore
 logger = logging.getLogger(__name__)
 
 PG_URL = os.environ.get(
-    "FUSION_IDENTITY_DATABASE_URL", "postgresql://postgres:pgpassword@127.0.0.1:5433/fusion_tenant"
+    "FUSION_IDENTITY_DATABASE_URL",
+    "postgresql://postgres:pgpassword@127.0.0.1:5433/fusion_identity",
 )
 
 pytestmark = pytest.mark.integration

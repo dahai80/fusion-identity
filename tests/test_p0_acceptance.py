@@ -364,7 +364,7 @@ def test_ac_p2_inmem_store_warning(client: TestClient):
     s = Settings(
         host="127.0.0.1",
         port=11470,
-        database_url="postgresql://127.0.0.1:5432/fusion_tenant",
+        database_url="postgresql://127.0.0.1:5432/fusion_identity",
         use_pgstore=False,
         jwt_signing_key=TEST_JWT_KEY,
         jwt_issuer="fusion-identity",
