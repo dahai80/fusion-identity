@@ -15,6 +15,7 @@ from fusion_identity.models import (
     RefreshRequest,
     RevokeRequest,
     SessionIssueRequest,
+    SessionRevokeRequest,
     SessionVerifyRequest,
     TokenResponse,
     VerifyRequest,
@@ -123,6 +124,17 @@ async def issue_session(
     except HTTPException as exc:
         logger.info("issue_session: refused: %s", exc.detail)
         raise
+
+
+@router.delete("/sessions", dependencies=[Depends(require_service_token)])
+async def revoke_user_sessions(
+    req: SessionRevokeRequest, svc: AuthService = Depends(get_auth_service)
+) -> dict:
+    # Issue #29: user-deletion flow for business apps (App Store requirement:
+    # account deletion must invalidate credentials, not just delete rows).
+    # Revokes every unexpired access/session jti plus all refresh-token
+    # families for (sub, tenant_id). Service-token gated, fail-closed.
+    return await svc.revoke_user_sessions_and_tokens(req.sub, req.tenant_id)
 
 
 @router.post("/session/verify", dependencies=[Depends(require_service_token)])

@@ -122,6 +122,7 @@ TENANT_EXEMPT = frozenset(
         "/api/v1/auth/introspect",
         "/api/v1/auth/session",
         "/api/v1/auth/session/verify",
+        "/api/v1/auth/sessions",
         "/scim/v2/Users",
     }
 )

@@ -1168,6 +1168,41 @@ class InMemoryStore:
         logger.info("revoke_user_sessions: user=%s revoked=%d refresh tokens", user_id, count)
         return count
 
+    async def revoke_user_issued_jtis(
+        self,
+        user_id: str,
+        tenant_id: str | None = None,
+        reason: str = "user_deletion",
+    ) -> int:
+        # Issue #29: put every unexpired issued jti (access + session tokens)
+        # of the user onto the revocation ledger. verify_token and
+        # verify_session_token both consult revoked_jtis, so this is what
+        # actually kills live tokens — refresh-family revocation alone leaves
+        # the current access/session token valid until natural expiry.
+        now = _now()
+        count = 0
+        for jti, (tid, uid, expires_at) in list(self._issued_jtis.items()):
+            if uid != user_id:
+                continue
+            if tenant_id is not None and tid != tenant_id:
+                continue
+            if expires_at <= now:
+                continue
+            if jti in self._revoked_jtis:
+                continue
+            await self.revoke_jti(
+                jti, tenant_id=tid, user_id=uid, reason=reason, expires_at=expires_at
+            )
+            count += 1
+        logger.info(
+            "revoke_user_issued_jtis: user=%s tenant=%s revoked=%d reason=%s",
+            user_id,
+            tenant_id,
+            count,
+            reason,
+        )
+        return count
+
     async def record_usage(
         self,
         tenant_id: str,

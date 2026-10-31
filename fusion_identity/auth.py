@@ -72,6 +72,12 @@ class StoreProto(Protocol):
     async def record_issued_jti(self, jti: str, tenant_id: str, user_id: str) -> None: ...
     async def get_jti_owner(self, jti: str) -> tuple[str, str | None] | None: ...
     async def revoke_user_sessions(self, user_id: str) -> int: ...
+    async def revoke_user_issued_jtis(
+        self,
+        user_id: str,
+        tenant_id: str | None = None,
+        reason: str = "user_deletion",
+    ) -> int: ...
     async def append_audit(
         self,
         tenant_id: str,
@@ -460,6 +466,49 @@ class AuthService:
             raise _unauthorized("tenant disabled")
         logger.debug("verify_session_token: ok sub=%s tid=%s", claims["sub"], claims["tid"])
         return claims
+
+    async def revoke_user_sessions_and_tokens(self, sub: str, tenant_id: str) -> dict[str, int]:
+        # Issue #29: user-deletion flow for business apps. Account deletion must
+        # invalidate credentials, not just delete rows (App Store requirement):
+        # every unexpired issued jti (access + session tokens) goes onto the
+        # revocation ledger so /verify and /session/verify reject them, and
+        # every refresh-token family is revoked so nothing can be renewed.
+        from fastapi import HTTPException
+
+        tenant_status = await self._store.get_tenant_status(tenant_id)
+        if tenant_status is None:
+            logger.warning(
+                "revoke_user_sessions_and_tokens: tenant=%s not found (fail-closed)", tenant_id
+            )
+            raise HTTPException(status_code=404, detail="tenant not found")
+        revoked_jtis = await self._store.revoke_user_issued_jtis(
+            sub, tenant_id=tenant_id, reason="user_deletion"
+        )
+        revoked_refresh = await self._store.revoke_user_sessions(sub)
+        await self._store.append_audit(
+            tenant_id,
+            sub,
+            None,
+            "service",
+            "auth.user_sessions_revoked",
+            sub,
+            {
+                "revoked_access_jtis": revoked_jtis,
+                "revoked_refresh_tokens": revoked_refresh,
+                "reason": "user_deletion",
+            },
+        )
+        logger.info(
+            "revoke_user_sessions_and_tokens: sub=%s tid=%s jtis=%d refresh=%d",
+            sub,
+            tenant_id,
+            revoked_jtis,
+            revoked_refresh,
+        )
+        return {
+            "revoked_access_jtis": revoked_jtis,
+            "revoked_refresh_tokens": revoked_refresh,
+        }
 
     async def introspect(self, token: str) -> dict[str, Any]:
         from fastapi import HTTPException

@@ -95,7 +95,7 @@ Password hashing: scrypt (n=16384, r=8, p=1, fixed salt `"fusion-identity"`) via
 
 All tenant-scoped routes require `Authorization: Bearer <jwt>` + `X-Tenant-Id: <tid>`; token `tid` must match both header and path.
 
-- `auth` (`/api/v1/auth`): login (no auth), verify GET+POST (service token), refresh (no auth), revoke (tenant_admin).
+- `auth` (`/api/v1/auth`): login (no auth), verify GET+POST (service token), refresh (no auth), revoke (tenant_admin), DELETE `/sessions` (service token, issue #29 — user-deletion flow revokes all access/session jtis + refresh families for `{sub, tenant_id}`, returns counts, 404 unknown tenant, audited).
 - `tenants` (`/api/v1/tenants`): list/create/get/patch/delete — `require_tenant_admin`.
 - `members` (`/api/v1/tenants/{tenant_id}/members`): list, add-or-create, delete — `require_tenant_admin_of`.
 - `api_keys` (`/api/v1/tenants/{tenant_id}/api-keys`): list/create/revoke — `require_tenant_admin_of`.
