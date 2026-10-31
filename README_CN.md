@@ -99,6 +99,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 - `POST /session`：`{sub?="web-shell", tenant_id?="local", role?="member", ttl_seconds?(60..86400，默认 43200)}` → `{access_token,jti,expires_in,role}`。`local` 租户首次使用时幂等自建；其他租户必须已存在且 active（fail-closed）。
 - `POST /session/verify`：`{token}` → `{valid,sub,tid,tenant,role,scope,iat,exp,jti,type}`，校验签名/`type=session`/jti 吊销/租户状态。
+- `DELETE /sessions`（service token，issue #29）：`{sub, tenant_id}` → `{revoked_access_jtis, revoked_refresh_tokens}`。用户删除流程：吊销该主体全部未过期 access/session jti 及所有 refresh-token family —— 凭证立即失效，而非等自然过期。未知租户 → 404；幂等；写审计。
 
 claims 预留（`tid`/`tenant` 固定为 `local`），后续多租户扩展无需改 token 格式。session token 不能通过 `/verify`、`/introspect` 校验（type 不匹配）。
 

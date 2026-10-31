@@ -1117,6 +1117,31 @@ class PgStore:
             user_id,
         )
 
+    async def revoke_user_issued_jtis(
+        self,
+        user_id: str,
+        tenant_id: str | None = None,
+        reason: str = "user_deletion",
+    ) -> int:
+        # Issue #29: mirror of InMemoryStore.revoke_user_issued_jtis. One CTE
+        # moves every unexpired issued jti onto the revocation ledger; ON
+        # CONFLICT keeps it idempotent for a re-invoked deletion flow.
+        return await self.fetchval(
+            "WITH active AS ("
+            "  SELECT jti, tenant_id, user_id, expires_at FROM issued_jtis"
+            "  WHERE user_id=$1 AND ($2::text IS NULL OR tenant_id=$2)"
+            "    AND expires_at > now()"
+            "), ins AS ("
+            "  INSERT INTO revoked_jtis(jti, tenant_id, user_id, reason, expires_at)"
+            "  SELECT jti, tenant_id, user_id, $3, expires_at FROM active"
+            "  ON CONFLICT (jti) DO NOTHING"
+            "  RETURNING 1"
+            ") SELECT COUNT(*) FROM ins",
+            user_id,
+            tenant_id,
+            reason,
+        )
+
     async def record_usage(
         self,
         tenant_id: str,

@@ -252,6 +252,13 @@ class SessionVerifyRequest(BaseModel):
     token: str = Field(min_length=1)
 
 
+class SessionRevokeRequest(BaseModel):
+    # Issue #29: user-deletion flow. All unexpired access/session jtis and
+    # refresh-token families for (sub, tenant_id) are revoked.
+    sub: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=64)
+
+
 class DepartmentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     parent_id: str | None = Field(default=None, max_length=64)

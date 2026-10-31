@@ -100,7 +100,7 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` and `X-Tenant-Id:
 | POST | `/verify` | service token | body `{token}` |
 | POST | `/introspect` | service token | RFC 7662 token introspection. Accepts JSON `{token}` or form-encoded `token=...`; returns `{active:false}` for invalid/revoked/expired tokens or `{active:true,scope,client_id,username,sub,tenant_id,role,token_type,iat,exp,jti,iss,aud}` for valid ones. |
 | POST | `/refresh` | none | `{refresh_token}` → rotated access+refresh; reuse of a rotated token revokes the whole family |
-| POST | `/revoke` | bearer (tenant_admin) | `{jti}` — revokes the caller's own jti (attribution audited) |
+| DELETE | `/sessions` | service token | Revoke all access/session jtis + refresh families for `{sub, tenant_id}` (issue #29 user-deletion flow) || POST | `/revoke` | bearer (tenant_admin) | `{jti}` — revokes the caller's own jti (attribution audited) |
 | POST | `/logout` | bearer | `{refresh_token?}` — revokes access jti + the refresh token |
 | POST | `/password` | bearer | `{old_password,new_password}` — change own password (NIST 800-63B policy) |
 
@@ -112,6 +112,7 @@ Gateway-issued browser session tokens for **single-tenant local mode** (fusion-w
 |---|---|---|---|
 | POST | `/session` | service token | `{sub?="web-shell", tenant_id?="local", role?="member", ttl_seconds?(60..86400, default 43200)}` → `{access_token,jti,expires_in,role}`. The `local` tenant is auto-created (idempotent) on first use; any other tenant must already exist and be active (fail-closed). |
 | POST | `/session/verify` | service token | `{token}` → `{valid,sub,tid,tenant,role,scope,iat,exp,jti,type}` or 401. Validates signature, `type=session`, jti revocation, tenant status. |
+| DELETE | `/sessions` | service token | `{sub, tenant_id}` → `{revoked_access_jtis, revoked_refresh_tokens}` (issue #29). User-deletion flow: revokes every unexpired access/session jti plus all refresh-token families for the principal — credentials die immediately, not at natural expiry. Unknown tenant → 404; idempotent; audited. |
 
 **Claims schema** (reserved — stable across local → multi-tenant rollout, no token format change later):
 
@@ -124,7 +125,7 @@ Gateway-issued browser session tokens for **single-tenant local mode** (fusion-w
 | `type` | token type — `session` (access/refresh tokens are rejected on this flow) |
 | `iat`/`nbf`/`exp`/`iss`/`aud`/`jti` | standard; `iss`+`aud` pinned to the identity deployment |
 
-A `session` token is rejected by `/verify`/`/introspect` (type mismatch) — it only validates on `/session/verify`. Revocation: `POST /api/v1/auth/revoke` with the session `jti` (tenant_admin) or `revoke_user_sessions`.
+A `session` token is rejected by `/verify`/`/introspect` (type mismatch) — it only validates on `/session/verify`. Revocation: `POST /api/v1/auth/revoke` with the session `jti` (tenant_admin), `DELETE /api/v1/auth/sessions` for all of a principal's tokens (service token, issue #29), or `revoke_user_sessions` internally.
 
 ### MFA (`/api/v1/auth/mfa`)
 
