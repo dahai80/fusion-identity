@@ -287,6 +287,7 @@ class InMemoryStore:
         self._members: dict[tuple[str, str], dict[str, Any]] = {}
         self._api_keys: dict[str, dict[str, Any]] = {}
         self._key_hash_index: dict[str, str] = {}
+        self._app_secrets: dict[str, dict[str, Any]] = {}
         self._quotas: dict[str, dict[str, Any]] = {}
         self._audit: list[dict[str, Any]] = []
         self._revoked_jtis: dict[str, dict[str, Any]] = {}
@@ -730,6 +731,77 @@ class InMemoryStore:
         k["revoked_at"] = _now()
         self._key_hash_index.pop(k["key_hash"], None)
         return True
+
+    async def issue_app_secret(
+        self, app_id: str, grace_seconds: int
+    ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+        # Issue #28: application secret issuance for business apps (AGENTS.md
+        # convention #1 — extra secrets come from identity, not .env stuffing).
+        # Raw material is returned ONCE; only the sha256 hash is stored. Any
+        # current version is demoted to grace so the app can decrypt-and-
+        # re-encrypt during the window before the old version expires.
+        now = _now()
+        versions = [r["version"] for r in self._app_secrets.values() if r["app_id"] == app_id]
+        version = max(versions) + 1 if versions else 1
+        prev_current = None
+        for rec in self._app_secrets.values():
+            if rec["app_id"] == app_id and rec["status"] == "current":
+                prev_current = rec
+                break
+        if prev_current is not None:
+            prev_current["status"] = "grace"
+            prev_current["grace_until"] = now + grace_seconds
+        raw = "fms_" + secrets.token_urlsafe(32)
+        secret_id = "sec_" + secrets.token_hex(6)
+        record = {
+            "secret_id": secret_id,
+            "app_id": app_id,
+            "version": version,
+            "secret_hash": sha256_hash(raw),
+            "prefix": raw[:8] + "****",
+            "status": "current",
+            "grace_until": None,
+            "created_at": now,
+        }
+        self._app_secrets[secret_id] = record
+        logger.info(
+            "issue_app_secret: %s app=%s version=%d prev_demoted=%s",
+            secret_id,
+            app_id,
+            version,
+            prev_current["version"] if prev_current else None,
+        )
+        return (
+            raw,
+            dict(record),
+            dict(prev_current) if prev_current is not None else None,
+        )
+
+    async def get_current_app_secret(self, app_id: str) -> dict[str, Any] | None:
+        for rec in self._app_secrets.values():
+            if rec["app_id"] == app_id and rec["status"] == "current":
+                return dict(rec)
+        return None
+
+    async def has_app_secrets(self, app_id: str) -> bool:
+        return any(r["app_id"] == app_id for r in self._app_secrets.values())
+
+    async def list_app_secrets(self, app_id: str) -> list[dict[str, Any]]:
+        now = _now()
+        out = []
+        for rec in self._app_secrets.values():
+            if rec["app_id"] != app_id:
+                continue
+            item = {k: v for k, v in rec.items() if k != "secret_hash"}
+            if (
+                item["status"] == "grace"
+                and item["grace_until"] is not None
+                and item["grace_until"] < now
+            ):
+                item["status"] = "expired"
+            out.append(item)
+        out.sort(key=lambda r: r["version"], reverse=True)
+        return out
 
     async def get_quota(self, tenant_id: str) -> dict[str, Any] | None:
         q = self._quotas.get(tenant_id)

@@ -383,6 +383,93 @@ class PgStore:
         )
         return val is not None
 
+    async def issue_app_secret(
+        self, app_id: str, grace_seconds: int
+    ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
+        # Issue #28: mirrors InMemoryStore.issue_app_secret. The whole
+        # demote-and-insert runs in one transaction; the unique index on
+        # (app_id, version) turns a concurrent double-issue into StoreConflict.
+        import secrets as _s
+
+        from fusion_identity.store import sha256_hash
+
+        raw = "fms_" + _s.token_urlsafe(32)
+        secret_id = "sec_" + _s.token_hex(6)
+        async with self._pool.acquire() as conn, conn.transaction():
+            version = await conn.fetchval(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM app_secrets WHERE app_id=$1",
+                app_id,
+            )
+            prev = await conn.fetchrow(
+                "SELECT * FROM app_secrets WHERE app_id=$1 AND status='current'",
+                app_id,
+            )
+            if prev is not None:
+                await conn.execute(
+                    "UPDATE app_secrets SET status='grace', "
+                    "grace_until=now() + make_interval(secs => $2) "
+                    "WHERE secret_id=$1",
+                    prev["secret_id"],
+                    grace_seconds,
+                )
+            try:
+                row = await conn.fetchrow(
+                    "INSERT INTO app_secrets"
+                    "(secret_id, app_id, version, secret_hash, prefix, status) "
+                    "VALUES ($1,$2,$3,$4,$5,'current') RETURNING *",
+                    secret_id,
+                    app_id,
+                    version,
+                    sha256_hash(raw),
+                    raw[:8] + "****",
+                )
+            except asyncpg.UniqueViolationError as exc:
+                raise StoreConflict(f"app secret version race for {app_id}") from exc
+        rec = _decode_app_secret(row)
+        prev_rec = _decode_app_secret(prev) if prev is not None else None
+        if prev_rec is not None:
+            # prev was fetched before the UPDATE, so reflect the demotion the
+            # caller will see on the next list call.
+            prev_rec["status"] = "grace"
+            prev_rec["grace_until"] = time.time() + grace_seconds
+        logger.info(
+            "issue_app_secret: %s app=%s version=%s prev_demoted=%s",
+            secret_id,
+            app_id,
+            rec["version"],
+            prev_rec["version"] if prev_rec else None,
+        )
+        return raw, rec, prev_rec
+
+    async def get_current_app_secret(self, app_id: str) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            "SELECT * FROM app_secrets WHERE app_id=$1 AND status='current'",
+            app_id,
+        )
+        return _decode_app_secret(row) if row else None
+
+    async def has_app_secrets(self, app_id: str) -> bool:
+        val = await self.fetchval("SELECT 1 FROM app_secrets WHERE app_id=$1 LIMIT 1", app_id)
+        return val is not None
+
+    async def list_app_secrets(self, app_id: str) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT * FROM app_secrets WHERE app_id=$1 ORDER BY version DESC",
+            app_id,
+        )
+        out = []
+        now = time.time()
+        for row in rows:
+            item = _decode_app_secret(row, strip_hash=True)
+            if (
+                item["status"] == "grace"
+                and item["grace_until"] is not None
+                and item["grace_until"] < now
+            ):
+                item["status"] = "expired"
+            out.append(item)
+        return out
+
     async def get_quota(self, tenant_id: str) -> dict[str, Any] | None:
         row = await self.fetchrow("SELECT * FROM quotas WHERE tenant_id=$1", tenant_id)
         return _decode_quota(row) if row else None
@@ -1296,6 +1383,20 @@ class PgStore:
             limit,
         )
         return [dict(r) for r in rows]
+
+
+def _decode_app_secret(row: dict[str, Any], strip_hash: bool = False) -> dict[str, Any]:
+    rec = dict(row)
+    # Normalize TIMESTAMPTZ datetimes to unix-epoch floats so PgStore records
+    # match InMemoryStore's shape (models declare created_at/grace_until as
+    # float). Raw key material never leaves the store — hash only, and even
+    # that is stripped for list responses.
+    for key in ("created_at", "grace_until"):
+        val = rec.get(key)
+        rec[key] = val.timestamp() if hasattr(val, "timestamp") else val
+    if strip_hash:
+        rec.pop("secret_hash", None)
+    return rec
 
 
 def _decode_scopes(row: dict[str, Any]) -> dict[str, Any]:
