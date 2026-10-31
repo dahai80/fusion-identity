@@ -261,3 +261,37 @@ async def test_issued_jti_accepts_synthetic_session_principal(store):
         await store.execute("DELETE FROM issued_jtis WHERE jti=$1", "jti-synthetic-smoke")
     finally:
         await store.execute("DELETE FROM tenants WHERE tenant_id=$1", "fk-test-tenant")
+
+
+async def test_revoked_jti_accepts_synthetic_session_principal(store):
+    # 0015 regression guard: revoked_jtis.user_id is a principal label, NOT a
+    # users FK — revoking a synthetic session sub (no users row) raised
+    # ForeignKeyViolationError and DELETE /auth/sessions 500'd (issue #29).
+    await store.execute(
+        "INSERT INTO tenants(tenant_id, display_name) VALUES ($1, 'fk-test') "
+        "ON CONFLICT DO NOTHING",
+        "fk-test-tenant",
+    )
+    try:
+        await store.revoke_jti(
+            "jti-synthetic-smoke",
+            tenant_id="fk-test-tenant",
+            user_id="web-shell",
+            reason="user_deletion",
+        )
+        assert await store.is_jti_revoked("jti-synthetic-smoke")
+        # and the full issue #29 flow: record then revoke via the store method
+        await store.record_issued_jti("jti-synthetic-2", "fk-test-tenant", "web-shell")
+        count = await store.revoke_user_issued_jtis(
+            "web-shell", tenant_id="fk-test-tenant", reason="user_deletion"
+        )
+        assert count == 1
+        assert await store.is_jti_revoked("jti-synthetic-2")
+        await store.execute(
+            "DELETE FROM revoked_jtis WHERE jti IN ($1,$2)",
+            "jti-synthetic-smoke",
+            "jti-synthetic-2",
+        )
+        await store.execute("DELETE FROM issued_jtis WHERE jti=$1", "jti-synthetic-2")
+    finally:
+        await store.execute("DELETE FROM tenants WHERE tenant_id=$1", "fk-test-tenant")

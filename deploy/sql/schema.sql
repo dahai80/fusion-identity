@@ -131,10 +131,12 @@ CREATE INDEX rt_tenant_user_idx ON refresh_tokens(tenant_id, user_id);
 CREATE INDEX rt_expires_idx     ON refresh_tokens(expires_at) WHERE status <> 'revoked';
 
 -- revoked_jtis (§5.5, jti persistence survives restart)
+-- user_id is a PRINCIPAL label, not a users FK — synthetic session subs
+-- (issue #9) have no users row (0015 dropped the FK that 500'd revocation).
 CREATE TABLE revoked_jtis (
     jti        TEXT PRIMARY KEY,
     tenant_id  TEXT NOT NULL REFERENCES tenants(tenant_id),
-    user_id    TEXT REFERENCES users(user_id),
+    user_id    TEXT,
     revoked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     reason     TEXT,
     expires_at TIMESTAMPTZ NOT NULL
