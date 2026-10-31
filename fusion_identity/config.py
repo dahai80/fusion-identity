@@ -24,6 +24,10 @@ DEFAULT_REDIS_URL = "redis://127.0.0.1:6379/0"
 DEFAULT_GRPC_PORT = 50051
 DEFAULT_LEASE_TTL = 120
 DEFAULT_DB_POOL_MAX = 8
+# Issue #28: default rotation grace window for application secrets. During the
+# window the demoted version reads back as 'grace' so the app can decrypt-and-
+# re-encrypt its data before the old version expires.
+DEFAULT_SECRET_GRACE_SECONDS = 24 * 3600
 
 
 class ConfigError(RuntimeError):
@@ -120,6 +124,8 @@ class Settings:
     webhook_secret: str = ""
     webhook_tick_seconds: int = 5
     webhook_max_attempts: int = 5
+    # Issue #28: rotation grace window for issued application secrets.
+    secret_grace_seconds: int = DEFAULT_SECRET_GRACE_SECONDS
 
 
 def load_settings() -> Settings:
@@ -272,6 +278,9 @@ def load_settings() -> Settings:
         # tokens signed by a retired key unverifiable).
         jwt_keyring_path=os.environ.get("FUSION_IDENTITY_JWT_KEYRING_PATH", ""),
         db_pool_max=_int_env("FUSION_IDENTITY_DB_POOL_MAX", DEFAULT_DB_POOL_MAX),
+        secret_grace_seconds=_int_env(
+            "FUSION_IDENTITY_SECRET_GRACE_SECONDS", DEFAULT_SECRET_GRACE_SECONDS
+        ),
         service_token_prev=service_token_prev,
         webhook_url=webhook_url,
         webhook_secret=webhook_secret,

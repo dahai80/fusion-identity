@@ -341,3 +341,21 @@ OR current_setting('app.current_tenant') = '_system');
 -- plan_templates and idempotency_keys are platform-scope tables (service-token
 -- admin plane only, no tenant_id) — same trust level as schema_migrations, no
 -- RLS policy. They are only reachable behind require_service_token.
+
+-- Issue #28: application secrets for business apps (AGENTS.md convention #1).
+-- Identity stores only the sha256 hash; raw material is returned once.
+-- Platform-scope table (service-token plane, no tenant_id) — same trust level
+-- as plan_templates, no RLS policy.
+CREATE TABLE IF NOT EXISTS app_secrets (
+    secret_id   TEXT PRIMARY KEY,
+    app_id      TEXT NOT NULL,
+    version     INTEGER NOT NULL,
+    secret_hash TEXT NOT NULL,
+    prefix      TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    grace_until TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_app_secrets_app_version
+    ON app_secrets(app_id, version);
+CREATE INDEX IF NOT EXISTS ix_app_secrets_app ON app_secrets(app_id);

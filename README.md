@@ -83,6 +83,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_WEBHOOK_SECRET` | no | — | HMAC-SHA256 signing secret for webhook + post-provision hook payloads (`X-Fusion-Signature: sha256=<hex>`). |
 | `FUSION_IDENTITY_WEBHOOK_TICK` | no | `5` | Webhook worker poll interval, seconds. |
 | `FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS` | no | `5` | Delivery attempts before an event is dead-lettered (status `dead`, stays queryable in the outbox). |
+| `FUSION_IDENTITY_SECRET_GRACE_SECONDS` | no | `86400` (24h) | Default rotation grace window for issued application secrets (issue #28). During the window the demoted version reads back as `grace` so the app can decrypt-and-re-encrypt. |
 
 Bootstrap runs only when the tenant table is empty. On an **empty** table with `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` unset, startup **refuses to start** (fail-closed — a fresh install must be seeded with a first admin; the service will not come up un-administerable). Bootstrap is a no-op when the table is **non-empty** (the operator pre-seeded the first admin out-of-band, e.g. via `psql`), so the service starts without those vars in that case.
 
@@ -394,7 +395,7 @@ All lifecycle mutations append to a transactional event outbox (`event_outbox` t
 
 ## Database
 
-Postgres DB `fusion_identity` — the single canonical database (issue #26, DB conventions DB-2: one app, one database; the legacy `fusion_tenant` default is retired). Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 23 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
+Postgres DB `fusion_identity` — the single canonical database (issue #26, DB conventions DB-2: one app, one database; the legacy `fusion_tenant` default is retired). Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 24 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`, `app_secrets`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
 
 An `InMemoryStore` ships for tests and bootstrap; `build_app()` uses it when `FUSION_IDENTITY_USE_PGSTORE` is unset. Production sets that env and injects a `PgStore`, which runs idempotent migrations from [`migrations/`](migrations/) on startup (`ensure_schema`).
 
@@ -422,6 +423,20 @@ Migration `0007_rls_strong_isolation.sql` is the **strong layer** of data isolat
 The migration also creates a dedicated non-superuser role `fusion_identity_app` (default password `change-me-operator-rotates` — **rotate before production**) and grants it least-privilege DML. **Superusers and `BYPASSRLS` roles bypass RLS by Postgres rule**, so the operator's own admin account does not enforce it — the service must connect as `fusion_identity_app` in production for RLS to bind. The database-level default `app.current_tenant = '_system'` (set by `0007` on fresh installs and healed by `0012_single_database_convergence.sql` on existing ones — both target `current_database()`, never a hard-coded name) makes every session default to the platform scope, so the existing single-connection-pool service keeps working unchanged.
 
 The database default keeps the service functional today; **per-request tenant GUC activation** (narrowing `app.current_tenant` to the verified token's `tid` inside a request-scoped transaction so RLS becomes the primary fence) is a tracked follow-up. It requires `PgStore` to hold one connection across a request instead of acquiring per call. Until then `require_tenant_admin_of` remains the primary cross-tenant enforcement point and RLS is the backstop that fails closed if a query ever drops its `WHERE tenant_id` filter while running as the low-priv role. RLS is verified by `tests/test_rls_isolation.py` (4 cases, integration).
+
+### Application secrets — issuance for business apps (issue #28)
+
+Per `business/AGENTS.md` convention #1, business apps consume only three env vars and request any additional secret material from identity (no `.env` key stuffing). `ai-assistant-agent`'s TokenStore KEK is the first consumer.
+
+All three routes are service-token gated (cross-tenant plane, `X-Tenant-Id: _system`). Raw key material (`fms_`-prefixed) is returned **exactly once**; identity persists only the sha256 hash — same at-rest discipline as API keys. Rotation demotes the previous version to a grace window; the app must decrypt-and-re-encrypt its data before the window closes, after which the version reads back as `expired`.
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/apps/{app_id}/secrets` | Issue v1 (409 if a current version exists — use rotate). Body `{"grace_seconds"?}` optional. Returns `{secret_id, version, secret, previous_version}`. |
+| GET | `/api/v1/apps/{app_id}/secrets` | List versions newest-first — `{secret_id, version, status, prefix, created_at, grace_until}`, never any key material. |
+| POST | `/api/v1/apps/{app_id}/secrets/rotate` | New current version; previous demoted to `grace` (404 if the app has no secrets). |
+
+`app_id` must match `^[a-z0-9][a-z0-9_-]{0,63}$`. Every issue/rotate appends to the hash-chained audit ledger (`app_secret.issued` / `app_secret.rotated`, tenant `_system`). Table `app_secrets` is a platform-scope table (no `tenant_id`, no RLS — service-token plane, same trust level as `plan_templates`); migration `0013_app_secrets.sql`.
 
 ## Test
 

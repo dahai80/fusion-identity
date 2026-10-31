@@ -197,6 +197,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
 
     from fusion_identity.routes.admin import router as admin_router
     from fusion_identity.routes.api_keys import router as api_keys_router
+    from fusion_identity.routes.app_secrets import router as app_secrets_router
     from fusion_identity.routes.audit import router as audit_router
     from fusion_identity.routes.auth import router as auth_router
     from fusion_identity.routes.departments import router as departments_router
@@ -231,6 +232,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(scim_router)
     app.include_router(mfa_router)
     app.include_router(admin_router)
+    app.include_router(app_secrets_router)
     app.include_router(provisioning_router)
     app.state.webhook_worker = None
 

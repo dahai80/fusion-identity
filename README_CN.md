@@ -61,6 +61,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_WEBHOOK_SECRET` | 否 | — | webhook + 开通后钩子负载的 HMAC-SHA256 签名密钥（`X-Fusion-Signature: sha256=<hex>`）。 |
 | `FUSION_IDENTITY_WEBHOOK_TICK` | 否 | `5` | webhook worker 轮询间隔，秒。 |
 | `FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS` | 否 | `5` | 投递尝试次数上限，超过后事件进入死信（`status=dead`，仍在 outbox 可查）。 |
+| `FUSION_IDENTITY_SECRET_GRACE_SECONDS` | 否 | `86400`（24h） | 应用密钥轮换默认宽限窗（issue #28）。窗口内旧版本状态为 `grace`，应用须在窗口内完成解密再加密。 |
 
 引导仅在租户表为空时运行。租户表**非空**（操作员已带外建好首个 admin，例如通过 `psql`）时跳过引导，无需凭证即可启动。租户表**为空**且未设 `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` 时，服务**拒绝启动**（fail-closed —— 全新安装必须带外播种首个 admin，否则无人可管理）。
 
@@ -179,9 +180,23 @@ Schema：`custom_roles`、`role_menu_matrix`、`known_menus`（迁移 `0009_rbac
 
 **开通后钩子（M-D，可选）**：请求带 `hook_url` 时，identity 向该 URL POST `{"event": "provision.completed", "data": {tenant, quota, admin, api_key}}`（同一 HMAC 签名）。控制面可直接从负载把租户 key 注册进 fusion-gateway 等下游 —— 无需轮询，identity 内无任何网关专用代码。
 
+### 应用密钥 — 业务应用密钥签发（issue #28）
+
+按 `business/AGENTS.md` 硬约束 #1：业务应用只消费三个 env 变量，任何额外密钥材料由 identity 签发（禁止 `.env` 塞密钥）。首个消费者是 `ai-assistant-agent` TokenStore 的 KEK。
+
+三个路由均由 service token 门控（跨租户平面，`X-Tenant-Id: _system`）。原始密钥材料（`fms_` 前缀）**只返回一次**；identity 只存 SHA-256 哈希 —— 与 API key 同等落盘纪律。轮换时旧版本降级为宽限窗；应用须在窗口内完成数据解密再加密，窗口过后旧版本状态读回 `expired`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/apps/{app_id}/secrets` | 签发 v1（已有 current 版本则 409，改用 rotate）。可选 body `{"grace_seconds"?}`。返回 `{secret_id, version, secret, previous_version}`。 |
+| GET | `/api/v1/apps/{app_id}/secrets` | 按版本倒序列出 —— `{secret_id, version, status, prefix, created_at, grace_until}`，绝不返回密钥材料。 |
+| POST | `/api/v1/apps/{app_id}/secrets/rotate` | 生成新 current 版本；旧版本降级为 `grace`（应用无密钥则 404）。 |
+
+`app_id` 须匹配 `^[a-z0-9][a-z0-9_-]{0,63}$`。每次签发/轮换都写入哈希链审计账本（`app_secret.issued` / `app_secret.rotated`，租户 `_system`）。`app_secrets` 为平台级表（无 `tenant_id`、无 RLS —— service token 平面，与 `plan_templates` 同信任级）；迁移 `0013_app_secrets.sql`。
+
 ## 数据库
 
-Postgres 库 `fusion_identity` —— 单一权威库（issue #26，DB 规范 DB-2：一应用一库；旧 `fusion_tenant` 默认值已废弃）。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。23 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
+Postgres 库 `fusion_identity` —— 单一权威库（issue #26，DB 规范 DB-2：一应用一库；旧 `fusion_tenant` 默认值已废弃）。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。24 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`、`app_secrets`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
 
 附带 `InMemoryStore` 供测试与引导；未注入 Postgres store 时 `build_app()` 用它。
 
