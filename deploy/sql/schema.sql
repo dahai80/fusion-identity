@@ -144,10 +144,12 @@ CREATE INDEX rj_expires_idx ON revoked_jtis(expires_at);
 -- issued_jtis (F4: /revoke ownership check) — records the tenant/user each
 -- access-token jti was issued to, so revocation can bind a jti to its tenant
 -- before revoking. Rows expire with the access-token TTL and are swept.
+-- user_id is a PRINCIPAL label, not a users FK: session tokens (issue #9) use
+-- synthetic subs with no users row (0014 dropped the FK that 500'd them).
 CREATE TABLE issued_jtis (
     jti        TEXT PRIMARY KEY,
     tenant_id  TEXT NOT NULL REFERENCES tenants(tenant_id),
-    user_id    TEXT NOT NULL REFERENCES users(user_id),
+    user_id    TEXT NOT NULL,
     issued_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at TIMESTAMPTZ NOT NULL
 );
