@@ -1,0 +1,11 @@
+-- 0014_drop_issued_jtis_user_fk.sql
+-- Found while live-verifying issue #29: issued_jtis.user_id carried a FK to
+-- users(user_id) (migration 0005), but session tokens (issue #9) are issued
+-- with SYNTHETIC principals ("web-shell", or any sub the gateway chooses) that
+-- have no users row — on PgStore every such POST /auth/session died with a
+-- ForeignKeyViolation 500. InMemoryStore has no FK, so offline tests never
+-- caught it. user_id here is a principal label, not a users reference; the
+-- /revoke ownership check (F4) only needs the (tenant_id, user_id) pair as
+-- recorded. Drop the FK; the tenants FK stays (issue_session fail-closes on
+-- tenant existence first).
+ALTER TABLE issued_jtis DROP CONSTRAINT IF EXISTS issued_jtis_user_id_fkey;

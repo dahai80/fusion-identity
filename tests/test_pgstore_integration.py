@@ -241,3 +241,23 @@ async def _cleanup_all_residue():
                 await s.execute(sql)
     finally:
         await s.close()
+
+
+async def test_issued_jti_accepts_synthetic_session_principal(store):
+    # 0014 regression guard: issued_jtis.user_id is a principal label, NOT a
+    # users FK — session tokens (issue #9) are issued for synthetic subs with
+    # no users row. Before 0014 this INSERT raised ForeignKeyViolationError
+    # and POST /auth/session 500'd on PgStore (found during issue #29 smoke).
+
+    await store.execute(
+        "INSERT INTO tenants(tenant_id, display_name) VALUES ($1, 'fk-test') "
+        "ON CONFLICT DO NOTHING",
+        "fk-test-tenant",
+    )
+    try:
+        await store.record_issued_jti("jti-synthetic-smoke", "fk-test-tenant", "web-shell")
+        owner = await store.get_jti_owner("jti-synthetic-smoke")
+        assert owner == ("fk-test-tenant", "web-shell")
+        await store.execute("DELETE FROM issued_jtis WHERE jti=$1", "jti-synthetic-smoke")
+    finally:
+        await store.execute("DELETE FROM tenants WHERE tenant_id=$1", "fk-test-tenant")
