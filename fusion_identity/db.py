@@ -470,6 +470,74 @@ class PgStore:
             out.append(item)
         return out
 
+    async def list_all_app_secrets(self) -> list[dict[str, Any]]:
+        # Issue #35: mirrors InMemoryStore.list_all_app_secrets.
+        rows = await self.fetch("SELECT * FROM app_secrets ORDER BY app_id, version DESC")
+        out = []
+        now = time.time()
+        for row in rows:
+            item = _decode_app_secret(row, strip_hash=True)
+            if (
+                item["status"] == "grace"
+                and item["grace_until"] is not None
+                and item["grace_until"] < now
+            ):
+                item["status"] = "expired"
+            out.append(item)
+        return out
+
+    async def revoke_app_secret_version(self, app_id: str, version: int) -> dict[str, Any] | None:
+        # Issue #35: mirrors InMemoryStore.revoke_app_secret_version. Single
+        # UPDATE — durable revoked status, grace window cleared.
+        row = await self.fetchrow(
+            "UPDATE app_secrets SET status='revoked', grace_until=NULL "
+            "WHERE app_id=$1 AND version=$2 RETURNING *",
+            app_id,
+            version,
+        )
+        if row is None:
+            return None
+        logger.info("revoke_app_secret_version: app=%s version=%s", app_id, version)
+        return _decode_app_secret(row, strip_hash=True)
+
+    async def get_member_summary(self, tenant_id: str) -> dict[str, Any]:
+        # Issue #35: count-only aggregate, computed in SQL — no member rows
+        # (usernames/emails) ever leave the store.
+        rows = await self.fetch(
+            "SELECT u.status AS status, m.role AS role, COUNT(*) AS n "
+            "FROM tenant_members m JOIN users u ON u.user_id = m.user_id "
+            "WHERE m.tenant_id=$1 GROUP BY u.status, m.role",
+            tenant_id,
+        )
+        summary = {"total": 0, "active": 0, "disabled": 0, "locked": 0, "by_role": {}}
+        for r in rows:
+            n = int(r["n"])
+            summary["total"] += n
+            if r["status"] in summary:
+                summary[r["status"]] += n
+            else:
+                logger.warning(
+                    "get_member_summary: unknown user status=%s tenant=%s",
+                    r["status"],
+                    tenant_id,
+                )
+            summary["by_role"][r["role"]] = summary["by_role"].get(r["role"], 0) + n
+        return summary
+
+    async def get_idp_summary(self, tenant_id: str) -> dict[str, Any]:
+        # Issue #35: mirrors InMemoryStore.get_idp_summary — capability state
+        # only, client_secret_enc never selected.
+        rows = await self.fetch(
+            "SELECT type, auto_provision FROM identity_providers WHERE tenant_id=$1",
+            tenant_id,
+        )
+        return {
+            "configured": len(rows) > 0,
+            "count": len(rows),
+            "types": sorted({r["type"] for r in rows}),
+            "auto_provision": any(r["auto_provision"] for r in rows),
+        }
+
     async def put_app_credential(self, app_id: str, name: str, secret_enc: str) -> dict[str, Any]:
         # Issue #34: mirrors InMemoryStore.put_app_credential. Upsert on the
         # (app_id, name) PK — re-PUT is the operator-side rotation path for

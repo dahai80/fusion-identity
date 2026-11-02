@@ -294,6 +294,73 @@ async def admin_usage_today(
 
 
 # ---------------------------------------------------------------------------
+# Issue #35 (DC-3): service-token-gated aggregation reads for the fusion-security
+# Admin Console. fusion-security is a service holding only the service token —
+# the user-JWT member/IdP reads are unreachable for it, and the union-web shell
+# iframe never holds the user JWT. Counts/capability state only: no usernames,
+# no emails, no client_secret material. RBAC at the data source stays
+# authoritative; these endpoints add no mutation surface.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/tenants/{tenant_id}/members/summary")
+async def admin_member_summary(
+    tenant_id: str,
+    store: InMemoryStore = Depends(get_store),
+) -> dict[str, Any]:
+    if not await store.get_tenant(tenant_id):
+        raise HTTPException(status_code=404, detail="tenant not found")
+    summary = await store.get_member_summary(tenant_id)
+    logger.info("admin_member_summary: tenant=%s total=%d", tenant_id, summary["total"])
+    return summary
+
+
+@router.get("/tenants/{tenant_id}/idps/summary")
+async def admin_idp_summary(
+    tenant_id: str,
+    store: InMemoryStore = Depends(get_store),
+) -> dict[str, Any]:
+    if not await store.get_tenant(tenant_id):
+        raise HTTPException(status_code=404, detail="tenant not found")
+    summary = await store.get_idp_summary(tenant_id)
+    logger.info(
+        "admin_idp_summary: tenant=%s configured=%s count=%d",
+        tenant_id,
+        summary["configured"],
+        summary["count"],
+    )
+    return summary
+
+
+@router.get("/app-secrets")
+async def admin_app_secret_inventory(
+    store: InMemoryStore = Depends(get_store),
+) -> dict[str, Any]:
+    rows = await store.list_all_app_secrets()
+    by_app: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_app.setdefault(r["app_id"], []).append(r)
+    apps = []
+    for app_id in sorted(by_app):
+        versions = by_app[app_id]  # already version-desc from the store
+        current = next((v for v in versions if v["status"] == "current"), None)
+        latest = versions[0]
+        grace = next((v["grace_until"] for v in versions if v["status"] == "grace"), None)
+        apps.append(
+            {
+                "app_id": app_id,
+                "versions": len(versions),
+                "current_version": current["version"] if current else None,
+                "status": "active" if current else "inactive",
+                "created_at": latest["created_at"],
+                "grace_until": grace,
+            }
+        )
+    logger.info("admin_app_secret_inventory: apps=%d", len(apps))
+    return {"apps": apps}
+
+
+# ---------------------------------------------------------------------------
 # D2: KEK online rotation — re-encrypt all at-rest secrets to the current KEK.
 # Operator workflow:
 #   1. set FUSION_IDENTITY_KEK=<new>  FUSION_IDENTITY_KEK_PREV=<old>, restart

@@ -192,6 +192,15 @@ Schema：`custom_roles`、`role_menu_matrix`、`known_menus`（迁移 `0009_rbac
 | POST | `/api/v1/apps/{app_id}/secrets` | 签发 v1（已有 current 版本则 409，改用 rotate）。可选 body `{"grace_seconds"?}`。返回 `{secret_id, version, secret, previous_version}`。 |
 | GET | `/api/v1/apps/{app_id}/secrets` | 按版本倒序列出 —— `{secret_id, version, status, prefix, created_at, grace_until}`，绝不返回密钥材料。 |
 | POST | `/api/v1/apps/{app_id}/secrets/rotate` | 生成新 current 版本；旧版本降级为 `grace`（应用无密钥则 404）。 |
+| DELETE | `/api/v1/apps/{app_id}/secrets/{version}` | 立即将某版本标记 `revoked`（issue #35，UC-S3）—— 密钥确认泄露时提前切断宽限窗。版本不存在则 404。审计 `app_secret.revoked`。 |
+
+### Admin Console 聚合读（issue #35，DC-3）
+
+fusion-security Admin Console 是服务，只持有 service token（union-web iframe 不持有用户 JWT），因此为其增加 service token 门控的只读聚合端点（数据源侧 RBAC 仍为权威，不新增任何变更面）：
+
+- `GET /api/v1/admin/tenants/{tenant_id}/members/summary` —— 成员区卡片计数：`{total, active, disabled, locked, by_role}`，只有计数，无用户名/邮箱；租户不存在 404。
+- `GET /api/v1/admin/tenants/{tenant_id}/idps/summary` —— SSO 能力状态：`{configured, count, types, auto_provision}`，绝不返回 `client_secret` 材料；租户不存在 404。
+- `GET /api/v1/admin/app-secrets` —— 跨应用密钥清单：`{apps: [{app_id, versions, current_version, status, created_at, grace_until}]}`，每应用一行，无任何密钥材料。
 
 `app_id` 须匹配 `^[a-z0-9][a-z0-9_-]{0,63}$`。每次签发/轮换都写入哈希链审计账本（`app_secret.issued` / `app_secret.rotated`，租户 `_system`）。`app_secrets` 为平台级表（无 `tenant_id`、无 RLS —— service token 平面，与 `plan_templates` 同信任级）；迁移 `0013_app_secrets.sql`。
 

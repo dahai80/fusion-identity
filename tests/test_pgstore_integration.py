@@ -323,3 +323,64 @@ async def test_pgstore_app_credential_roundtrip(store):
         assert await store.get_app_credential(app_id, "missing") is None
     finally:
         await store.execute("DELETE FROM app_credentials WHERE app_id=$1", app_id)
+
+
+async def test_pgstore_admin_aggregation_methods(store):
+    # Issue #35: member/idp summary + app-secret inventory/revoke against the
+    # live DB — the member summary JOIN and the revoke UPDATE only exercise
+    # their real SQL here.
+    tid = "inttest_agg_tenant"
+    app_id = "inttest-agg-app"
+    await _cleanup(store, tid)
+    await store.execute("DELETE FROM app_secrets WHERE app_id=$1", app_id)
+    try:
+        await store.create_tenant(tid, "Agg Tenant", plan="team")
+        await store.create_user(f"{tid}_u1", "aggu1", "Password12345x")
+        await store.create_user(f"{tid}_u2", "aggu2", "Password12345x")
+        await store.execute("UPDATE users SET status='disabled' WHERE user_id=$1", f"{tid}_u2")
+        await store.add_member(tid, f"{tid}_u1", "tenant_admin")
+        await store.add_member(tid, f"{tid}_u2", "member")
+
+        summary = await store.get_member_summary(tid)
+        assert summary == {
+            "total": 2,
+            "active": 1,
+            "disabled": 1,
+            "locked": 0,
+            "by_role": {"tenant_admin": 1, "member": 1},
+        }
+        assert await store.get_member_summary("no-such-tenant") == {
+            "total": 0,
+            "active": 0,
+            "disabled": 0,
+            "locked": 0,
+            "by_role": {},
+        }
+
+        idp_sum = await store.get_idp_summary(tid)
+        assert idp_sum == {
+            "configured": False,
+            "count": 0,
+            "types": [],
+            "auto_provision": False,
+        }
+        await store.create_idp("inttest-agg-idp", tid, auto_provision=True)
+        idp_sum = await store.get_idp_summary(tid)
+        assert idp_sum["configured"] is True
+        assert idp_sum["types"] == ["oidc"]
+        assert idp_sum["auto_provision"] is True
+
+        await store.issue_app_secret(app_id, 60)
+        await store.issue_app_secret(app_id, 60)
+        rows = await store.list_all_app_secrets()
+        mine = [r for r in rows if r["app_id"] == app_id]
+        assert len(mine) == 2
+        assert all("secret_hash" not in r for r in mine)
+
+        rec = await store.revoke_app_secret_version(app_id, 1)
+        assert rec is not None and rec["status"] == "revoked"
+        assert await store.revoke_app_secret_version(app_id, 99) is None
+        assert await store.revoke_app_secret_version("no-such-app", 1) is None
+    finally:
+        await _cleanup(store, tid)
+        await store.execute("DELETE FROM app_secrets WHERE app_id=$1", app_id)
