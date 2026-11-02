@@ -804,6 +804,66 @@ class InMemoryStore:
         out.sort(key=lambda r: r["version"], reverse=True)
         return out
 
+    async def list_all_app_secrets(self) -> list[dict[str, Any]]:
+        # Issue #35: cross-app inventory for the admin console key management
+        # zone. Same shape as list_app_secrets (hash stripped, expired grace
+        # normalized) but across every app_id.
+        now = _now()
+        out = []
+        for rec in self._app_secrets.values():
+            item = {k: v for k, v in rec.items() if k != "secret_hash"}
+            if (
+                item["status"] == "grace"
+                and item["grace_until"] is not None
+                and item["grace_until"] < now
+            ):
+                item["status"] = "expired"
+            out.append(item)
+        out.sort(key=lambda r: (r["app_id"], r["version"]), reverse=True)
+        return out
+
+    async def revoke_app_secret_version(self, app_id: str, version: int) -> dict[str, Any] | None:
+        # Issue #35: immediate revocation of one version — cuts a grace window
+        # short when a key is known compromised (UC-S3). Expired semantics stay
+        # read-time for grace; revoked is a durable stored status.
+        for rec in self._app_secrets.values():
+            if rec["app_id"] == app_id and rec["version"] == version:
+                rec["status"] = "revoked"
+                rec["grace_until"] = None
+                logger.info("revoke_app_secret_version: app=%s version=%d", app_id, version)
+                return {k: v for k, v in rec.items() if k != "secret_hash"}
+        return None
+
+    async def get_member_summary(self, tenant_id: str) -> dict[str, Any]:
+        # Issue #35: count-only member aggregate for the admin console member
+        # zone — no usernames/emails leave the store.
+        summary = {"total": 0, "active": 0, "disabled": 0, "locked": 0, "by_role": {}}
+        for (tid, user_id), m in self._members.items():
+            if tid != tenant_id:
+                continue
+            summary["total"] += 1
+            user = self._users.get(user_id)
+            status = user.get("status", "active") if user else "active"
+            if status in summary:
+                summary[status] += 1
+            else:
+                logger.warning(
+                    "get_member_summary: unknown user status=%s user=%s", status, user_id
+                )
+            summary["by_role"][m["role"]] = summary["by_role"].get(m["role"], 0) + 1
+        return summary
+
+    async def get_idp_summary(self, tenant_id: str) -> dict[str, Any]:
+        # Issue #35: SSO capability state for the admin console — types and
+        # auto_provision flags only, never client_secret material.
+        rows = [r for r in self._idps.values() if r["tenant_id"] == tenant_id]
+        return {
+            "configured": len(rows) > 0,
+            "count": len(rows),
+            "types": sorted({r["type"] for r in rows}),
+            "auto_provision": any(r.get("auto_provision") for r in rows),
+        }
+
     async def put_app_credential(self, app_id: str, name: str, secret_enc: str) -> dict[str, Any]:
         # Issue #34: store an externally-issued SaaS credential (already
         # KEK-encrypted by the route). Upsert by (app_id, name) — re-PUT is the

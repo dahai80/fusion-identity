@@ -334,6 +334,9 @@ Service-token gated cross-tenant management (operator/gateway use). Requests mus
 | DELETE | `/tenants/{tenant_id}/api-keys/{key_id}` | revoke a tenant's API key (404 if not in tenant) |
 | DELETE | `/tenants/{tenant_id}/keys/{key_id}` | alias of the above (PRD §3.2 `/keys` path) |
 | GET | `/tenants/{tenant_id}/usage/today` | 24h usage: `concurrency{current_active,max_limit}` + `tokens{prompt_tokens_today,completion_tokens_today,total_today,daily_limit,usage_percentage}` |
+| GET | `/tenants/{tenant_id}/members/summary` | count-only member aggregate for the Admin Console member zone (issue #35): `{total, active, disabled, locked, by_role}` — no usernames/emails; 404 unknown tenant |
+| GET | `/tenants/{tenant_id}/idps/summary` | SSO capability state for the Admin Console (issue #35): `{configured, count, types, auto_provision}` — never `client_secret` material; 404 unknown tenant |
+| GET | `/app-secrets` | cross-app key inventory (issue #35): `{apps: [{app_id, versions, current_version, status, created_at, grace_until}]}`, one row per app, no key material |
 
 Quotas now also support `default_priority` and `allowed_modules` via `PUT /api/v1/tenants/{tenant_id}/quotas`.
 
@@ -436,6 +439,7 @@ All three routes are service-token gated (cross-tenant plane, `X-Tenant-Id: _sys
 | POST | `/api/v1/apps/{app_id}/secrets` | Issue v1 (409 if a current version exists — use rotate). Body `{"grace_seconds"?}` optional. Returns `{secret_id, version, secret, previous_version}`. |
 | GET | `/api/v1/apps/{app_id}/secrets` | List versions newest-first — `{secret_id, version, status, prefix, created_at, grace_until}`, never any key material. |
 | POST | `/api/v1/apps/{app_id}/secrets/rotate` | New current version; previous demoted to `grace` (404 if the app has no secrets). |
+| DELETE | `/api/v1/apps/{app_id}/secrets/{version}` | Immediately mark one version `revoked` (issue #35, UC-S3) — cuts a grace window short when a key is known compromised. 404 if the version does not exist. Audited as `app_secret.revoked`. |
 
 `app_id` must match `^[a-z0-9][a-z0-9_-]{0,63}$`. Every issue/rotate appends to the hash-chained audit ledger (`app_secret.issued` / `app_secret.rotated`, tenant `_system`). Table `app_secrets` is a platform-scope table (no `tenant_id`, no RLS — service-token plane, same trust level as `plan_templates`); migration `0013_app_secrets.sql`.
 

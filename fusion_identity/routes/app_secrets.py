@@ -179,3 +179,36 @@ async def rotate_app_secret(
         created_at=record["created_at"],
         previous_version=prev,
     )
+
+
+@router.delete("/{app_id}/secrets/{version}", response_model=AppSecretVersion)
+async def revoke_app_secret_version(
+    app_id: str,
+    version: int,
+    store: InMemoryStore = Depends(get_store),
+) -> AppSecretVersion:
+    # Issue #35 (UC-S3): immediately mark one version revoked — cuts a grace
+    # window short when a key is known compromised, so the old key stops
+    # validating at once instead of at grace expiry.
+    _validate_app_id(app_id)
+    rec = await store.revoke_app_secret_version(app_id, version)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"app {app_id} has no secret version {version}",
+        )
+    await _audit(
+        store,
+        "app_secret.revoked",
+        app_id,
+        {"secret_id": rec["secret_id"], "version": version},
+    )
+    return AppSecretVersion(
+        secret_id=rec["secret_id"],
+        app_id=app_id,
+        version=rec["version"],
+        status=rec["status"],
+        prefix=rec["prefix"],
+        created_at=rec["created_at"],
+        grace_until=rec.get("grace_until"),
+    )
