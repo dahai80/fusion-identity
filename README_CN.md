@@ -217,6 +217,18 @@ fusion-security Admin Console 是服务，只持有 service token（union-web if
 
 预期消费模式（ai-trysuite §8.2）：启动时拉取、仅存内存；SaaS 返回 401/403 时重拉一次并重试一次；批量重拉由应用侧去抖（`saas_key_refresh_cooldown:{provider}`，TTL 5 分钟）。密文损坏/KEK 不匹配时显式返回 HTTP 500（属运维事故，非 404）。KEK 轮换期间，重加密清扫完成前取回路径经 `FUSION_IDENTITY_KEK_PREV` 解密。
 
+### 新业务服务的凭据签发流程
+
+两个平面，按**谁生成密钥**选择 —— 绝不在 `.env` 里塞密钥：
+
+| 密钥来源 | 平面 | 流程 |
+|---|---|---|
+| identity 生成（HMAC 密钥、需与服务及第三方共享的 webhook 签名密钥） | credentials（issue #34） | 操作员生成一次（`openssl rand -hex 32`），携带 service token `PUT /api/v1/apps/{app_id}/credentials/{name}`，在第三方控制台配置同一值；消费者启动时 `GET` 取回。 |
+| 第三方签发（provider API key、OAuth client secret） | credentials（issue #34） | 操作员携带 service token 一次性 `PUT` 真实值；消费者启动时 `GET`，401/403 时重拉。 |
+| 服务本地自生成（仅该服务自己读取的原始材料，如落盘 KEK） | app_secrets（issue #28） | `POST /api/v1/apps/{app_id}/secrets`；原始 `fms_` 值只返回一次 —— 消费者须在接收时持久化（如 0600 文件）。 |
+
+隔离：identity 为唯一权威；`app_id` 是凭据名的命名空间边界（`/api/v1/apps/{app_id}/credentials/{name}`），消费者之间不共享扁平中心命名空间。`FUSION_<APP>_DATA_DIR` 的 0600 文件最多是本地缓存，绝不是权威。注意 service token 本身是平台级凭据 —— 按 app 的隔离靠 `app_id` 命名，而非按 app 的 token 作用域；泄漏时轮换 token（支持 `FUSION_IDENTITY_SERVICE_TOKEN_PREV` 双窗口）。
+
 ## 数据库
 
 Postgres 库 `fusion_identity` —— 单一权威库（issue #26，DB 规范 DB-2：一应用一库；旧 `fusion_tenant` 默认值已废弃）。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。24 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`、`app_secrets`、`app_credentials`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。

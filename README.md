@@ -456,6 +456,18 @@ All routes are service-token gated (`X-Tenant-Id: _system`). `app_id` matches `^
 
 Expected consume pattern (ai-trysuite §8.2): pull at startup into memory only; on a SaaS 401/403 re-pull once and retry once; debounce mass re-pulls app-side (`saas_key_refresh_cooldown:{provider}`, TTL 5 min). A wrong/tampered blob fails visibly with HTTP 500 (KEK mismatch is an operational incident, not a 404). During a KEK rotation the fetch path decrypts via `FUSION_IDENTITY_KEK_PREV` until the re-encrypt sweep completes.
 
+### Issuance flow for a new business service
+
+Two planes, chosen by **who generates the secret** — never by stuffing `.env`:
+
+| Secret origin | Plane | Flow |
+|---|---|---|
+| Identity-generated (HMAC keys, webhook signing secrets the service and a third party must share) | credentials (issue #34) | Operator generates the value once (`openssl rand -hex 32`), `PUT /api/v1/apps/{app_id}/credentials/{name}` with the service token, configures the same value in the third-party dashboard, and the consumer `GET`s it at boot. |
+| Third-party-issued (provider API keys, OAuth client secrets) | credentials (issue #34) | Operator `PUT`s the real value once with the service token; the consumer `GET`s it at boot and re-pulls on 401/403. |
+| Service-local self-generated (raw material only that service ever reads, e.g. a data-at-rest KEK) | app_secrets (issue #28) | `POST /api/v1/apps/{app_id}/secrets`; the raw `fms_` value is returned exactly once — the consumer must persist it (e.g. 0600 file) at receipt. |
+
+Isolation: identity is the single source of truth; `app_id` is the namespace boundary for credential names (`/api/v1/apps/{app_id}/credentials/{name}`), so consumers never share a flat central namespace. `FUSION_<APP>_DATA_DIR` 0600 files are a local cache at most, never the source of truth. Note the service token itself is a platform-level credential — per-app isolation is by `app_id` naming, not by per-app token scoping; rotate the token if it leaks (`FUSION_IDENTITY_SERVICE_TOKEN_PREV` dual-window supported).
+
 ## Test
 
 ```bash
