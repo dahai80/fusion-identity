@@ -363,3 +363,19 @@ CREATE TABLE IF NOT EXISTS app_secrets (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_app_secrets_app_version
     ON app_secrets(app_id, version);
 CREATE INDEX IF NOT EXISTS ix_app_secrets_app ON app_secrets(app_id);
+
+-- Issue #34: externally-issued SaaS credentials (ai-trysuite §8.2). Values are
+-- third-party-issued and must be recoverable by the consumer, so they are
+-- AES-256-GCM encrypted under the KEK — not hashed like app_secrets.
+-- Platform-scope table (service-token plane, no tenant_id), no RLS policy.
+CREATE TABLE IF NOT EXISTS app_credentials (
+    app_id          TEXT        NOT NULL,
+    name            TEXT        NOT NULL,
+    secret_enc      TEXT        NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    fetch_count     BIGINT      NOT NULL DEFAULT 0,
+    last_fetched_at TIMESTAMPTZ,
+    PRIMARY KEY (app_id, name)
+);
+CREATE INDEX IF NOT EXISTS ix_app_credentials_app ON app_credentials(app_id);

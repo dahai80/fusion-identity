@@ -106,6 +106,7 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` + `X-Tenant-Id: <
 - `oidc` (`/api/v1/auth/oidc/{idp_id}`): login/callback — tenant-middleware-exempt (synthetic `X-Tenant-Id: oidc` injected by `_OidcContextMiddleware`). `_STATES` is a bounded LRU+TTL `OrderedDict` (`_STATES_MAX=1024`, `_STATES_TTL=600`).
 - `scim` (`/scim/v2`): `/Users` list/create (exempt) + `/Users/{id}` GET/PATCH/DELETE (non-exempt). `_OidcContextMiddleware` injects `X-Tenant-Id` from the `tenantId` query param for `/scim/v2/` paths so the tenant middleware accepts them. All gated by service token.
 - `app_secrets` (`/api/v1/apps/{app_id}/secrets`): issue/list/rotate for business-app key material (issue #28) — `require_service_token`, raw `fms_` secret returned exactly once, sha256 hash at rest, rotation grace window (`FUSION_IDENTITY_SECRET_GRACE_SECONDS`), audit to tenant `_system`.
+- `app_credentials` (`/api/v1/apps/{app_id}/credentials/{name}`): PUT/GET externally-issued SaaS credentials (issue #34) — `require_service_token`, AES-256-GCM under the KEK at rest (recoverable, unlike app_secrets' hash), fetch counter for anomaly detection, audit `app_credential.stored`/`fetched` to tenant `_system`.
 - `admin` (`/api/v1/admin`): service-token gated, cross-tenant. GET/POST/PUT `/tenants` (+ quota fields `max_concurrency`→`concurrent`, `daily_token_limit`→`tpm`, `allowed_modules`, `allowed_models`), GET `/tenants/{id}/quota`, POST/DELETE api-keys (`/api-keys` + `/keys` alias), GET `/tenants/{id}/usage/today` (concurrency + token breakdown).
 
 ### Models (`models.py`)
@@ -130,7 +131,7 @@ Pydantic v2 request/response schemas. No DB models — store layer uses plain di
 
 ## Database
 
-Postgres DB `fusion_identity` — single canonical DB (issue #26, DB-2; legacy `fusion_tenant` retired). Schema in `deploy/sql/schema.sql` (PRD Appendix A.1, independent of cowork RLS DB); table inventory there is authoritative (24 tables, incl. platform-scope `app_secrets` from issue #28). Apply with `psql` before first run. `PgStore.ensure_schema` only warns — DDL is operator/CI responsibility.
+Postgres DB `fusion_identity` — single canonical DB (issue #26, DB-2; legacy `fusion_tenant` retired). Schema in `deploy/sql/schema.sql` (PRD Appendix A.1, independent of cowork RLS DB); table inventory there is authoritative (25 tables, incl. platform-scope `app_secrets` from issue #28 and `app_credentials` from issue #34). Apply with `psql` before first run. `PgStore.ensure_schema` only warns — DDL is operator/CI responsibility.
 
 ## Conventions
 

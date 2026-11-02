@@ -470,6 +470,41 @@ class PgStore:
             out.append(item)
         return out
 
+    async def put_app_credential(self, app_id: str, name: str, secret_enc: str) -> dict[str, Any]:
+        # Issue #34: mirrors InMemoryStore.put_app_credential. Upsert on the
+        # (app_id, name) PK — re-PUT is the operator-side rotation path for
+        # third-party-issued SaaS keys.
+        row = await self.fetchrow(
+            "INSERT INTO app_credentials(app_id, name, secret_enc) "
+            "VALUES ($1,$2,$3) "
+            "ON CONFLICT (app_id, name) DO UPDATE "
+            "SET secret_enc=EXCLUDED.secret_enc, updated_at=now() "
+            "RETURNING *",
+            app_id,
+            name,
+            secret_enc,
+        )
+        logger.info("put_app_credential: app=%s name=%s", app_id, name)
+        return _decode_app_credential(row)
+
+    async def get_app_credential(self, app_id: str, name: str) -> dict[str, Any] | None:
+        # Issue #34: atomic fetch-and-count — the UPDATE doubles as the read.
+        row = await self.fetchrow(
+            "UPDATE app_credentials SET fetch_count=fetch_count+1, "
+            "last_fetched_at=now() WHERE app_id=$1 AND name=$2 RETURNING *",
+            app_id,
+            name,
+        )
+        if row is None:
+            return None
+        logger.info(
+            "get_app_credential: app=%s name=%s fetch_count=%s",
+            app_id,
+            name,
+            row["fetch_count"],
+        )
+        return _decode_app_credential(row)
+
     async def get_quota(self, tenant_id: str) -> dict[str, Any] | None:
         row = await self.fetchrow("SELECT * FROM quotas WHERE tenant_id=$1", tenant_id)
         return _decode_quota(row) if row else None
@@ -1421,6 +1456,17 @@ def _decode_app_secret(row: dict[str, Any], strip_hash: bool = False) -> dict[st
         rec[key] = val.timestamp() if hasattr(val, "timestamp") else val
     if strip_hash:
         rec.pop("secret_hash", None)
+    return rec
+
+
+def _decode_app_credential(row: dict[str, Any]) -> dict[str, Any]:
+    # Issue #34: normalize TIMESTAMPTZ datetimes to unix-epoch floats so
+    # PgStore records match InMemoryStore's shape. The ciphertext blob stays
+    # opaque here — decryption happens in the route under the KEK.
+    rec = dict(row)
+    for key in ("created_at", "updated_at", "last_fetched_at"):
+        val = rec.get(key)
+        rec[key] = val.timestamp() if hasattr(val, "timestamp") else val
     return rec
 
 

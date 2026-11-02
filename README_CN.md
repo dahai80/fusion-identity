@@ -195,9 +195,22 @@ Schema：`custom_roles`、`role_menu_matrix`、`known_menus`（迁移 `0009_rbac
 
 `app_id` 须匹配 `^[a-z0-9][a-z0-9_-]{0,63}$`。每次签发/轮换都写入哈希链审计账本（`app_secret.issued` / `app_secret.rotated`，租户 `_system`）。`app_secrets` 为平台级表（无 `tenant_id`、无 RLS —— service token 平面，与 `plan_templates` 同信任级）；迁移 `0013_app_secrets.sql`。
 
+### SaaS 凭据 —— 供 provider 层存取（issue #34）
+
+第三方 SaaS API key（如 VTON 服务商）是**外部签发**的 —— identity 无法凭空轮换出有效新 key，且消费者必须能在启动时和 SaaS 侧换 key 后（401/403 触发一次重拉 + 一次重试，应用侧去抖）取回原始值。因此与 `app_secrets`（SHA-256 哈希、明文只给一次）不同，这类值以 **KEK 下 AES-256-GCM 加密**落盘，可按需取回。
+
+全部路由由 service token 门控（`X-Tenant-Id: _system`）。`app_id` 匹配 `^[a-z0-9][a-z0-9_-]{0,63}$`，凭据 `name` 匹配 `^[a-z0-9][a-z0-9_.-]{0,63}$`。每次存/取都写入哈希链审计账本（`app_credential.stored` / `app_credential.fetched`，租户 `_system`）；原始值绝不写日志、绝不入审计。`app_credentials` 为平台级表（无 `tenant_id`、无 RLS）；迁移 `0016_app_credentials.sql`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| PUT | `/api/v1/apps/{app_id}/credentials/{name}` | 操作员存入/覆盖原始凭据（upsert —— 重放 PUT 即第三方 key 的轮换路径）。body `{"value": "..."}`。只返回元数据，不回显值。 |
+| GET | `/api/v1/apps/{app_id}/credentials/{name}` | 消费方取回当前原始值（未存过则 404）。累加 `fetch_count` / `last_fetched_at`，用于异常检测。 |
+
+预期消费模式（ai-trysuite §8.2）：启动时拉取、仅存内存；SaaS 返回 401/403 时重拉一次并重试一次；批量重拉由应用侧去抖（`saas_key_refresh_cooldown:{provider}`，TTL 5 分钟）。密文损坏/KEK 不匹配时显式返回 HTTP 500（属运维事故，非 404）。KEK 轮换期间，重加密清扫完成前取回路径经 `FUSION_IDENTITY_KEK_PREV` 解密。
+
 ## 数据库
 
-Postgres 库 `fusion_identity` —— 单一权威库（issue #26，DB 规范 DB-2：一应用一库；旧 `fusion_tenant` 默认值已废弃）。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。24 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`、`app_secrets`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
+Postgres 库 `fusion_identity` —— 单一权威库（issue #26，DB 规范 DB-2：一应用一库；旧 `fusion_tenant` 默认值已废弃）。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。24 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`、`app_secrets`、`app_credentials`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
 
 附带 `InMemoryStore` 供测试与引导；未注入 Postgres store 时 `build_app()` 用它。
 

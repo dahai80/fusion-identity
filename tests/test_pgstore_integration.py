@@ -295,3 +295,31 @@ async def test_revoked_jti_accepts_synthetic_session_principal(store):
         await store.execute("DELETE FROM issued_jtis WHERE jti=$1", "jti-synthetic-2")
     finally:
         await store.execute("DELETE FROM tenants WHERE tenant_id=$1", "fk-test-tenant")
+
+
+async def test_pgstore_app_credential_roundtrip(store):
+    # Issue #34: PgStore credential upsert + fetch-counter path against the
+    # live app_credentials table (migration 0016).
+    app_id = "inttest-creds-app"
+    try:
+        rec = await store.put_app_credential(app_id, "fashn_api_key", "enc-blob-v1")
+        assert rec["app_id"] == app_id
+        assert rec["fetch_count"] == 0
+        assert rec["last_fetched_at"] is None
+        assert isinstance(rec["created_at"], float)
+
+        got = await store.get_app_credential(app_id, "fashn_api_key")
+        assert got["secret_enc"] == "enc-blob-v1"
+        assert got["fetch_count"] == 1
+        assert got["last_fetched_at"] is not None
+
+        # upsert overwrites without resetting counters
+        rec2 = await store.put_app_credential(app_id, "fashn_api_key", "enc-blob-v2")
+        assert rec2["created_at"] == rec["created_at"]
+        got2 = await store.get_app_credential(app_id, "fashn_api_key")
+        assert got2["secret_enc"] == "enc-blob-v2"
+        assert got2["fetch_count"] == 2
+
+        assert await store.get_app_credential(app_id, "missing") is None
+    finally:
+        await store.execute("DELETE FROM app_credentials WHERE app_id=$1", app_id)

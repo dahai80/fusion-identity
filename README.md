@@ -396,7 +396,7 @@ All lifecycle mutations append to a transactional event outbox (`event_outbox` t
 
 ## Database
 
-Postgres DB `fusion_identity` — the single canonical database (issue #26, DB conventions DB-2: one app, one database; the legacy `fusion_tenant` default is retired). Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 24 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`, `app_secrets`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
+Postgres DB `fusion_identity` — the single canonical database (issue #26, DB conventions DB-2: one app, one database; the legacy `fusion_tenant` default is retired). Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 24 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`, `app_secrets`, `app_credentials`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
 
 An `InMemoryStore` ships for tests and bootstrap; `build_app()` uses it when `FUSION_IDENTITY_USE_PGSTORE` is unset. Production sets that env and injects a `PgStore`, which runs idempotent migrations from [`migrations/`](migrations/) on startup (`ensure_schema`).
 
@@ -438,6 +438,19 @@ All three routes are service-token gated (cross-tenant plane, `X-Tenant-Id: _sys
 | POST | `/api/v1/apps/{app_id}/secrets/rotate` | New current version; previous demoted to `grace` (404 if the app has no secrets). |
 
 `app_id` must match `^[a-z0-9][a-z0-9_-]{0,63}$`. Every issue/rotate appends to the hash-chained audit ledger (`app_secret.issued` / `app_secret.rotated`, tenant `_system`). Table `app_secrets` is a platform-scope table (no `tenant_id`, no RLS — service-token plane, same trust level as `plan_templates`); migration `0013_app_secrets.sql`.
+
+### SaaS credentials — store & fetch for provider layers (issue #34)
+
+Third-party SaaS API keys (e.g. VTON providers) are **externally issued** — identity cannot rotate them into existence, and the consumer must be able to recover the raw value at boot and after a SaaS-side rotation (re-pull on 401/403, app-side debounce). So unlike `app_secrets` (sha256 hash, raw shown once), these values are stored **AES-256-GCM encrypted under the KEK** and are fetchable on demand.
+
+All routes are service-token gated (`X-Tenant-Id: _system`). `app_id` matches `^[a-z0-9][a-z0-9_-]{0,63}$`, credential `name` matches `^[a-z0-9][a-z0-9_.-]{0,63}$`. Every store/fetch appends to the hash-chained audit ledger (`app_credential.stored` / `app_credential.fetched`, tenant `_system`); the raw value is never logged or audited. Table `app_credentials` is a platform-scope table (no `tenant_id`, no RLS); migration `0016_app_credentials.sql`.
+
+| Method | Path | Description |
+|---|---|---|
+| PUT | `/api/v1/apps/{app_id}/credentials/{name}` | Operator stores/overwrites the raw credential (upsert — re-PUT is the rotation path for third-party keys). Body `{"value": "..."}`. Returns metadata only, never the value. |
+| GET | `/api/v1/apps/{app_id}/credentials/{name}` | Consumer fetches the current raw value (404 if never stored). Bumps `fetch_count` / `last_fetched_at` for anomaly detection. |
+
+Expected consume pattern (ai-trysuite §8.2): pull at startup into memory only; on a SaaS 401/403 re-pull once and retry once; debounce mass re-pulls app-side (`saas_key_refresh_cooldown:{provider}`, TTL 5 min). A wrong/tampered blob fails visibly with HTTP 500 (KEK mismatch is an operational incident, not a 404). During a KEK rotation the fetch path decrypts via `FUSION_IDENTITY_KEK_PREV` until the re-encrypt sweep completes.
 
 ## Test
 
