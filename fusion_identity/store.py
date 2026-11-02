@@ -288,6 +288,7 @@ class InMemoryStore:
         self._api_keys: dict[str, dict[str, Any]] = {}
         self._key_hash_index: dict[str, str] = {}
         self._app_secrets: dict[str, dict[str, Any]] = {}
+        self._app_credentials: dict[tuple[str, str], dict[str, Any]] = {}
         self._quotas: dict[str, dict[str, Any]] = {}
         self._audit: list[dict[str, Any]] = []
         self._revoked_jtis: dict[str, dict[str, Any]] = {}
@@ -802,6 +803,46 @@ class InMemoryStore:
             out.append(item)
         out.sort(key=lambda r: r["version"], reverse=True)
         return out
+
+    async def put_app_credential(self, app_id: str, name: str, secret_enc: str) -> dict[str, Any]:
+        # Issue #34: store an externally-issued SaaS credential (already
+        # KEK-encrypted by the route). Upsert by (app_id, name) — re-PUT is the
+        # operator-side rotation path for third-party keys.
+        now = _now()
+        key = (app_id, name)
+        rec = self._app_credentials.get(key)
+        if rec is None:
+            rec = {
+                "app_id": app_id,
+                "name": name,
+                "secret_enc": secret_enc,
+                "created_at": now,
+                "updated_at": now,
+                "fetch_count": 0,
+                "last_fetched_at": None,
+            }
+            self._app_credentials[key] = rec
+        else:
+            rec["secret_enc"] = secret_enc
+            rec["updated_at"] = now
+        logger.info("put_app_credential: app=%s name=%s", app_id, name)
+        return dict(rec)
+
+    async def get_app_credential(self, app_id: str, name: str) -> dict[str, Any] | None:
+        # Issue #34: fetch bumps the fetch counter + last_fetched_at so the
+        # audit plane can spot anomaly patterns (mass 401 re-pulls).
+        rec = self._app_credentials.get((app_id, name))
+        if rec is None:
+            return None
+        rec["fetch_count"] = rec.get("fetch_count", 0) + 1
+        rec["last_fetched_at"] = _now()
+        logger.info(
+            "get_app_credential: app=%s name=%s fetch_count=%d",
+            app_id,
+            name,
+            rec["fetch_count"],
+        )
+        return dict(rec)
 
     async def get_quota(self, tenant_id: str) -> dict[str, Any] | None:
         q = self._quotas.get(tenant_id)
