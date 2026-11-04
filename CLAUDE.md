@@ -60,7 +60,7 @@ Tests use Starlette `TestClient` against `build_app(store=InMemoryStore(), run_b
 - `auth_service` — `AuthService(store, signing_key, issuer, audience, ttl, refresh_ttl)`
 - `redis` / `cache` / `concurrency` / `grpc_server` — all `None` unless `redis_url` set; built on startup
 
-Routers included: `auth`, `tenants`, `members`, `api_keys`, `quotas`, `audit`, `usage`, `metrics`, `jwks`, `idps`, `oidc`, `scim`, `mfa`, `admin`. Tenant middleware installed from `fusion_core.tenant` with `TENANT_EXEMPT` paths (health/docs/login/verify/refresh — exact-match only). Startup order: connect store → ensure_schema → build Redis → init cache+concurrency scripts → bootstrap → start gRPC (only if `grpc_port>0` AND concurrency present). Shutdown: grpc.stop → redis.aclose → store.close.
+Routers included: `auth`, `tenants`, `members`, `api_keys`, `quotas`, `audit`, `usage`, `metrics`, `jwks`, `idps`, `oidc`, `scim`, `mfa`, `admin`, `registration`. Tenant middleware installed from `fusion_core.tenant` with `TENANT_EXEMPT` paths (health/docs/login/verify/refresh/register/register-tenant/verify-email — exact-match only). Startup order: connect store → ensure_schema → build Redis → init cache+concurrency scripts → bootstrap → start gRPC (only if `grpc_port>0` AND concurrency present). Shutdown: grpc.stop → redis.aclose → store.close.
 
 Note: `build_app` defaults to `InMemoryStore` — production must inject a `PgStore`. The DDL in `deploy/sql/schema.sql` is applied by operator/CI; `PgStore.ensure_schema` only warns. The gRPC/cache/concurrency plane is **disabled** unless `FUSION_IDENTITY_REDIS_URL` is set.
 
@@ -70,7 +70,7 @@ Two interchangeable backends sharing a `StoreProto` (declared in `auth.py`):
 - **`InMemoryStore`** — dicts in memory, seeds 4 roles from `ROLES_SEED`, creates default quota on tenant create. Used by all offline tests.
 - **`PgStore`** — asyncpg connection pool, generic `fetchrow/fetch/fetchval/execute`.
 
-Domain logic lives on the store (CRUD for tenants/users/members/api_keys/quotas/audit, jti revocation). Routes are thin. `StoreConflict` = 409. Audit is append-only + hash-chained (`_chain_hash` links each record to the previous `chain_hash`, genesis = `"genesis"`).
+Domain logic lives on the store (CRUD for tenants/users/members/api_keys/quotas/audit, jti revocation, email verification: `set_email_verify_token` / `verify_email_token` — migration `0017_email_verification.sql` adds `users.email_verified` (default TRUE for pre-existing users) + `email_verify_token_hash` / `email_verify_expires`). Routes are thin. `StoreConflict` = 409. Audit is append-only + hash-chained (`_chain_hash` links each record to the previous `chain_hash`, genesis = `"genesis"`).
 
 Password hashing: scrypt (n=16384, r=8, p=1, fixed salt `"fusion-identity"`) via `scrypt_hash`/`verify_password` (constant-time `hmac.compare_digest`). API keys: `fmu_`-prefixed, SHA-256 hashed at rest, raw returned only on creation.
 
@@ -95,7 +95,8 @@ Password hashing: scrypt (n=16384, r=8, p=1, fixed salt `"fusion-identity"`) via
 
 All tenant-scoped routes require `Authorization: Bearer <jwt>` + `X-Tenant-Id: <tid>`; token `tid` must match both header and path.
 
-- `auth` (`/api/v1/auth`): login (no auth), verify GET+POST (service token), refresh (no auth), revoke (tenant_admin), DELETE `/sessions` (service token, issue #29 — user-deletion flow revokes all access/session jtis + refresh families for `{sub, tenant_id}`, returns counts, 404 unknown tenant, audited).
+- `auth` (`/api/v1/auth`): login (no auth), verify GET+POST (service token), refresh (no auth), revoke (tenant_admin), DELETE `/sessions` (service token, issue #29 — user-deletion flow revokes all access/session jtis + refresh families for `{sub, tenant_id}`, returns counts, 404 unknown tenant, audited). Issue #39: login 403-blocks email-unverified users ("email not verified — check your inbox for the verification link"); `AuthService.login(..., skip_email_verification=True)` is the internal-only bypass used by register-tenant for its single at-signup issuance.
+- `registration` (`/api/v1/auth/register*`, issue #39): public self-service signup (design `architecture/fusion-site-auth-1104.md`). `POST /register` — personal signup: create_user + auto-join `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` (default `community`, auto-created with the free plan template on first signup), role `member`; verification on → email required (422) + `{status:"verification_required"}` + login 403 until `/verify-email`; off → immediate token pair. `POST /register-tenant` — wraps `provision_core` (zero duplicated tenant-creation logic), `Idempotency-Key` replay supported, admin password never echoed, immediate token pair via the skip flag. `POST /verify-email` — single-use expiring redemption (sha256 at rest, lookup by hash, columns cleared on success, uniform 400). `POST /verify-email/resend` — PUBLIC by design (unverified users hold no bearer; bearer-gating would deadlock), uniform `{resent}` (no enumeration). Verification tokens: `secrets.token_urlsafe(32)`, TTL `email_verify_ttl_seconds`; SMTP unset → token WARNING-logged (dev fallback), delivery failures never fail signup. Audited to `_system` with `role="public"`: `auth.registered` / `auth.tenant_registered` / `auth.email_verified`.
 - `tenants` (`/api/v1/tenants`): list/create/get/patch/delete — `require_tenant_admin`.
 - `members` (`/api/v1/tenants/{tenant_id}/members`): list, add-or-create, delete — `require_tenant_admin_of`.
 - `api_keys` (`/api/v1/tenants/{tenant_id}/api-keys`): list/create/revoke — `require_tenant_admin_of`.
@@ -132,7 +133,7 @@ Pydantic v2 request/response schemas. No DB models — store layer uses plain di
 
 ## Database
 
-Postgres DB `fusion_identity` — single canonical DB (issue #26, DB-2; legacy `fusion_tenant` retired). Schema in `deploy/sql/schema.sql` (PRD Appendix A.1, independent of cowork RLS DB); table inventory there is authoritative (25 tables, incl. platform-scope `app_secrets` from issue #28 and `app_credentials` from issue #34). Apply with `psql` before first run. `PgStore.ensure_schema` only warns — DDL is operator/CI responsibility.
+Postgres DB `fusion_identity` — single canonical DB (issue #26, DB-2; legacy `fusion_tenant` retired). Schema in `deploy/sql/schema.sql` (PRD Appendix A.1, independent of cowork RLS DB); table inventory there is authoritative (25 tables, incl. platform-scope `app_secrets` from issue #28 and `app_credentials` from issue #34; issue #39 adds email-verification columns on `users` via migration `0017`). Apply with `psql` before first run. `PgStore.ensure_schema` only warns — DDL is operator/CI responsibility.
 
 ## Conventions
 

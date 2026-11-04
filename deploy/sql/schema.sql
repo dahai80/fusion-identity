@@ -37,6 +37,12 @@ CREATE TABLE users (
     locked_until         TIMESTAMPTZ,
     must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
     last_login_at        TIMESTAMPTZ,
+    -- Issue #39: email verification (public registration). Default TRUE so
+    -- users created through privileged paths are never blocked; public signups
+    -- set it explicitly. Verify token stored hashed, single use, expiring.
+    email_verified       BOOLEAN NOT NULL DEFAULT TRUE,
+    email_verify_token_hash TEXT,
+    email_verify_expires TIMESTAMPTZ,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT users_algo_chk  CHECK (password_algo IN ('argon2id','scrypt','legacy')),
     CONSTRAINT users_status_chk CHECK (status IN ('active','disabled','locked'))

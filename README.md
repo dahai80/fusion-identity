@@ -84,6 +84,15 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_WEBHOOK_TICK` | no | `5` | Webhook worker poll interval, seconds. |
 | `FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS` | no | `5` | Delivery attempts before an event is dead-lettered (status `dead`, stays queryable in the outbox). |
 | `FUSION_IDENTITY_SECRET_GRACE_SECONDS` | no | `86400` (24h) | Default rotation grace window for issued application secrets (issue #28). During the window the demoted version reads back as `grace` so the app can decrypt-and-re-encrypt. |
+| `FUSION_IDENTITY_REGISTRATION_ENABLED` | no | `1` | Public self-registration (issue #39). `0` returns 403 on both registration endpoints. |
+| `FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED` | no | `1` | When `1`, registration requires an email and issues a single-use verification token; login is 403-blocked until verified. `0` returns a token pair at signup directly. |
+| `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | no | `86400` | Email verification token TTL, seconds. |
+| `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | no | `community` | Tenant personal signups auto-join. Auto-created (free plan template) on first personal signup if missing. |
+| `FUSION_IDENTITY_SMTP_HOST` | no | — (logged) | SMTP relay host. Unset → the verification token is WARNING-logged (dev fallback, documented) instead of emailed; verification still gates login. |
+| `FUSION_IDENTITY_SMTP_PORT` | no | `587` | SMTP relay port. |
+| `FUSION_IDENTITY_SMTP_USERNAME` / `_PASSWORD` | no | — | SMTP AUTH credentials. |
+| `FUSION_IDENTITY_SMTP_FROM` | no | — | From address for verification emails. |
+| `FUSION_IDENTITY_SMTP_STARTTLS` | no | `1` | Use STARTTLS when connecting to the relay. |
 
 Bootstrap runs only when the tenant table is empty. On an **empty** table with `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` unset, startup **refuses to start** (fail-closed — a fresh install must be seeded with a first admin; the service will not come up un-administerable). Bootstrap is a no-op when the table is **non-empty** (the operator pre-seeded the first admin out-of-band, e.g. via `psql`), so the service starts without those vars in that case.
 
@@ -95,7 +104,7 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` and `X-Tenant-Id:
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/login` | none | `{username,password,tenant_id,mfa_code?}` → `{access_token,refresh_token,must_change_password,mfa_required}`. When the user has an enabled TOTP factor and omits `mfa_code`, returns `mfa_required=true` with empty tokens; resend with `mfa_code` to complete. |
+| POST | `/login` | none | `{username,password,tenant_id,mfa_code?}` → `{access_token,refresh_token,must_change_password,mfa_required}`. When the user has an enabled TOTP factor and omits `mfa_code`, returns `mfa_required=true` with empty tokens; resend with `mfa_code` to complete. Issue #39: an email-unverified user gets 403 (`email not verified — check your inbox for the verification link`) instead of tokens. |
 | GET | `/verify?token=` | service token | validate a token; returns `{tid,role,scopes,quota,tenant_status}` |
 | POST | `/verify` | service token | body `{token}` |
 | POST | `/introspect` | service token | RFC 7662 token introspection. Accepts JSON `{token}` or form-encoded `token=...`; returns `{active:false}` for invalid/revoked/expired tokens or `{active:true,scope,client_id,username,sub,tenant_id,role,token_type,iat,exp,jti,iss,aud}` for valid ones. |
@@ -103,6 +112,19 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` and `X-Tenant-Id:
 | DELETE | `/sessions` | service token | Revoke all access/session jtis + refresh families for `{sub, tenant_id}` (issue #29 user-deletion flow) || POST | `/revoke` | bearer (tenant_admin) | `{jti}` — revokes the caller's own jti (attribution audited) |
 | POST | `/logout` | bearer | `{refresh_token?}` — revokes access jti + the refresh token |
 | POST | `/password` | bearer | `{old_password,new_password}` — change own password (NIST 800-63B policy) |
+
+### Public registration (`/api/v1/auth/register*` — issue #39)
+
+Self-service signup channels (design: `architecture/fusion-site-auth-1104.md`). Both are tenant-middleware-exempt, rate-limited, audited (`auth.registered` / `auth.tenant_registered` / `auth.email_verified` to tenant `_system`), and thin wrappers over the existing creation internals (`create_user` / `provision_core`) — no second creation code path.
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/register` | none | Channel A — personal signup. `{username,password,display_name?,email?}`. Creates the global user, auto-joins `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` (auto-created with the free plan template on first signup), role `member`. Verification on: email required (422 otherwise), response is `{status:"verification_required"}` and login stays 403 until `/verify-email`. Verification off: returns a usable `tokens` pair immediately. 409 on username conflict, 403 when `FUSION_IDENTITY_REGISTRATION_ENABLED=0`. |
+| POST | `/register-tenant` | none | Channel B — tenant signup. `{tenant_display_name,admin_username,admin_password (>=12),admin_email?,plan?="free"}`. Wraps `provision_core` (same store methods as the admin provision path: tenant + plan quota template + seed admin, auto-active, `Idempotency-Key` replay supported). Admin password never echoed back. Returns the provision result + an immediate `tokens` pair (signup presented the credentials; later logins still require verification). |
+| POST | `/verify-email` | none | `{token}` → single-use, expiring redemption (hash-at-rest, lookup by hash, columns cleared on success so replay 400s). 400 on invalid/expired/replayed with no distinction (no enumeration). |
+| POST | `/verify-email/resend` | none | `{username}` → re-arms the token (old one invalidated) and re-sends. PUBLIC by design — an unverified user holds no bearer token, so a bearer-gated resend would deadlock. Uniform `{resent:bool}` response regardless of account existence/state (no enumeration). |
+
+**Email delivery**: `FUSION_IDENTITY_SMTP_HOST` unset → the verification token is WARNING-logged (dev fallback) instead of emailed; verification still gates login. SMTP send failures never fail the signup — resend covers retries.
 
 ### Session tokens (`/api/v1/auth/session` — Union Web R-2)
 

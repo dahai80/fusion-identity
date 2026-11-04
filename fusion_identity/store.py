@@ -413,6 +413,8 @@ class InMemoryStore:
         email: str | None = None,
         *,
         must_change_password: bool = False,
+        email_verified: bool = True,
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         if user_id in self._users:
             raise StoreConflict(f"user {user_id} exists")
@@ -421,6 +423,7 @@ class InMemoryStore:
             "user_id": user_id,
             "username": username,
             "email": email,
+            "display_name": display_name,
             "password_hash": "",
             "password_hash_v": pw_hash,
             "salt": salt,
@@ -430,6 +433,11 @@ class InMemoryStore:
             "locked_until": None,
             "must_change_password": must_change_password,
             "last_login_at": None,
+            # Issue #39: default TRUE — privileged creation paths (provision,
+            # SCIM, members API) never block login; public signup sets False.
+            "email_verified": email_verified,
+            "email_verify_token_hash": None,
+            "email_verify_expires": None,
             "created_at": _now(),
         }
         logger.info("create_user: %s username=%s", user_id, username)
@@ -469,6 +477,38 @@ class InMemoryStore:
             if k in fields and fields[k] is not None:
                 u[k] = fields[k]
         return dict(u)
+
+    async def set_email_verify_token(
+        self, user_id: str, token_hash: str, expires_at: float
+    ) -> bool:
+        # Issue #39: (re)arm the verification token — the resend flow and the
+        # initial signup both land here. Any previous token is invalidated by
+        # overwrite.
+        u = self._users.get(user_id)
+        if u is None:
+            return False
+        u["email_verify_token_hash"] = token_hash
+        u["email_verify_expires"] = expires_at
+        logger.info("set_email_verify_token: user=%s", user_id)
+        return True
+
+    async def verify_email_token(self, token_hash: str) -> str | None:
+        # Issue #39: single-use, expiring token redemption. Lookup is BY TOKEN
+        # HASH (the verify endpoint carries no user id). Success marks the
+        # account verified and clears the token so it cannot replay.
+        for u in self._users.values():
+            if u.get("email_verify_token_hash") != token_hash:
+                continue
+            expires = u.get("email_verify_expires")
+            if expires is not None and expires < _now():
+                logger.warning("verify_email_token: expired token user=%s", u["user_id"])
+                return None
+            u["email_verified"] = True
+            u["email_verify_token_hash"] = None
+            u["email_verify_expires"] = None
+            logger.info("verify_email_token: verified user=%s", u["user_id"])
+            return u["user_id"]
+        return None
 
     async def add_member(
         self, tenant_id: str, user_id: str, role: str, added_by: str | None = None

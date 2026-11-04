@@ -48,6 +48,10 @@ class SeedAdminSpec(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str | None = Field(default=None, min_length=12, max_length=256)
     email: str | None = None
+    # Issue #39: privileged provision path keeps users verified (default);
+    # the public tenant-signup wrapper passes False when email verification
+    # is required so the seed admin cannot skip inbox confirmation.
+    email_verified: bool = True
 
 
 class ApiKeySpec(BaseModel):
@@ -78,15 +82,26 @@ def _effective_quota(
     return quota
 
 
-@router.post("/tenants/provision", status_code=201)
-async def provision_tenant(
-    body: ProvisionRequest,
-    request: Request,
-    store: InMemoryStore = Depends(get_store),
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+async def provision_core(
+    store: InMemoryStore,
+    settings: Any,
+    request: Request | None,
+    *,
+    tenant_id: str | None,
+    display_name: str,
+    plan: str,
+    quotas: dict[str, Any] | None,
+    seed_admin: SeedAdminSpec | None,
+    api_key: ApiKeySpec | None,
+    hook_url: str | None,
+    endpoint: str,
+    idempotency_key: str | None,
+    added_by: str = "provision",
 ) -> dict[str, Any]:
-    settings = get_settings(request)
-    endpoint = "/api/v1/admin/tenants/provision"
+    # Issue #39: extracted from provision_tenant so the public tenant-signup
+    # route reuses the EXACT same creation path (acceptance: zero duplicated
+    # tenant-creation logic). request is optional so callers without a tenant
+    # cache can still provision.
     if idempotency_key:
         cached = await store.get_idempotency(f"{endpoint}:{idempotency_key}")
         if cached is not None:
@@ -95,59 +110,57 @@ async def provision_tenant(
             out["idempotent_replay"] = True
             return out
 
-    tenant_id = body.tenant_id or ("tnt_" + secrets.token_hex(6))
-    template = await store.get_plan_template(body.plan)
-    quota = _effective_quota(template, body.quotas)
+    tid = tenant_id or ("tnt_" + secrets.token_hex(6))
+    template = await store.get_plan_template(plan)
+    quota = _effective_quota(template, quotas)
 
     # Pre-flight the seed-admin username so a conflict fails BEFORE the tenant
     # is created — a partial provision would otherwise orphan the tenant and
     # poison the idempotency replay with a 409.
-    if body.seed_admin is not None:
-        existing = await store.get_user_by_username(body.seed_admin.username)
+    if seed_admin is not None:
+        existing = await store.get_user_by_username(seed_admin.username)
         if existing is not None:
             raise HTTPException(
                 status_code=409,
-                detail=f"username {body.seed_admin.username!r} already exists",
+                detail=f"username {seed_admin.username!r} already exists",
             )
 
     try:
-        tenant = await store.create_tenant(
-            tenant_id, display_name=body.display_name, plan=body.plan
-        )
+        tenant = await store.create_tenant(tid, display_name=display_name, plan=plan)
     except StoreConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    quota = await store.put_quota(tenant_id, **quota) or {}
+    quota = await store.put_quota(tid, **quota) or {}
 
     admin_out: dict[str, Any] | None = None
-    if body.seed_admin is not None:
-        spec = body.seed_admin
-        generated = spec.password is None
-        password = spec.password or secrets.token_urlsafe(18)
+    if seed_admin is not None:
+        generated = seed_admin.password is None
+        password = seed_admin.password or secrets.token_urlsafe(18)
         user_id = "usr_" + secrets.token_hex(6)
         user = await store.create_user(
             user_id,
-            spec.username,
+            seed_admin.username,
             password,
-            email=spec.email,
+            email=seed_admin.email,
             must_change_password=generated,
+            email_verified=seed_admin.email_verified,
         )
-        await store.add_member(tenant_id, user_id, "tenant_admin", added_by="provision")
+        await store.add_member(tid, user_id, "tenant_admin", added_by=added_by)
         admin_out = {
             "user_id": user["user_id"],
             "username": user["username"],
             "must_change_password": generated,
             "initial_password": password,
         }
-        logger.info("provision: seed admin tenant=%s user=%s", tenant_id, user_id)
+        logger.info("provision: seed admin tenant=%s user=%s", tid, user_id)
 
     api_key_out: dict[str, Any] | None = None
-    if body.api_key is not None:
+    if api_key is not None:
         raw, record = await store.create_api_key(
-            tenant_id, admin_out["user_id"] if admin_out else None, scopes=body.api_key.scopes
+            tid, admin_out["user_id"] if admin_out else None, scopes=api_key.scopes
         )
         api_key_out = {k: v for k, v in record.items() if k != "key_hash"}
         api_key_out["raw_key"] = raw
-        logger.info("provision: api key tenant=%s key=%s", tenant_id, record["key_id"])
+        logger.info("provision: api key tenant=%s key=%s", tid, record["key_id"])
 
     result: dict[str, Any] = {
         "tenant": tenant,
@@ -159,22 +172,22 @@ async def provision_tenant(
     await emit_event(
         store,
         EVENT_TENANT_CREATED,
-        tenant_id,
-        {"tenant_id": tenant_id, "plan": body.plan, "display_name": body.display_name},
+        tid,
+        {"tenant_id": tid, "plan": plan, "display_name": display_name},
     )
     if api_key_out is not None:
         await emit_event(
             store,
             EVENT_APIKEY_CREATED,
-            tenant_id,
+            tid,
             {
-                "tenant_id": tenant_id,
+                "tenant_id": tid,
                 "key_id": api_key_out["key_id"],
                 "prefix": api_key_out["prefix"],
             },
         )
 
-    if body.hook_url:
+    if hook_url:
         # Issue #14 (M-D): delegate downstream key registration to a generic
         # signed hook. The raw api key travels only in the hook/response, never
         # in outbox events.
@@ -185,19 +198,44 @@ async def provision_tenant(
             "api_key": api_key_out,
         }
         hook_result = await dispatch_hook(
-            body.hook_url,
+            hook_url,
             settings.webhook_secret or settings.service_token,
             "provision.completed",
             hook_payload,
         )
-        result["hook"] = {"url": body.hook_url, **hook_result}
+        result["hook"] = {"url": hook_url, **hook_result}
 
     if idempotency_key:
         await store.put_idempotency(f"{endpoint}:{idempotency_key}", endpoint, result)
-    await invalidate_tenant_cache(request, tenant_id)
-    logger.info("provision: done tenant=%s plan=%s", tenant_id, body.plan)
+    if request is not None:
+        await invalidate_tenant_cache(request, tid)
+    logger.info("provision: done tenant=%s plan=%s", tid, plan)
     result["idempotent_replay"] = False
     return result
+
+
+@router.post("/tenants/provision", status_code=201)
+async def provision_tenant(
+    body: ProvisionRequest,
+    request: Request,
+    store: InMemoryStore = Depends(get_store),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    settings = get_settings(request)
+    return await provision_core(
+        store,
+        settings,
+        request,
+        tenant_id=body.tenant_id,
+        display_name=body.display_name,
+        plan=body.plan,
+        quotas=body.quotas,
+        seed_admin=body.seed_admin,
+        api_key=body.api_key,
+        hook_url=body.hook_url,
+        endpoint="/api/v1/admin/tenants/provision",
+        idempotency_key=idempotency_key,
+    )
 
 
 @router.get("/plan-templates")

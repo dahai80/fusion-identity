@@ -126,6 +126,26 @@ class Settings:
     webhook_max_attempts: int = 5
     # Issue #28: rotation grace window for issued application secrets.
     secret_grace_seconds: int = DEFAULT_SECRET_GRACE_SECONDS
+    # Issue #39: public registration plane. `registration_enabled` gates both
+    # public signup endpoints (fail-closed: when False they return 403).
+    # `email_verification_required` defaults to True (issue #40: mandatory
+    # before public rollout) — unverified accounts cannot log in.
+    # `registration_default_tenant` is the tenant personal signups auto-join
+    # (role member) so the returned token pair has a real tid; auto-created
+    # with the free plan template on first use.
+    registration_enabled: bool = True
+    email_verification_required: bool = True
+    email_verify_ttl_seconds: int = 86400
+    registration_default_tenant: str = "community"
+    # Issue #39/#40: SMTP plane for verification emails. When smtp_host is
+    # empty the verification token is logged (WARNING) instead of emailed —
+    # dev fallback; verification still blocks login until completed.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_starttls: bool = True
 
 
 def load_settings() -> Settings:
@@ -286,4 +306,25 @@ def load_settings() -> Settings:
         webhook_secret=webhook_secret,
         webhook_tick_seconds=_int_env("FUSION_IDENTITY_WEBHOOK_TICK", 5),
         webhook_max_attempts=_int_env("FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS", 5),
+        registration_enabled=os.environ.get("FUSION_IDENTITY_REGISTRATION_ENABLED", "1")
+        .strip()
+        .lower()
+        in ("1", "true", "yes"),
+        email_verification_required=os.environ.get(
+            "FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED", "1"
+        )
+        .strip()
+        .lower()
+        in ("1", "true", "yes"),
+        email_verify_ttl_seconds=_int_env("FUSION_IDENTITY_EMAIL_VERIFY_TTL", 86400),
+        registration_default_tenant=os.environ.get(
+            "FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT", "community"
+        ),
+        smtp_host=os.environ.get("FUSION_IDENTITY_SMTP_HOST", ""),
+        smtp_port=_int_env("FUSION_IDENTITY_SMTP_PORT", 587),
+        smtp_username=os.environ.get("FUSION_IDENTITY_SMTP_USERNAME", ""),
+        smtp_password=os.environ.get("FUSION_IDENTITY_SMTP_PASSWORD", ""),
+        smtp_from=os.environ.get("FUSION_IDENTITY_SMTP_FROM", ""),
+        smtp_starttls=os.environ.get("FUSION_IDENTITY_SMTP_STARTTLS", "1").strip().lower()
+        in ("1", "true", "yes"),
     )

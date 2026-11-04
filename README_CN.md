@@ -62,6 +62,15 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_WEBHOOK_TICK` | 否 | `5` | webhook worker 轮询间隔，秒。 |
 | `FUSION_IDENTITY_WEBHOOK_MAX_ATTEMPTS` | 否 | `5` | 投递尝试次数上限，超过后事件进入死信（`status=dead`，仍在 outbox 可查）。 |
 | `FUSION_IDENTITY_SECRET_GRACE_SECONDS` | 否 | `86400`（24h） | 应用密钥轮换默认宽限窗（issue #28）。窗口内旧版本状态为 `grace`，应用须在窗口内完成解密再加密。 |
+| `FUSION_IDENTITY_REGISTRATION_ENABLED` | 否 | `1` | 公开自助注册（issue #39）。`0` 时两个注册端点返回 403。 |
+| `FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED` | 否 | `1` | 为 `1` 时注册必须提供邮箱并签发一次性验证 token；未验证前登录返回 403。`0` 时注册直接返回 token 对。 |
+| `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | 否 | `86400` | 邮箱验证 token 有效期，秒。 |
+| `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | 否 | `community` | 个人注册自动加入的租户。缺失时在首次个人注册时自动创建（绑定 free 计划模板）。 |
+| `FUSION_IDENTITY_SMTP_HOST` | 否 | —（打日志） | SMTP 中继主机。未设置时验证 token 以 WARNING 日志输出（开发兜底，已文档化）而非发信；验证仍阻断登录。 |
+| `FUSION_IDENTITY_SMTP_PORT` | 否 | `587` | SMTP 中继端口。 |
+| `FUSION_IDENTITY_SMTP_USERNAME` / `_PASSWORD` | 否 | — | SMTP 认证凭据。 |
+| `FUSION_IDENTITY_SMTP_FROM` | 否 | — | 验证邮件的发件地址。 |
+| `FUSION_IDENTITY_SMTP_STARTTLS` | 否 | `1` | 连接中继时使用 STARTTLS。 |
 
 引导仅在租户表为空时运行。租户表**非空**（操作员已带外建好首个 admin，例如通过 `psql`）时跳过引导，无需凭证即可启动。租户表**为空**且未设 `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` 时，服务**拒绝启动**（fail-closed —— 全新安装必须带外播种首个 admin，否则无人可管理）。
 
@@ -73,11 +82,24 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| POST | `/login` | 无 | `{username,password,tenant_id}` → `{access_token,refresh_token,...}` |
+| POST | `/login` | 无 | `{username,password,tenant_id}` → `{access_token,refresh_token,...}`。issue #39：邮箱未验证的用户返回 403（`email not verified — check your inbox for the verification link`），不签发 token。 |
 | GET | `/verify?token=` | service token | 校验 token；返回 `{tid,role,scopes,quota}` |
 | POST | `/verify` | service token | body `{token}` |
 | POST | `/refresh` | 无 | `{refresh_token}` → 新 access token |
 | POST | `/revoke` | bearer（tenant_admin） | `{jti}` |
+
+### 公开注册（`/api/v1/auth/register*` —— issue #39）
+
+自助注册通道（设计文档：`architecture/fusion-site-auth-1104.md`）。两者均豁免租户中间件、有限流、有审计（`auth.registered` / `auth.tenant_registered` / `auth.email_verified` 记入租户 `_system`），且是对既有创建内部（`create_user` / `provision_core`）的薄封装 —— 不存在第二条用户/租户创建代码路径。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/register` | 无 | 通道 A —— 个人注册。`{username,password,display_name?,email?}`。创建全局用户，自动加入 `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT`（缺失时首次注册自动创建并绑定 free 计划模板），角色 `member`。验证开启时：邮箱必填（否则 422），响应为 `{status:"verification_required"}`，`/verify-email` 完成前登录保持 403。验证关闭时：立即返回可用 `tokens`。用户名冲突 409；`FUSION_IDENTITY_REGISTRATION_ENABLED=0` 时 403。 |
+| POST | `/register-tenant` | 无 | 通道 B —— 租户注册。`{tenant_display_name,admin_username,admin_password（≥12）,admin_email?,plan?="free"}`。封装 `provision_core`（与管理员开通路径相同的 store 方法：租户 + 计划配额模板 + 种子 admin，自动激活，支持 `Idempotency-Key` 重放）。admin 密码绝不回显。返回开通结果 + 立即的 `tokens` 对（注册请求本身已出示凭据；后续登录仍需验证）。 |
+| POST | `/verify-email` | 无 | `{token}` → 一次性、带过期的兑换（哈希落库、按哈希查找、成功后清列使重放返回 400）。无效/过期/重放一律 400 且不区分（防枚举）。 |
+| POST | `/verify-email/resend` | 无 | `{username}` → 重新签发（旧 token 失效）并重发。**故意公开** —— 未验证用户没有 bearer token，bearer 门控的重发会死锁。无论账号是否存在/状态如何，统一返回 `{resent:bool}`（防枚举）。 |
+
+**邮件投递**：`FUSION_IDENTITY_SMTP_HOST` 未设置时，验证 token 以 WARNING 日志输出（开发兜底）而非发信；验证仍阻断登录。SMTP 发送失败不使注册失败 —— 重发端点负责重试。
 
 ### Tenants（`/api/v1/tenants`）
 
