@@ -42,6 +42,7 @@ class AdminTenantCreate(BaseModel):
     daily_token_limit: int | None = Field(default=None, ge=0)
     allowed_modules: list[str] | None = None
     allowed_models: list[str] | None = None
+    join_policy: str | None = Field(default=None, max_length=16)
 
 
 class AdminTenantUpdate(BaseModel):
@@ -51,6 +52,7 @@ class AdminTenantUpdate(BaseModel):
     allowed_models: list[str] | None = None
     display_name: str | None = Field(default=None, max_length=128)
     status: str | None = Field(default=None, max_length=16)
+    join_policy: str | None = Field(default=None, max_length=16)
 
 
 class AdminApiKeyCreate(BaseModel):
@@ -88,7 +90,10 @@ async def admin_create_tenant(
 ) -> dict[str, Any]:
     try:
         t = await store.create_tenant(
-            body.tenant_id, display_name=body.display_name, plan=body.plan
+            body.tenant_id,
+            display_name=body.display_name,
+            plan=body.plan,
+            join_policy=body.join_policy or "invite",
         )
     except StoreConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -121,6 +126,8 @@ async def admin_update_tenant(
         tenant_fields["display_name"] = body.display_name
     if body.status is not None:
         tenant_fields["status"] = body.status
+    if body.join_policy is not None:
+        tenant_fields["join_policy"] = body.join_policy
     if tenant_fields:
         updated = await store.update_tenant(tenant_id, **tenant_fields)
         if updated is not None:

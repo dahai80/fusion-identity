@@ -126,6 +126,29 @@ Self-service signup channels (design: `architecture/fusion-site-auth-1104.md`). 
 
 **Email delivery**: `FUSION_IDENTITY_SMTP_HOST` unset → the verification token is WARNING-logged (dev fallback) instead of emailed; verification still gates login. SMTP send failures never fail the signup — resend covers retries.
 
+### Tenant join policy (`join_policy` — issue #40)
+
+Every tenant carries an admin-settable `join_policy` (`invite` default; exposed on tenant create/PATCH, admin create/PUT, and provisioning; the auto-created public `community` tenant uses `open`):
+
+| Policy | Flow |
+|---|---|
+| `invite` | tenant_admin mints a single-use expiring invite token (role pre-assigned, `finv_`-prefixed, sha256 at rest, raw shown exactly once); a bearer-authenticated user redeems it |
+| `proof` | existing `POST /members/by-proof` — unchanged |
+| `approval` | user submits a join request; tenant_admin approves (grant = membership, role `member`) or rejects; rejected users may re-apply |
+| `open` | user self-adds, role **forced** to `member` |
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/api/v1/tenants/{tid}/invites` | tenant_admin of `tid` | `{role?="member", email?, ttl_seconds?(60..2592000, default 7d)}` → `{invite_id, token (raw, once), role, expires_at}`. Audited `member.invited`. |
+| GET | `/api/v1/tenants/{tid}/invites` | tenant_admin of `tid` | Inventory; token hashes never leave the store. |
+| POST | `/api/v1/auth/invites/redeem` | bearer | `{token}` → joins the invite's tenant with the pre-assigned role. Single-use + expiry enforced atomically; invalid/expired/replayed all 400. Audited `member.joined`. |
+| POST | `/api/v1/auth/tenants/{tid}/join` | bearer | Open self-join; 403 unless the tenant's `join_policy` is `open`; role forced `member`; 409 already-member. Rate-limited. Audited `member.self_added`. |
+| POST | `/api/v1/tenants/{tid}/join-requests` | bearer | Submit (403 unless policy `approval`; 409 duplicate pending; re-apply allowed after rejection). Rate-limited. Audited `join.requested`. |
+| GET | `/api/v1/tenants/{tid}/join-requests` | tenant_admin of `tid` | List, optional `?status=pending\|approved\|rejected`. |
+| POST | `/api/v1/tenants/{tid}/join-requests/{rid}/approve` \| `/reject` | tenant_admin of `tid` | Decide (only pending decidable, 409 otherwise). Approve grants membership role `member`. Audited `join.approved` / `join.rejected`. |
+
+Migration `0018_join_policy.sql`: `tenants.join_policy` (default `invite`) + `tenant_invites` + `join_requests` tables.
+
 ### Session tokens (`/api/v1/auth/session` — Union Web R-2)
 
 Gateway-issued browser session tokens for **single-tenant local mode** (fusion-web-shell does not carry its own auth; fusion-gateway issues + validates, the browser never talks to identity directly). Service-token gated, tenant-middleware exempt.

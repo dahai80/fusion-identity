@@ -72,5 +72,15 @@ async def update_tenant(
             tenant_id,
             {"tenant_id": tenant_id, "status": fields["status"]},
         )
+    if "join_policy" in fields:
+        await store.append_audit(
+            tenant_id,
+            _claims.get("sub"),
+            None,
+            _claims.get("role"),
+            "tenant.join_policy_change",
+            "tenant",
+            {"join_policy": fields["join_policy"]},
+        )
     await invalidate_tenant_cache(request, tenant_id)
     return t

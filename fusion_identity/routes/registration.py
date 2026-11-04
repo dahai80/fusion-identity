@@ -168,7 +168,12 @@ async def register(
         # Auto-create the default join tenant (free plan, decision 2) on
         # first personal signup.
         template = await store.get_plan_template("free")
-        await store.create_tenant(tenant_id, display_name="Community", plan="free")
+        # Design decision 2: the public community tenant uses the OPEN join
+        # policy — personal signups are already members, but open lets other
+        # users self-add later without an invite.
+        await store.create_tenant(
+            tenant_id, display_name="Community", plan="free", join_policy="open"
+        )
         if template is not None:
             await store.put_quota(tenant_id, **template)
         logger.info("register: auto-created default join tenant=%s", tenant_id)
@@ -251,6 +256,7 @@ async def register_tenant(
         tenant_id=None,
         display_name=body.tenant_display_name,
         plan=body.plan,
+        join_policy="invite",
         quotas=None,
         seed_admin=SeedAdminSpec(
             username=body.admin_username,

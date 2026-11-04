@@ -210,6 +210,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.departments import router as departments_router
     from fusion_identity.routes.health import router as health_router
     from fusion_identity.routes.idps import router as idps_router
+    from fusion_identity.routes.join import router as join_router
     from fusion_identity.routes.jwks import router as jwks_router
     from fusion_identity.routes.members import router as members_router
     from fusion_identity.routes.metrics import router as metrics_router
@@ -244,6 +245,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(app_credentials_router)
     app.include_router(provisioning_router)
     app.include_router(registration_router)
+    app.include_router(join_router)
     app.state.webhook_worker = None
 
     def _verify_jwt(token: str) -> dict[str, Any] | None:
