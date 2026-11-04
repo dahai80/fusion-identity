@@ -712,7 +712,10 @@ class PgStore:
             "ON CONFLICT (idem_key) DO NOTHING",
             idem_key,
             endpoint,
-            json.dumps(response),
+            # PgStore rows carry datetime objects (created_at etc.); the
+            # InMemory store does not serialize so this only surfaces on
+            # Postgres. ISO-strings on replay are acceptable.
+            json.dumps(response, default=str),
         )
         logger.info("put_idempotency: key=%s endpoint=%s", idem_key, endpoint)
 
