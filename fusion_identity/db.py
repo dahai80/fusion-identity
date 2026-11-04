@@ -177,14 +177,19 @@ class PgStore:
         jp = fields.get("join_policy")
         if jp is not None and jp not in JOIN_POLICIES:
             raise StoreConflict(f"unknown join_policy {jp!r}")
-        sets = [
-            f"{k}=${i + 2}" for i, k in enumerate(allowed) if k in fields and fields[k] is not None
-        ]
+        # Present fields must get CONTIGUOUS placeholders ($2, $3, ...) — a
+        # positional index derived from the allowed-tuple position ($5 for
+        # join_policy) references a parameter that was never bound
+        # (IndeterminateDatatypeError at prepare time; found by live-PG
+        # verification of issue #40).
+        sets: list[str] = []
+        params: list[Any] = [tenant_id]
+        for k in allowed:
+            if k in fields and fields[k] is not None:
+                sets.append(f"{k}=${len(params) + 1}")
+                params.append(fields[k])
         if not sets:
             return await self.get_tenant(tenant_id)
-        params: list[Any] = [tenant_id] + [
-            fields[k] for k in allowed if k in fields and fields[k] is not None
-        ]
         # F19: disabled_at CASE binds the status value, not $2 (which is display_name
         # when present). Compute a dedicated status param so the toggle is correct
         # regardless of which fields are set.
