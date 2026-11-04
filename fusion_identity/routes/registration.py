@@ -172,7 +172,10 @@ async def register(
         if template is not None:
             await store.put_quota(tenant_id, **template)
         logger.info("register: auto-created default join tenant=%s", tenant_id)
-    await store.add_member(tenant_id, user_id, "member", added_by="registration")
+    # added_by is FK-attributed to users(user_id) — a self-registered user
+    # joins under their own id (a literal like "registration" would violate
+    # tenant_members.added_by_fkey on Postgres; InMemory cannot catch this).
+    await store.add_member(tenant_id, user_id, "member", added_by=user_id)
 
     tokens_out: dict[str, Any] | None = None
     if verified_now:
@@ -259,7 +262,7 @@ async def register_tenant(
         hook_url=None,
         endpoint="/api/v1/auth/register-tenant",
         idempotency_key=idempotency_key,
-        added_by="registration",
+        added_by=None,
     )
 
     tenant_id = result["tenant"]["tenant_id"]
