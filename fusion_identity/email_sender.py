@@ -42,11 +42,12 @@ async def send_email(settings: Any, to_email: str, subject: str, body: str) -> s
     # still blocks login until completed, so the operator copies the link from
     # the log. Returns "sent" | "logged" so the caller can audit honestly.
     if not settings.smtp_host:
+        link = next((ln for ln in body.splitlines() if "token=" in ln), body)
         logger.warning(
             "email_sender: SMTP not configured — verification message for %s logged "
             "instead of sent (dev fallback): %s",
             to_email,
-            body.splitlines()[2] if len(body.splitlines()) > 2 else body,
+            link,
         )
         return "logged"
     try:
