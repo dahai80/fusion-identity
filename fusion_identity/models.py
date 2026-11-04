@@ -86,12 +86,14 @@ class TenantCreate(BaseModel):
     tenant_id: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1)
     plan: str = Field(default="team")
+    join_policy: str = Field(default="invite")
 
 
 class TenantUpdate(BaseModel):
     display_name: str | None = None
     status: str | None = None
     plan: str | None = None
+    join_policy: str | None = None
 
     @field_validator("status")
     @classmethod

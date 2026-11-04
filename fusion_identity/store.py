@@ -43,6 +43,11 @@ ROLES_SEED = {
     },
 }
 
+# Issue #40: how users may join a tenant. `invite` is the default for new
+# tenants; the public community tenant is created with `open` (design
+# decision 2, fusion-site-auth-1104 §4).
+JOIN_POLICIES = frozenset({"invite", "proof", "approval", "open"})
+
 DEFAULT_QUOTA = {
     "rpm": 60,
     "tpm": 100000,
@@ -316,6 +321,9 @@ class InMemoryStore:
         self._idempotency: dict[str, dict[str, Any]] = {}
         self._events: list[dict[str, Any]] = []
         self._event_seq = 0
+        # Issue #40: join policy plane — invite tokens + join requests.
+        self._invites: dict[str, dict[str, Any]] = {}
+        self._join_requests: dict[str, dict[str, Any]] = {}
         logger.info(
             "InMemoryStore initialized (roles seeded=%d) — NOT for production", len(self._roles)
         )
@@ -333,23 +341,41 @@ class InMemoryStore:
         return len(self._tenants) == 0
 
     async def create_tenant(
-        self, tenant_id: str, display_name: str, plan: str = "team"
+        self,
+        tenant_id: str,
+        display_name: str,
+        plan: str = "team",
+        join_policy: str = "invite",
     ) -> dict[str, Any]:
         if tenant_id in self._tenants:
             raise StoreConflict(f"tenant {tenant_id} exists")
+        if join_policy not in JOIN_POLICIES:
+            raise StoreConflict(f"unknown join_policy {join_policy!r}")
         now = _now()
         self._tenants[tenant_id] = {
             "tenant_id": tenant_id,
             "display_name": display_name,
             "status": "active",
             "plan": plan,
+            "join_policy": join_policy,
             "created_at": now,
             "disabled_at": None,
             "deleted_at": None,
         }
         self._quotas[tenant_id] = {"tenant_id": tenant_id, "updated_at": now, **DEFAULT_QUOTA}
-        logger.info("create_tenant: %s plan=%s", tenant_id, plan)
+        logger.info("create_tenant: %s plan=%s join_policy=%s", tenant_id, plan, join_policy)
         return dict(self._tenants[tenant_id])
+
+    async def set_join_policy(self, tenant_id: str, join_policy: str) -> dict[str, Any] | None:
+        # Issue #40: admin-settable join policy (invite|proof|approval|open).
+        if join_policy not in JOIN_POLICIES:
+            raise StoreConflict(f"unknown join_policy {join_policy!r}")
+        t = self._tenants.get(tenant_id)
+        if t is None:
+            return None
+        t["join_policy"] = join_policy
+        logger.info("set_join_policy: tenant=%s join_policy=%s", tenant_id, join_policy)
+        return dict(t)
 
     async def get_tenant(self, tenant_id: str) -> dict[str, Any] | None:
         t = self._tenants.get(tenant_id)
@@ -372,7 +398,10 @@ class InMemoryStore:
         t = self._tenants.get(tenant_id)
         if not t:
             return None
-        for k in ("display_name", "status", "plan"):
+        jp = fields.get("join_policy")
+        if jp is not None and jp not in JOIN_POLICIES:
+            raise StoreConflict(f"unknown join_policy {jp!r}")
+        for k in ("display_name", "status", "plan", "join_policy"):
             if k in fields and fields[k] is not None:
                 t[k] = fields[k]
         if t["status"] == "disabled" and not t["disabled_at"]:
@@ -1011,6 +1040,104 @@ class InMemoryStore:
             "created_at": _now(),
         }
         logger.info("put_idempotency: key=%s endpoint=%s", idem_key, endpoint)
+
+    # --- Issue #40: join policy plane (invites + join requests) ---
+
+    async def create_invite(
+        self,
+        invite_id: str,
+        tenant_id: str,
+        token_hash: str,
+        role: str,
+        expires_at: float,
+        email: str | None = None,
+        created_by: str | None = None,
+    ) -> dict[str, Any]:
+        if not await self.is_valid_role(tenant_id, role):
+            raise StoreConflict(f"unknown role {role} for tenant {tenant_id}")
+        rec = {
+            "invite_id": invite_id,
+            "tenant_id": tenant_id,
+            "token_hash": token_hash,
+            "role": role,
+            "email": email,
+            "created_by": created_by,
+            "expires_at": expires_at,
+            "used_at": None,
+            "used_by": None,
+            "created_at": _now(),
+        }
+        self._invites[invite_id] = rec
+        logger.info("create_invite: tenant=%s invite=%s role=%s", tenant_id, invite_id, role)
+        return dict(rec)
+
+    async def get_invite_by_hash(self, token_hash: str) -> dict[str, Any] | None:
+        for rec in self._invites.values():
+            if rec["token_hash"] == token_hash:
+                return dict(rec)
+        return None
+
+    async def list_invites(self, tenant_id: str) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._invites.values() if r["tenant_id"] == tenant_id]
+
+    async def mark_invite_used(self, invite_id: str, user_id: str) -> bool:
+        rec = self._invites.get(invite_id)
+        if rec is None or rec["used_at"] is not None:
+            return False
+        rec["used_at"] = _now()
+        rec["used_by"] = user_id
+        logger.info("mark_invite_used: invite=%s user=%s", invite_id, user_id)
+        return True
+
+    async def create_join_request(
+        self, request_id: str, tenant_id: str, user_id: str
+    ) -> dict[str, Any]:
+        for r in self._join_requests.values():
+            if r["tenant_id"] == tenant_id and r["user_id"] == user_id and r["status"] == "pending":
+                raise StoreConflict("join request already pending")
+        rec = {
+            "request_id": request_id,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "status": "pending",
+            "decided_by": None,
+            "decided_at": None,
+            "created_at": _now(),
+        }
+        self._join_requests[request_id] = rec
+        logger.info("create_join_request: tenant=%s user=%s", tenant_id, user_id)
+        return dict(rec)
+
+    async def get_join_request(self, request_id: str) -> dict[str, Any] | None:
+        r = self._join_requests.get(request_id)
+        return dict(r) if r else None
+
+    async def list_join_requests(
+        self, tenant_id: str, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        return [
+            dict(r)
+            for r in self._join_requests.values()
+            if r["tenant_id"] == tenant_id and (status is None or r["status"] == status)
+        ]
+
+    async def decide_join_request(
+        self, request_id: str, status: str, decided_by: str
+    ) -> dict[str, Any] | None:
+        # status is the DECISION: approved | rejected (also cancelled by the
+        # requester). Only a pending request can be decided.
+        if status not in ("approved", "rejected", "cancelled"):
+            raise StoreConflict(f"invalid decision status {status!r}")
+        r = self._join_requests.get(request_id)
+        if r is None:
+            return None
+        if r["status"] != "pending":
+            raise StoreConflict(f"join request already {r['status']}")
+        r["status"] = status
+        r["decided_by"] = decided_by
+        r["decided_at"] = _now()
+        logger.info("decide_join_request: request=%s status=%s", request_id, status)
+        return dict(r)
 
     async def append_event(
         self, event_type: str, tenant_id: str, payload: dict[str, Any]

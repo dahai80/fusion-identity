@@ -65,6 +65,7 @@ class ProvisionRequest(BaseModel):
     tenant_id: str | None = Field(default=None, min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=128)
     plan: str = Field(default="standard", max_length=32)
+    join_policy: str | None = Field(default=None, max_length=16)
     quotas: dict[str, Any] | None = None
     seed_admin: SeedAdminSpec | None = None
     api_key: ApiKeySpec | None = None
@@ -90,6 +91,7 @@ async def provision_core(
     tenant_id: str | None,
     display_name: str,
     plan: str,
+    join_policy: str | None,
     quotas: dict[str, Any] | None,
     seed_admin: SeedAdminSpec | None,
     api_key: ApiKeySpec | None,
@@ -129,7 +131,9 @@ async def provision_core(
             )
 
     try:
-        tenant = await store.create_tenant(tid, display_name=display_name, plan=plan)
+        tenant = await store.create_tenant(
+            tid, display_name=display_name, plan=plan, join_policy=join_policy or "invite"
+        )
     except StoreConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     quota = await store.put_quota(tid, **quota) or {}
@@ -232,6 +236,7 @@ async def provision_tenant(
         tenant_id=body.tenant_id,
         display_name=body.display_name,
         plan=body.plan,
+        join_policy=body.join_policy,
         quotas=body.quotas,
         seed_admin=body.seed_admin,
         api_key=body.api_key,

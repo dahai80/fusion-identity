@@ -7,7 +7,7 @@ import time
 from datetime import UTC
 from typing import Any
 
-from fusion_identity.store import StoreConflict
+from fusion_identity.store import JOIN_POLICIES, StoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -132,14 +132,22 @@ class PgStore:
         return await self.fetchval("SELECT COUNT(*) = 0 FROM tenants WHERE status <> 'deleted'")
 
     async def create_tenant(
-        self, tenant_id: str, display_name: str, plan: str = "team"
+        self,
+        tenant_id: str,
+        display_name: str,
+        plan: str = "team",
+        join_policy: str = "invite",
     ) -> dict[str, Any]:
+        if join_policy not in JOIN_POLICIES:
+            raise StoreConflict(f"unknown join_policy {join_policy!r}")
         try:
             row = await self.fetchrow(
-                "INSERT INTO tenants(tenant_id, display_name, plan) VALUES ($1,$2,$3) RETURNING *",
+                "INSERT INTO tenants(tenant_id, display_name, plan, join_policy) "
+                "VALUES ($1,$2,$3,$4) RETURNING *",
                 tenant_id,
                 display_name,
                 plan,
+                join_policy,
             )
         except asyncpg.UniqueViolationError as exc:
             raise StoreConflict(f"tenant {tenant_id} exists") from exc
@@ -165,7 +173,10 @@ class PgStore:
         )
 
     async def update_tenant(self, tenant_id: str, **fields: Any) -> dict[str, Any] | None:
-        allowed = ("display_name", "status", "plan")
+        allowed = ("display_name", "status", "plan", "join_policy")
+        jp = fields.get("join_policy")
+        if jp is not None and jp not in JOIN_POLICIES:
+            raise StoreConflict(f"unknown join_policy {jp!r}")
         sets = [
             f"{k}=${i + 2}" for i, k in enumerate(allowed) if k in fields and fields[k] is not None
         ]
@@ -188,6 +199,126 @@ class PgStore:
             case_sql = "disabled_at=disabled_at"
         sql = f"UPDATE tenants SET {', '.join(sets)}, {case_sql} WHERE tenant_id=$1 RETURNING *"
         return await self.fetchrow(sql, *params)
+
+    async def set_join_policy(self, tenant_id: str, join_policy: str) -> dict[str, Any] | None:
+        # Issue #40: admin-settable join policy (invite|proof|approval|open).
+        if join_policy not in JOIN_POLICIES:
+            raise StoreConflict(f"unknown join_policy {join_policy!r}")
+        row = await self.fetchrow(
+            "UPDATE tenants SET join_policy=$2 WHERE tenant_id=$1 RETURNING *",
+            tenant_id,
+            join_policy,
+        )
+        logger.info("set_join_policy: tenant=%s join_policy=%s", tenant_id, join_policy)
+        return row
+
+    async def create_invite(
+        self,
+        invite_id: str,
+        tenant_id: str,
+        token_hash: str,
+        role: str,
+        expires_at: float,
+        email: str | None = None,
+        created_by: str | None = None,
+    ) -> dict[str, Any]:
+        # role validity mirrors add_member's rule (built-in or custom role of
+        # THIS tenant).
+        if not await self.is_valid_role(tenant_id, role):
+            raise StoreConflict(f"unknown role {role} for tenant {tenant_id}")
+        try:
+            row = await self.fetchrow(
+                "INSERT INTO tenant_invites(invite_id, tenant_id, token_hash, role, email, "
+                "created_by, expires_at) "
+                "VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7)) RETURNING *",
+                invite_id,
+                tenant_id,
+                token_hash,
+                role,
+                email,
+                created_by,
+                expires_at,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise StoreConflict("invite token hash collision") from exc
+        logger.info("create_invite: tenant=%s invite=%s role=%s", tenant_id, invite_id, role)
+        return row
+
+    async def get_invite_by_hash(self, token_hash: str) -> dict[str, Any] | None:
+        return await self.fetchrow("SELECT * FROM tenant_invites WHERE token_hash=$1", token_hash)
+
+    async def list_invites(self, tenant_id: str) -> list[dict[str, Any]]:
+        return await self.fetch(
+            "SELECT * FROM tenant_invites WHERE tenant_id=$1 ORDER BY created_at DESC",
+            tenant_id,
+        )
+
+    async def mark_invite_used(self, invite_id: str, user_id: str) -> bool:
+        # Single-use: the WHERE clause makes concurrent redemption race-safe —
+        # only the first caller flips used_at.
+        val = await self.fetchval(
+            "UPDATE tenant_invites SET used_at=now(), used_by=$2 "
+            "WHERE invite_id=$1 AND used_at IS NULL RETURNING invite_id",
+            invite_id,
+            user_id,
+        )
+        return val is not None
+
+    async def create_join_request(
+        self, request_id: str, tenant_id: str, user_id: str
+    ) -> dict[str, Any]:
+        try:
+            row = await self.fetchrow(
+                "INSERT INTO join_requests(request_id, tenant_id, user_id) "
+                "VALUES ($1,$2,$3) RETURNING *",
+                request_id,
+                tenant_id,
+                user_id,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            raise StoreConflict("join request already pending") from exc
+        logger.info("create_join_request: tenant=%s user=%s", tenant_id, user_id)
+        return row
+
+    async def get_join_request(self, request_id: str) -> dict[str, Any] | None:
+        return await self.fetchrow("SELECT * FROM join_requests WHERE request_id=$1", request_id)
+
+    async def list_join_requests(
+        self, tenant_id: str, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        if status is not None:
+            return await self.fetch(
+                "SELECT * FROM join_requests WHERE tenant_id=$1 AND status=$2 "
+                "ORDER BY created_at DESC",
+                tenant_id,
+                status,
+            )
+        return await self.fetch(
+            "SELECT * FROM join_requests WHERE tenant_id=$1 ORDER BY created_at DESC",
+            tenant_id,
+        )
+
+    async def decide_join_request(
+        self, request_id: str, status: str, decided_by: str
+    ) -> dict[str, Any] | None:
+        # status is the DECISION: approved | rejected (also cancelled by the
+        # requester). Only a pending request can be decided.
+        if status not in ("approved", "rejected", "cancelled"):
+            raise StoreConflict(f"invalid decision status {status!r}")
+        row = await self.fetchrow(
+            "UPDATE join_requests SET status=$2, decided_by=$3, decided_at=now() "
+            "WHERE request_id=$1 AND status='pending' RETURNING *",
+            request_id,
+            status,
+            decided_by,
+        )
+        if row is None:
+            existing = await self.get_join_request(request_id)
+            if existing is None:
+                return None
+            raise StoreConflict(f"join request already {existing['status']}")
+        logger.info("decide_join_request: request=%s status=%s", request_id, status)
+        return row
 
     async def delete_tenant(self, tenant_id: str) -> bool:
         val = await self.fetchval(

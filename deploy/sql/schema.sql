@@ -14,6 +14,7 @@ CREATE TABLE tenants (
     display_name TEXT NOT NULL,
     status       TEXT NOT NULL DEFAULT 'active',
     plan         TEXT NOT NULL DEFAULT 'team',
+    join_policy  TEXT NOT NULL DEFAULT 'invite',  -- issue #40: invite|proof|approval|open
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     disabled_at  TIMESTAMPTZ,
     deleted_at   TIMESTAMPTZ,
@@ -385,3 +386,31 @@ CREATE TABLE IF NOT EXISTS app_credentials (
     PRIMARY KEY (app_id, name)
 );
 CREATE INDEX IF NOT EXISTS ix_app_credentials_app ON app_credentials(app_id);
+
+-- Issue #40: join-policy plane — invite tokens + join requests (migration 0018)
+CREATE TABLE IF NOT EXISTS tenant_invites (
+    invite_id   TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    token_hash  TEXT NOT NULL UNIQUE,
+    role        TEXT NOT NULL DEFAULT 'member',
+    email       TEXT,
+    created_by  TEXT REFERENCES users(user_id),
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ,
+    used_by     TEXT REFERENCES users(user_id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS tenant_invites_tenant_idx ON tenant_invites(tenant_id);
+
+CREATE TABLE IF NOT EXISTS join_requests (
+    request_id   TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    status       TEXT NOT NULL DEFAULT 'pending',
+    decided_by   TEXT REFERENCES users(user_id),
+    decided_at   TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT join_requests_status_chk CHECK (status IN ('pending','approved','rejected','cancelled')),
+    CONSTRAINT join_requests_unique_pending UNIQUE (tenant_id, user_id, status)
+);
+CREATE INDEX IF NOT EXISTS join_requests_tenant_idx ON join_requests(tenant_id);

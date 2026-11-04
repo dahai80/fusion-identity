@@ -101,6 +101,29 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 **邮件投递**：`FUSION_IDENTITY_SMTP_HOST` 未设置时，验证 token 以 WARNING 日志输出（开发兜底）而非发信；验证仍阻断登录。SMTP 发送失败不使注册失败 —— 重发端点负责重试。
 
+### 租户加入策略（`join_policy` —— issue #40）
+
+每个租户带一个管理员可设的 `join_policy`（默认 `invite`；在租户 create/PATCH、admin create/PUT、开通 API 上均可设置；自动创建的公开 `community` 租户使用 `open`）：
+
+| 策略 | 流程 |
+|---|---|
+| `invite` | tenant_admin 签发一次性、带过期的邀请 token（预指派角色，`finv_` 前缀，sha256 落库，原文只显示一次）；持有 bearer 的用户兑换 |
+| `proof` | 既有 `POST /members/by-proof` —— 保持不变 |
+| `approval` | 用户提交加入请求；tenant_admin 批准（批准即入会，角色 `member`）或拒绝；被拒后可重新申请 |
+| `open` | 用户自助加入，角色**强制**为 `member` |
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/api/v1/tenants/{tid}/invites` | `tid` 的 tenant_admin | `{role?="member", email?, ttl_seconds?(60..2592000, 默认 7 天)}` → `{invite_id, token（原文，仅此一次）, role, expires_at}`。审计 `member.invited`。 |
+| GET | `/api/v1/tenants/{tid}/invites` | `tid` 的 tenant_admin | 清单；token 哈希不出库。 |
+| POST | `/api/v1/auth/invites/redeem` | bearer | `{token}` → 以预指派角色加入该租户。单次使用 + 过期由 store 原子执行；无效/过期/重放一律 400。审计 `member.joined`。 |
+| POST | `/api/v1/auth/tenants/{tid}/join` | bearer | open 自助加入；租户 `join_policy` 非 `open` 时 403；角色强制 `member`；已是成员 409。有限流。审计 `member.self_added`。 |
+| POST | `/api/v1/tenants/{tid}/join-requests` | bearer | 提交（策略非 `approval` 时 403；重复 pending 409；被拒后可重新申请）。有限流。审计 `join.requested`。 |
+| GET | `/api/v1/tenants/{tid}/join-requests` | `tid` 的 tenant_admin | 列表，可选 `?status=pending\|approved\|rejected`。 |
+| POST | `/api/v1/tenants/{tid}/join-requests/{rid}/approve` \| `/reject` | `tid` 的 tenant_admin | 裁决（仅 pending 可裁决，否则 409）。批准即授予角色 `member` 的成员资格。审计 `join.approved` / `join.rejected`。 |
+
+迁移 `0018_join_policy.sql`：`tenants.join_policy`（默认 `invite`）+ `tenant_invites` + `join_requests` 表。
+
 ### Tenants（`/api/v1/tenants`）
 
 | 方法 | 路径 | 说明 |
