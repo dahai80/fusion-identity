@@ -96,12 +96,15 @@ async def provision_core(
     hook_url: str | None,
     endpoint: str,
     idempotency_key: str | None,
-    added_by: str = "provision",
+    added_by: str | None = None,
 ) -> dict[str, Any]:
     # Issue #39: extracted from provision_tenant so the public tenant-signup
     # route reuses the EXACT same creation path (acceptance: zero duplicated
     # tenant-creation logic). request is optional so callers without a tenant
-    # cache can still provision.
+    # cache can still provision. added_by is FK-attributed to users(user_id):
+    # callers either pass a real user id or None — a literal like "provision"
+    # would violate tenant_members.added_by_fkey on Postgres (InMemory cannot
+    # catch this; found by live-PG verification of the register-tenant flow).
     if idempotency_key:
         cached = await store.get_idempotency(f"{endpoint}:{idempotency_key}")
         if cached is not None:

@@ -296,10 +296,17 @@ class PgStore:
         sets = []
         params: list[Any] = [user_id]
         idx = 2
+        # Callers pass epoch floats (time.time()) for these columns; the DDL
+        # declares them TIMESTAMPTZ, so convert here (found by live-PG
+        # verification of issue #39 — every login 500'd on this encode).
+        ts_columns = {"last_login_at", "locked_until", "password_changed_at"}
         for k in allowed:
             if k in fields and fields[k] is not None:
                 sets.append(f"{k}=${idx}")
-                params.append(fields[k])
+                val = fields[k]
+                if k in ts_columns and isinstance(val, (int, float)):
+                    val = _ts_from_epoch(val)
+                params.append(val)
                 idx += 1
         if not sets:
             return await self.get_user(user_id)
