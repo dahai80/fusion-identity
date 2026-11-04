@@ -123,6 +123,10 @@ TENANT_EXEMPT = frozenset(
         "/api/v1/auth/session",
         "/api/v1/auth/session/verify",
         "/api/v1/auth/sessions",
+        "/api/v1/auth/register",
+        "/api/v1/auth/register-tenant",
+        "/api/v1/auth/verify-email",
+        "/api/v1/auth/verify-email/resend",
         "/scim/v2/Users",
     }
 )
@@ -170,6 +174,7 @@ def _build_auth_service(settings: Settings, store: Any) -> AuthService:
         kek=settings.kek,
         kek_prev=settings.kek_prev,
         mfa_enforce_admin=settings.mfa_enforce_admin,
+        email_verification_required=settings.email_verification_required,
     )
 
 
@@ -213,6 +218,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.provisioning import router as provisioning_router
     from fusion_identity.routes.quotas import router as quotas_router
     from fusion_identity.routes.rbac import router as rbac_router
+    from fusion_identity.routes.registration import router as registration_router
     from fusion_identity.routes.scim import router as scim_router
     from fusion_identity.routes.tenants import router as tenants_router
     from fusion_identity.routes.usage import router as usage_router
@@ -237,6 +243,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(app_secrets_router)
     app.include_router(app_credentials_router)
     app.include_router(provisioning_router)
+    app.include_router(registration_router)
     app.state.webhook_worker = None
 
     def _verify_jwt(token: str) -> dict[str, Any] | None:

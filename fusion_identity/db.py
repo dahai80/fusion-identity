@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+from datetime import UTC
 from typing import Any
 
 from fusion_identity.store import StoreConflict
@@ -216,6 +217,8 @@ class PgStore:
         email: str | None = None,
         *,
         must_change_password: bool = False,
+        email_verified: bool = True,
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         from fusion_identity.store import hash_password
 
@@ -223,8 +226,8 @@ class PgStore:
         try:
             return await self.fetchrow(
                 "INSERT INTO users(user_id, username, email, password_hash_v, "
-                "salt, password_algo, must_change_password) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *",
+                "salt, password_algo, must_change_password, email_verified, "
+                "display_name) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
                 user_id,
                 username,
                 email,
@@ -232,9 +235,40 @@ class PgStore:
                 salt,
                 algo,
                 must_change_password,
+                email_verified,
+                display_name,
             )
         except asyncpg.UniqueViolationError as exc:
             raise StoreConflict(f"user {user_id} exists") from exc
+
+    async def set_email_verify_token(
+        self, user_id: str, token_hash: str, expires_at: float
+    ) -> bool:
+        # Issue #39: mirrors InMemoryStore.set_email_verify_token. Overwrite
+        # invalidates any previous token.
+        val = await self.fetchval(
+            "UPDATE users SET email_verify_token_hash=$2, email_verify_expires=$3 "
+            "WHERE user_id=$1 RETURNING user_id",
+            user_id,
+            token_hash,
+            _ts_from_epoch(expires_at),
+        )
+        return val is not None
+
+    async def verify_email_token(self, token_hash: str) -> str | None:
+        # Issue #39: mirrors InMemoryStore.verify_email_token — single use
+        # (token columns cleared) + expiry checked inside the UPDATE.
+        val = await self.fetchval(
+            "UPDATE users SET email_verified=TRUE, email_verify_token_hash=NULL, "
+            "email_verify_expires=NULL "
+            "WHERE email_verify_token_hash=$1 "
+            "AND (email_verify_expires IS NULL OR email_verify_expires > now()) "
+            "RETURNING user_id",
+            token_hash,
+        )
+        if val is None:
+            logger.warning("verify_email_token: no matching unexpired token")
+        return val
 
     async def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         return await self.fetchrow("SELECT * FROM users WHERE username=$1", username)
@@ -1511,6 +1545,14 @@ class PgStore:
             limit,
         )
         return [dict(r) for r in rows]
+
+
+def _ts_from_epoch(epoch: float) -> Any:
+    # Issue #39: unix-epoch float → tz-aware datetime for TIMESTAMPTZ params
+    # (asyncpg rejects naive datetimes).
+    from datetime import datetime
+
+    return datetime.fromtimestamp(epoch, tz=UTC)
 
 
 def _decode_app_secret(row: dict[str, Any], strip_hash: bool = False) -> dict[str, Any]:

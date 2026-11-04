@@ -142,6 +142,7 @@ class AuthService:
         kek: str | None = None,
         kek_prev: str | None = None,
         mfa_enforce_admin: bool = False,
+        email_verification_required: bool = False,
     ) -> None:
         self._store = store
         self._issuer = issuer
@@ -153,6 +154,10 @@ class AuthService:
         # until the re-encrypt sweep converts them to the current kek.
         self._kek_prev = kek_prev
         self._mfa_enforce_admin = mfa_enforce_admin
+        # Issue #39: when True, a user with email_verified=False cannot log in
+        # until the verification token is redeemed. Privileged creation paths
+        # default users to verified, so this only gates public signups.
+        self._email_verification_required = email_verification_required
         if key_ring is not None:
             self._key_ring = key_ring
         else:
@@ -228,7 +233,9 @@ class AuthService:
             claims["scope"] = _role_scopes(role)
         return role
 
-    async def login(self, req: LoginRequest) -> TokenResponse:
+    async def login(
+        self, req: LoginRequest, *, skip_email_verification: bool = False
+    ) -> TokenResponse:
         tenant_status = await self._store.get_tenant_status(req.tenant_id)
         if tenant_status in (None, "disabled", "deleted"):
             logger.warning("login: tenant=%s not active (%s)", req.tenant_id, tenant_status)
@@ -257,6 +264,25 @@ class AuthService:
         if user_status in ("disabled", "locked"):
             logger.warning("login: user=%s status=%s", user["user_id"], user_status)
             raise _unauthorized("account disabled")
+        # Issue #39: email verification gate — checked after credentials so the
+        # error state is unambiguous for the UI ("check your inbox"), but
+        # before token issuance. 403 (not 401) so clients can distinguish
+        # "bad credentials" from "verified account required". The skip flag is
+        # internal-only: the register-tenant route uses it for the ONE
+        # token issuance at signup (credentials were just presented in the
+        # request itself); all later logins still go through the gate.
+        from fastapi import HTTPException
+
+        if (
+            self._email_verification_required
+            and not skip_email_verification
+            and not user.get("email_verified", True)
+        ):
+            logger.warning("login: user=%s email not verified", user["user_id"])
+            raise HTTPException(
+                status_code=403,
+                detail="email not verified — check your inbox for the verification link",
+            )
         ok, needs_rehash = verify_password(
             req.password,
             password_hash_v=user.get("password_hash_v", ""),
