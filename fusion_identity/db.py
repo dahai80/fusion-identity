@@ -481,6 +481,13 @@ class PgStore:
             "SELECT role FROM tenant_members WHERE tenant_id=$1 AND user_id=$2", tenant_id, user_id
         )
 
+    async def memberships_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        # Issue #47: tenant resolution for tenant-less logins.
+        rows = await self.fetch(
+            "SELECT tenant_id, user_id, role FROM tenant_members WHERE user_id=$1", user_id
+        )
+        return [dict(r) for r in rows]
+
     async def update_member_role(
         self,
         tenant_id: str,

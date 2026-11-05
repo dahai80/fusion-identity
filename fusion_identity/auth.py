@@ -41,6 +41,7 @@ class StoreProto(Protocol):
     async def update_user(self, user_id: str, **fields: Any) -> dict[str, Any] | None: ...
     async def get_tenant_status(self, tenant_id: str) -> str | None: ...
     async def get_member_role(self, tenant_id: str, user_id: str) -> str | None: ...
+    async def memberships_for_user(self, user_id: str) -> list[dict[str, Any]]: ...
     async def is_valid_role(self, tenant_id: str, role: str) -> bool: ...
     async def get_role(self, tenant_id: str, role_id: str) -> dict[str, Any] | None: ...
     async def get_role_menus(self, tenant_id: str, role_id: str) -> list[str]: ...
@@ -236,7 +237,12 @@ class AuthService:
     async def login(
         self, req: LoginRequest, *, skip_email_verification: bool = False
     ) -> TokenResponse:
-        tenant_status = await self._store.get_tenant_status(req.tenant_id)
+        # Issue #47: tenant_id is optional — when omitted it is resolved from
+        # the user's memberships AFTER the password check (never pre-auth, or
+        # the ambiguity response would leak tenant membership by username).
+        tenant_status = (
+            await self._store.get_tenant_status(req.tenant_id) if req.tenant_id else "active"
+        )
         if tenant_status in (None, "disabled", "deleted"):
             logger.warning("login: tenant=%s not active (%s)", req.tenant_id, tenant_status)
             raise _unauthorized("invalid credentials")
@@ -302,10 +308,17 @@ class AuthService:
                 password_algo=new_algo,
             )
             logger.info("login: rehashed user=%s algo=%s", user["user_id"], new_algo)
-        role = await self._store.get_member_role(req.tenant_id, user["user_id"])
+        # Issue #47: resolve the tenant from memberships when the request
+        # omitted it. Single active membership → that tenant; multiple → 409
+        # with display names (client re-prompts with a picker); none → the
+        # same generic failure as bad credentials (no membership probing).
+        tenant_id = req.tenant_id
+        if not tenant_id:
+            tenant_id = await self._resolve_login_tenant(user)
+        role = await self._store.get_member_role(tenant_id, user["user_id"])
         if role is None:
-            logger.warning("login: user=%s not member of tenant=%s", user["user_id"], req.tenant_id)
-            raise _unauthorized("not a member of tenant")
+            logger.warning("login: user=%s not member of tenant=%s", user["user_id"], tenant_id)
+            raise _unauthorized("tenant_mismatch")
         mfa_rec = await self._store.get_mfa(user["user_id"], "totp")
         mfa_required = bool(mfa_rec and mfa_rec.get("enabled"))
         enforce = self._mfa_enforce_admin and role == "tenant_admin"
@@ -313,7 +326,7 @@ class AuthService:
             logger.warning(
                 "login: admin=%s mfa enforced but not enrolled (tid=%s)",
                 user["user_id"],
-                req.tenant_id,
+                tenant_id,
             )
             raise _unauthorized("mfa enrollment required for admin")
         if mfa_required:
@@ -327,7 +340,7 @@ class AuthService:
                 )
             if not _verify_totp(mfa_rec, req.mfa_code, self._kek, self._kek_prev):
                 logger.warning("login: mfa code rejected user=%s", user["user_id"])
-                await self._record_failed_login(user, req.tenant_id)
+                await self._record_failed_login(user, tenant_id)
                 raise _unauthorized("invalid mfa code")
         await self._store.update_user(
             user["user_id"],
@@ -338,7 +351,7 @@ class AuthService:
         scopes = _role_scopes(role)
         access, jti = issue_token(
             sub=user["user_id"],
-            tid=req.tenant_id,
+            tid=tenant_id,
             role=role,
             scopes=scopes,
             signing_key=self._signing_key(),
@@ -350,11 +363,11 @@ class AuthService:
             kid=self._kid,
         )
         # F4: record ownership so /revoke can bind the access jti to its tenant.
-        await self._store.record_issued_jti(jti, req.tenant_id, user["user_id"])
+        await self._store.record_issued_jti(jti, tenant_id, user["user_id"])
         family_id = secrets.token_hex(8)
         refresh, rjti = issue_token(
             sub=user["user_id"],
-            tid=req.tenant_id,
+            tid=tenant_id,
             role=role,
             scopes=scopes,
             signing_key=self._signing_key(),
@@ -368,12 +381,12 @@ class AuthService:
         await self._store.insert_refresh_token(
             rjti,
             family_id,
-            req.tenant_id,
+            tenant_id,
             user["user_id"],
             expires_at=time.time() + self._refresh_ttl,
         )
         await self._store.append_audit(
-            req.tenant_id,
+            tenant_id,
             user["user_id"],
             jti,
             role,
@@ -387,6 +400,42 @@ class AuthService:
             expires_in=self._ttl,
             must_change_password=bool(user.get("must_change_password")),
         )
+
+    async def _resolve_login_tenant(self, user: dict[str, Any]) -> str:
+        from fastapi import HTTPException
+
+        memberships = await self._store.memberships_for_user(user["user_id"])
+        active: list[dict[str, Any]] = []
+        for m in memberships:
+            status = await self._store.get_tenant_status(m["tenant_id"])
+            if status == "active":
+                active.append(m)
+        if not active:
+            logger.warning(
+                "login: user=%s has no active membership (tenant-less login)", user["user_id"]
+            )
+            raise _unauthorized("invalid credentials")
+        if len(active) > 1:
+            tenants = []
+            for m in active:
+                t = await self._store.get_tenant(m["tenant_id"])
+                tenants.append(
+                    {"tenant_id": m["tenant_id"], "display_name": (t or {}).get("display_name")}
+                )
+            logger.info(
+                "login: user=%s ambiguous across %d tenants — picker required",
+                user["user_id"],
+                len(active),
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"error": "tenant_ambiguous", "tenants": tenants},
+            )
+        resolved = active[0]["tenant_id"]
+        logger.info(
+            "login: resolved tenant=%s for user=%s (tenant-less login)", resolved, user["user_id"]
+        )
+        return resolved
 
     async def verify(self, req: VerifyRequest) -> VerifyResponse:
         claims = self._verify(req.token, token_type="access")
@@ -867,39 +916,50 @@ class AuthService:
         claims["scope"] = _role_scopes(role)
         return claims
 
-    async def _record_failed_login(self, user: dict[str, Any], tenant_id: str) -> None:
+    async def _record_failed_login(self, user: dict[str, Any], tenant_id: str | None) -> None:
         attempts = user.get("failed_attempts", 0) + 1
         fields: dict[str, Any] = {"failed_attempts": attempts}
         if attempts >= LOCK_THRESHOLD:
             fields["locked_until"] = time.time() + LOCK_DURATION_SECONDS
-            await self._store.append_audit(
-                tenant_id,
+        if tenant_id:
+            if attempts >= LOCK_THRESHOLD:
+                await self._store.append_audit(
+                    tenant_id,
+                    user["user_id"],
+                    None,
+                    None,
+                    "auth.account_locked",
+                    "session",
+                    {"attempts": attempts},
+                )
+            await self._store.update_user(user["user_id"], **fields)
+            # M7: do not suppress append_audit failures. A swallowed audit error
+            # here would let the failed-login counter advance silently while the
+            # audit trail loses the record — the security event must surface.
+            try:
+                await self._store.append_audit(
+                    tenant_id,
+                    user["user_id"],
+                    None,
+                    None,
+                    "auth.login_failed",
+                    "session",
+                    {"username": user["username"]},
+                )
+            except Exception:
+                logger.exception(
+                    "login_failed audit append failed user=%s tenant=%s", user["user_id"], tenant_id
+                )
+                raise
+        else:
+            # Issue #47: tenant-less login — no tenant to audit against
+            # (audit_log.tenant_id is NOT NULL); the counter still applies.
+            logger.warning(
+                "login: failed attempt user=%s count=%d (tenant-less, no tenant audit)",
                 user["user_id"],
-                None,
-                None,
-                "auth.account_locked",
-                "session",
-                {"attempts": attempts},
+                attempts,
             )
-        await self._store.update_user(user["user_id"], **fields)
-        # M7: do not suppress append_audit failures. A swallowed audit error
-        # here would let the failed-login counter advance silently while the
-        # audit trail loses the record — the security event must surface.
-        try:
-            await self._store.append_audit(
-                tenant_id,
-                user["user_id"],
-                None,
-                None,
-                "auth.login_failed",
-                "session",
-                {"username": user["username"]},
-            )
-        except Exception:
-            logger.exception(
-                "login_failed audit append failed user=%s tenant=%s", user["user_id"], tenant_id
-            )
-            raise
+            await self._store.update_user(user["user_id"], **fields)
 
 
 def _verify_totp(mfa_rec: dict[str, Any], code: str, kek: str, kek_prev: str | None = None) -> bool:

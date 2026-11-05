@@ -23,7 +23,9 @@ def _validate_password(v: str) -> str:
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
-    tenant_id: str = Field(min_length=1)
+    # Issue #47: optional — resolved server-side from the user's memberships
+    # when omitted (explicit value still takes priority).
+    tenant_id: str | None = Field(default=None, min_length=1)
     mfa_code: str | None = None
 
 
