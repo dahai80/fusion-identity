@@ -120,6 +120,7 @@ TENANT_EXEMPT = frozenset(
         "/api/v1/auth/verify",
         "/api/v1/auth/refresh",
         "/api/v1/auth/introspect",
+        "/api/v1/auth/ticket/exchange",
         "/api/v1/auth/session",
         "/api/v1/auth/session/verify",
         "/api/v1/auth/sessions",
@@ -175,6 +176,7 @@ def _build_auth_service(settings: Settings, store: Any) -> AuthService:
         kek_prev=settings.kek_prev,
         mfa_enforce_admin=settings.mfa_enforce_admin,
         email_verification_required=settings.email_verification_required,
+        sso_ticket_ttl=settings.sso_ticket_ttl_seconds,
     )
 
 

@@ -414,3 +414,14 @@ CREATE TABLE IF NOT EXISTS join_requests (
     CONSTRAINT join_requests_unique_pending UNIQUE (tenant_id, user_id, status)
 );
 CREATE INDEX IF NOT EXISTS join_requests_tenant_idx ON join_requests(tenant_id);
+
+-- Issue #48: one-time SSO ticket exchange (migration 0019)
+CREATE TABLE IF NOT EXISTS sso_tickets (
+    ticket_hash TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    tenant_id   TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    used_at     TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sso_tickets_tenant_idx ON sso_tickets(tenant_id);

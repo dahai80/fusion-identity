@@ -65,6 +65,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_REGISTRATION_ENABLED` | 否 | `1` | 公开自助注册（issue #39）。`0` 时两个注册端点返回 403。 |
 | `FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED` | 否 | `1` | 为 `1` 时注册必须提供邮箱并签发一次性验证 token；未验证前登录返回 403。`0` 时注册直接返回 token 对。 |
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | 否 | `86400` | 邮箱验证 token 有效期，秒。 |
+| `FUSION_IDENTITY_SSO_TICKET_TTL` | 否 | `60` | issue #48：一次性 SSO ticket 有效期，秒（钳制 5–600）。 |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | 否 | `community` | 个人注册自动加入的租户。缺失时在首次个人注册时自动创建（绑定 free 计划模板）。 |
 | `FUSION_IDENTITY_SMTP_HOST` | 否 | —（打日志） | SMTP 中继主机。未设置时验证 token 以 WARNING 日志输出（开发兜底，已文档化）而非发信；验证仍阻断登录。 |
 | `FUSION_IDENTITY_SMTP_PORT` | 否 | `587` | SMTP 中继端口。 |
@@ -86,6 +87,8 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | GET | `/verify?token=` | service token | 校验 token；返回 `{tid,role,scopes,quota}` |
 | POST | `/verify` | service token | body `{token}` |
 | POST | `/refresh` | 无 | `{refresh_token}` → 新 access token |
+| POST | `/ticket` | bearer | issue #48：签发一次性 SSO ticket（`fsso_…`，TTL `FUSION_IDENTITY_SSO_TICKET_TTL` 默认 60 秒，钳制 5–600），绑定会话的 sub + 租户，用于 fusion-site → web-shell 免二次登录交接。返回 `{ticket,expires_in}`；落库仅存 sha256 哈希。 |
+| POST | `/ticket/exchange` | 无（ticket 即凭据） | issue #48：`{ticket}` → 标准 `{access_token,refresh_token,…}`。原子单次使用（重放 → 401 `invalid ticket`）；兑换时从 tenant_members 重新取角色并复核成员关系/租户状态（fail-closed）。与 login 相同的限流。 |
 | POST | `/revoke` | bearer（tenant_admin） | `{jti}` |
 
 ### 公开注册（`/api/v1/auth/register*` —— issue #39）

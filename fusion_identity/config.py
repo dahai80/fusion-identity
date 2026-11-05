@@ -136,6 +136,8 @@ class Settings:
     registration_enabled: bool = True
     email_verification_required: bool = True
     email_verify_ttl_seconds: int = 86400
+    # Issue #48: one-time SSO ticket lifetime (fusion-site → web-shell handoff)
+    sso_ticket_ttl_seconds: int = 60
     registration_default_tenant: str = "community"
     # Issue #39/#40: SMTP plane for verification emails. When smtp_host is
     # empty the verification token is logged (WARNING) instead of emailed —
@@ -317,6 +319,7 @@ def load_settings() -> Settings:
         .lower()
         in ("1", "true", "yes"),
         email_verify_ttl_seconds=_int_env("FUSION_IDENTITY_EMAIL_VERIFY_TTL", 86400),
+        sso_ticket_ttl_seconds=_int_env("FUSION_IDENTITY_SSO_TICKET_TTL", 60),
         registration_default_tenant=os.environ.get(
             "FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT", "community"
         ),

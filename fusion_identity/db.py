@@ -488,6 +488,31 @@ class PgStore:
         )
         return [dict(r) for r in rows]
 
+    async def create_sso_ticket(
+        self, ticket_hash: str, user_id: str, tenant_id: str, expires_at: float
+    ) -> None:
+        # Issue #48: one-time SSO ticket (hash at rest). Epoch float →
+        # TIMESTAMPTZ via _ts_from_epoch (same class as the #39/#40 bugs).
+        await self.execute(
+            "INSERT INTO sso_tickets (ticket_hash, user_id, tenant_id, expires_at)"
+            " VALUES ($1, $2, $3, $4) ON CONFLICT (ticket_hash) DO NOTHING",
+            ticket_hash,
+            user_id,
+            tenant_id,
+            _ts_from_epoch(expires_at),
+        )
+
+    async def consume_sso_ticket(self, ticket_hash: str) -> dict[str, Any] | None:
+        # Atomic single-use: the WHERE clause is the lock — a replayed or
+        # expired ticket updates zero rows.
+        row = await self.fetchrow(
+            "UPDATE sso_tickets SET used_at=now()"
+            " WHERE ticket_hash=$1 AND used_at IS NULL AND expires_at > now()"
+            " RETURNING user_id, tenant_id",
+            ticket_hash,
+        )
+        return dict(row) if row else None
+
     async def update_member_role(
         self,
         tenant_id: str,

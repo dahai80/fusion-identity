@@ -17,6 +17,8 @@ from fusion_identity.models import (
     SessionIssueRequest,
     SessionRevokeRequest,
     SessionVerifyRequest,
+    SsoTicketExchangeRequest,
+    SsoTicketIssueResponse,
     TokenResponse,
     VerifyRequest,
     VerifyResponse,
@@ -194,3 +196,32 @@ async def introspect(
     if not token:
         return {"active": False}
     return await svc.introspect(token)
+
+
+@router.post("/ticket", response_model=SsoTicketIssueResponse)
+async def issue_sso_ticket(
+    request: Request,
+    claims: dict = Depends(require_bearer),
+    svc: AuthService = Depends(get_auth_service),
+) -> SsoTicketIssueResponse:
+    # Issue #48: mint a one-time SSO ticket for the caller's session
+    # (fusion-site → web-shell handoff). The tenant middleware already
+    # verified X-Tenant-Id == token tid for this non-exempt path; the ticket
+    # is bound to the session's sub + tenant. Role is advisory here — the
+    # exchange re-fetches it from tenant_members.
+    logger.info("sso ticket route: issue sub=%s tid=%s", claims.get("sub"), claims.get("tid"))
+    out = await svc.issue_sso_ticket(claims["sub"], claims["tid"], claims.get("role", "member"))
+    return SsoTicketIssueResponse(ticket=out["ticket"], expires_in=out["expires_in"])
+
+
+@router.post("/ticket/exchange", response_model=TokenResponse)
+async def exchange_sso_ticket(
+    request: Request,
+    req: SsoTicketExchangeRequest,
+    svc: AuthService = Depends(get_auth_service),
+) -> TokenResponse:
+    # Issue #48: exchange a one-time SSO ticket for the standard token pair.
+    # Tenant-middleware-exempt (the ticket itself is the secret); rate-limited
+    # like login against a pseudo tenant key.
+    await check_login_rate(request, "_sso_ticket", None)
+    return await svc.exchange_sso_ticket(req.ticket)
