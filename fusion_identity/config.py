@@ -147,6 +147,10 @@ class Settings:
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_from: str = ""
+    # Issue #51: public origin of the auth portal — used to build absolute
+    # verification links ({base}/auth/?verify={token}). Empty → relative
+    # link fallback with a loud warning (delivery is never refused).
+    public_base_url: str = ""
     smtp_starttls: bool = True
 
 
@@ -328,6 +332,7 @@ def load_settings() -> Settings:
         smtp_username=os.environ.get("FUSION_IDENTITY_SMTP_USERNAME", ""),
         smtp_password=os.environ.get("FUSION_IDENTITY_SMTP_PASSWORD", ""),
         smtp_from=os.environ.get("FUSION_IDENTITY_SMTP_FROM", ""),
+        public_base_url=os.environ.get("FUSION_IDENTITY_PUBLIC_BASE_URL", "").rstrip("/"),
         smtp_starttls=os.environ.get("FUSION_IDENTITY_SMTP_STARTTLS", "1").strip().lower()
         in ("1", "true", "yes"),
     )

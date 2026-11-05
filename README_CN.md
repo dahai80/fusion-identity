@@ -72,6 +72,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_SMTP_USERNAME` / `_PASSWORD` | 否 | — | SMTP 认证凭据。 |
 | `FUSION_IDENTITY_SMTP_FROM` | 否 | — | 验证邮件的发件地址。 |
 | `FUSION_IDENTITY_SMTP_STARTTLS` | 否 | `1` | 连接中继时使用 STARTTLS。 |
+| `FUSION_IDENTITY_PUBLIC_BASE_URL` | 否 | — | issue #51：认证门户的公网 origin；验证邮件链接构造为 `{base}/auth/?verify={token}`（路由契约以 fusion-gateway `web/auth/app.js` 为准）。未设置 → 相对链接兜底 + 发送时响亮 WARNING。 |
 
 引导仅在租户表为空时运行。租户表**非空**（操作员已带外建好首个 admin，例如通过 `psql`）时跳过引导，无需凭证即可启动。租户表**为空**且未设 `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` 时，服务**拒绝启动**（fail-closed —— 全新安装必须带外播种首个 admin，否则无人可管理）。
 
@@ -93,7 +94,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 ### 公开注册（`/api/v1/auth/register*` —— issue #39）
 
-自助注册通道（设计文档：`architecture/fusion-site-auth-1104.md`）。两者均豁免租户中间件、有限流、有审计（`auth.registered` / `auth.tenant_registered` / `auth.email_verified` 记入租户 `_system`），且是对既有创建内部（`create_user` / `provision_core`）的薄封装 —— 不存在第二条用户/租户创建代码路径。
+自助注册通道（设计文档：`architecture/fusion-site-auth-1104.md`）。两者均豁免租户中间件、有限流、有审计（`auth.registered` / `auth.tenant_registered` / `auth.email_verified` 记入租户 `_system`），且是对既有创建内部（`create_user` / `provision_core`）的薄封装 —— 不存在第二条用户/租户创建代码路径。issue #51：邮件验证链接为 `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/?verify={token}`（认证门户契约）；API 兑换端点仍为 `POST /api/v1/auth/verify-email`（原始 token）。
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|

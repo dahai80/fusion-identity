@@ -94,6 +94,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_SMTP_USERNAME` / `_PASSWORD` | no | — | SMTP AUTH credentials. |
 | `FUSION_IDENTITY_SMTP_FROM` | no | — | From address for verification emails. |
 | `FUSION_IDENTITY_SMTP_STARTTLS` | no | `1` | Use STARTTLS when connecting to the relay. |
+| `FUSION_IDENTITY_PUBLIC_BASE_URL` | no | — | Issue #51: public origin of the auth portal; verification links are built as `{base}/auth/?verify={token}` (route contract owned by fusion-gateway `web/auth/app.js`). Unset → relative link fallback + loud WARNING at send time. |
 
 Bootstrap runs only when the tenant table is empty. On an **empty** table with `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` unset, startup **refuses to start** (fail-closed — a fresh install must be seeded with a first admin; the service will not come up un-administerable). Bootstrap is a no-op when the table is **non-empty** (the operator pre-seeded the first admin out-of-band, e.g. via `psql`), so the service starts without those vars in that case.
 
@@ -118,7 +119,7 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` and `X-Tenant-Id:
 
 ### Public registration (`/api/v1/auth/register*` — issue #39)
 
-Self-service signup channels (design: `architecture/fusion-site-auth-1104.md`). Both are tenant-middleware-exempt, rate-limited, audited (`auth.registered` / `auth.tenant_registered` / `auth.email_verified` to tenant `_system`), and thin wrappers over the existing creation internals (`create_user` / `provision_core`) — no second creation code path.
+Self-service signup channels (design: `architecture/fusion-site-auth-1104.md`). Both are tenant-middleware-exempt, rate-limited, audited (`auth.registered` / `auth.tenant_registered` / `auth.email_verified` to tenant `_system`), and thin wrappers over the existing creation internals (`create_user` / `provision_core`) — no second creation code path. Issue #51: the emailed verification link is `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/?verify={token}` (auth-portal contract); the API redemption endpoint remains `POST /api/v1/auth/verify-email` with the raw token.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|

@@ -16,7 +16,7 @@ class EmailDeliveryError(RuntimeError):
 _VERIFY_BODY = (
     "Welcome to Fusion, {username}.\n\n"
     "Verify your email address by visiting:\n\n"
-    "{base}/verify-email?token={token}\n\n"
+    "{base}/auth/?verify={token}\n\n"
     "This link is single-use and expires in {ttl_hours} hours.\n"
     "If you did not sign up, ignore this message.\n"
 )
@@ -42,7 +42,7 @@ async def send_email(settings: Any, to_email: str, subject: str, body: str) -> s
     # still blocks login until completed, so the operator copies the link from
     # the log. Returns "sent" | "logged" so the caller can audit honestly.
     if not settings.smtp_host:
-        link = next((ln for ln in body.splitlines() if "token=" in ln), body)
+        link = next((ln for ln in body.splitlines() if "verify=" in ln), body)
         logger.warning(
             "email_sender: SMTP not configured — verification message for %s logged "
             "instead of sent (dev fallback): %s",
@@ -62,9 +62,20 @@ async def send_email(settings: Any, to_email: str, subject: str, body: str) -> s
 async def send_verification_email(settings: Any, to_email: str, token: str, username: str) -> str:
     # Issue #39: the verification link body. The raw token travels ONLY in the
     # email (never in an API response — that would defeat the proof).
+    # Issue #51: link matches the auth-portal contract {base}/auth/?verify={token}
+    # (route owned by fusion-gateway web/auth/app.js). base comes from
+    # FUSION_IDENTITY_PUBLIC_BASE_URL; when unset the link stays relative and
+    # a loud warning tells the operator — delivery is never refused.
+    base = (getattr(settings, "public_base_url", "") or "").rstrip("/")
+    if not base:
+        logger.warning(
+            "email_sender: FUSION_IDENTITY_PUBLIC_BASE_URL unset — emailed verification "
+            "link will be relative and unresolvable; set it to the auth portal origin "
+            "(e.g. https://fusion-mlx.cn)"
+        )
     body = _VERIFY_BODY.format(
         username=username,
-        base="",
+        base=base,
         token=token,
         ttl_hours=max(1, settings.email_verify_ttl_seconds // 3600),
     )
