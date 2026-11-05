@@ -563,6 +563,15 @@ class InMemoryStore:
         m = self._members.get((tenant_id, user_id))
         return m["role"] if m else None
 
+    async def memberships_for_user(self, user_id: str) -> list[dict[str, Any]]:
+        # Issue #47: tenant resolution for tenant-less logins.
+        out = []
+        for tid, uid in self._members:
+            if uid == user_id:
+                m = self._members[(tid, uid)]
+                out.append({"tenant_id": tid, "user_id": user_id, "role": m.get("role")})
+        return out
+
     async def update_member_role(
         self, tenant_id: str, user_id: str, role: str
     ) -> dict[str, Any] | None:

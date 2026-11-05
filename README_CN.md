@@ -82,7 +82,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| POST | `/login` | 无 | `{username,password,tenant_id}` → `{access_token,refresh_token,...}`。issue #39：邮箱未验证的用户返回 403（`email not verified — check your inbox for the verification link`），不签发 token。 |
+| POST | `/login` | 无 | `{username,password,tenant_id?}` → `{access_token,refresh_token,...}`。issue #39：邮箱未验证的用户返回 403（`email not verified — check your inbox for the verification link`），不签发 token。issue #47：`tenant_id` 可选——省略时在密码校验通过后从用户成员关系解析（单一活跃成员关系 → 该租户；多个 → 409 `{error:"tenant_ambiguous",tenants:[{tenant_id,display_name}]}` 供前端弹出选择器；无 → 与错误凭据相同的 `invalid credentials`）。显式 `tenant_id` 仍优先；凭据正确但不属于该租户返回 401 `tenant_mismatch`（区别于 `invalid credentials`）。 |
 | GET | `/verify?token=` | service token | 校验 token；返回 `{tid,role,scopes,quota}` |
 | POST | `/verify` | service token | body `{token}` |
 | POST | `/refresh` | 无 | `{refresh_token}` → 新 access token |
