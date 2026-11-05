@@ -323,6 +323,7 @@ class InMemoryStore:
         self._event_seq = 0
         # Issue #40: join policy plane — invite tokens + join requests.
         self._invites: dict[str, dict[str, Any]] = {}
+        self._sso_tickets: dict[str, dict[str, Any]] = {}
         self._join_requests: dict[str, dict[str, Any]] = {}
         logger.info(
             "InMemoryStore initialized (roles seeded=%d) — NOT for production", len(self._roles)
@@ -571,6 +572,28 @@ class InMemoryStore:
                 m = self._members[(tid, uid)]
                 out.append({"tenant_id": tid, "user_id": user_id, "role": m.get("role")})
         return out
+
+    async def create_sso_ticket(
+        self, ticket_hash: str, user_id: str, tenant_id: str, expires_at: float
+    ) -> None:
+        # Issue #48: one-time SSO ticket (hash at rest).
+        self._sso_tickets[ticket_hash] = {
+            "ticket_hash": ticket_hash,
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "expires_at": expires_at,
+            "used_at": None,
+            "created_at": _now(),
+        }
+
+    async def consume_sso_ticket(self, ticket_hash: str) -> dict[str, Any] | None:
+        rec = self._sso_tickets.get(ticket_hash)
+        if rec is None:
+            return None
+        if rec["used_at"] is not None or rec["expires_at"] <= _now():
+            return None
+        rec["used_at"] = _now()
+        return dict(rec)
 
     async def update_member_role(
         self, tenant_id: str, user_id: str, role: str

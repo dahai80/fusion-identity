@@ -87,6 +87,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_REGISTRATION_ENABLED` | no | `1` | Public self-registration (issue #39). `0` returns 403 on both registration endpoints. |
 | `FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED` | no | `1` | When `1`, registration requires an email and issues a single-use verification token; login is 403-blocked until verified. `0` returns a token pair at signup directly. |
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | no | `86400` | Email verification token TTL, seconds. |
+| `FUSION_IDENTITY_SSO_TICKET_TTL` | no | `60` | Issue #48: one-time SSO ticket lifetime, seconds (clamped 5–600). |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | no | `community` | Tenant personal signups auto-join. Auto-created (free plan template) on first personal signup if missing. |
 | `FUSION_IDENTITY_SMTP_HOST` | no | — (logged) | SMTP relay host. Unset → the verification token is WARNING-logged (dev fallback, documented) instead of emailed; verification still gates login. |
 | `FUSION_IDENTITY_SMTP_PORT` | no | `587` | SMTP relay port. |
@@ -109,6 +110,8 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` and `X-Tenant-Id:
 | POST | `/verify` | service token | body `{token}` |
 | POST | `/introspect` | service token | RFC 7662 token introspection. Accepts JSON `{token}` or form-encoded `token=...`; returns `{active:false}` for invalid/revoked/expired tokens or `{active:true,scope,client_id,username,sub,tenant_id,role,token_type,iat,exp,jti,iss,aud}` for valid ones. |
 | POST | `/refresh` | none | `{refresh_token}` → rotated access+refresh; reuse of a rotated token revokes the whole family |
+| POST | `/ticket` | bearer | Issue #48: mint a one-time SSO ticket (`fsso_…`, TTL `FUSION_IDENTITY_SSO_TICKET_TTL` default 60s, clamped 5–600) bound to the session's sub + tenant, for fusion-site → web-shell handoff. Returns `{ticket,expires_in}`; only the sha256 hash is stored. |
+| POST | `/ticket/exchange` | none (ticket is the secret) | Issue #48: `{ticket}` → the standard `{access_token,refresh_token,…}` pair. Atomic single-use (replay → 401 `invalid ticket`); role re-fetched from tenant_members, membership/tenant status re-checked at exchange (fail-closed). Rate-limited like login. |
 | DELETE | `/sessions` | service token | Revoke all access/session jtis + refresh families for `{sub, tenant_id}` (issue #29 user-deletion flow) || POST | `/revoke` | bearer (tenant_admin) | `{jti}` — revokes the caller's own jti (attribution audited) |
 | POST | `/logout` | bearer | `{refresh_token?}` — revokes access jti + the refresh token |
 | POST | `/password` | bearer | `{old_password,new_password}` — change own password (NIST 800-63B policy) |

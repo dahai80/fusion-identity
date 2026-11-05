@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import secrets
 import time
@@ -42,6 +43,10 @@ class StoreProto(Protocol):
     async def get_tenant_status(self, tenant_id: str) -> str | None: ...
     async def get_member_role(self, tenant_id: str, user_id: str) -> str | None: ...
     async def memberships_for_user(self, user_id: str) -> list[dict[str, Any]]: ...
+    async def create_sso_ticket(
+        self, ticket_hash: str, user_id: str, tenant_id: str, expires_at: float
+    ) -> None: ...
+    async def consume_sso_ticket(self, ticket_hash: str) -> dict[str, Any] | None: ...
     async def is_valid_role(self, tenant_id: str, role: str) -> bool: ...
     async def get_role(self, tenant_id: str, role_id: str) -> dict[str, Any] | None: ...
     async def get_role_menus(self, tenant_id: str, role_id: str) -> list[str]: ...
@@ -144,6 +149,7 @@ class AuthService:
         kek_prev: str | None = None,
         mfa_enforce_admin: bool = False,
         email_verification_required: bool = False,
+        sso_ticket_ttl: int = 60,
     ) -> None:
         self._store = store
         self._issuer = issuer
@@ -159,6 +165,8 @@ class AuthService:
         # until the verification token is redeemed. Privileged creation paths
         # default users to verified, so this only gates public signups.
         self._email_verification_required = email_verification_required
+        # Issue #48: one-time SSO ticket lifetime (fusion-site → shell handoff)
+        self._sso_ticket_ttl = max(5, min(int(sso_ticket_ttl), 600))
         if key_ring is not None:
             self._key_ring = key_ring
         else:
@@ -348,6 +356,16 @@ class AuthService:
             locked_until=None,
             last_login_at=time.time(),
         )
+        return await self._issue_login_pair(user, tenant_id, role, req.username)
+
+    async def _issue_login_pair(
+        self,
+        user: dict[str, Any],
+        tenant_id: str,
+        role: str,
+        username: str,
+        audit_action: str = "auth.login",
+    ) -> TokenResponse:
         scopes = _role_scopes(role)
         access, jti = issue_token(
             sub=user["user_id"],
@@ -390,9 +408,9 @@ class AuthService:
             user["user_id"],
             jti,
             role,
-            "auth.login",
+            audit_action,
             "session",
-            {"username": req.username},
+            {"username": username},
         )
         return TokenResponse(
             access_token=access,
@@ -436,6 +454,54 @@ class AuthService:
             "login: resolved tenant=%s for user=%s (tenant-less login)", resolved, user["user_id"]
         )
         return resolved
+
+    async def issue_sso_ticket(self, user_id: str, tenant_id: str, role: str) -> dict[str, Any]:
+        # Issue #48: one-time SSO ticket for fusion-site → web-shell handoff.
+        # Only the sha256 hash is stored; the raw ticket is returned exactly
+        # once and lives for sso_ticket_ttl seconds (clamped 5..600).
+        raw = "fsso_" + secrets.token_urlsafe(32)
+        ticket_hash = hashlib.sha256(raw.encode()).hexdigest()
+        expires_at = time.time() + self._sso_ticket_ttl
+        await self._store.create_sso_ticket(ticket_hash, user_id, tenant_id, expires_at)
+        await self._store.append_audit(
+            tenant_id, user_id, None, role, "auth.ticket_issued", "session", {}
+        )
+        logger.info(
+            "sso ticket: issued user=%s tid=%s ttl=%d", user_id, tenant_id, self._sso_ticket_ttl
+        )
+        return {"ticket": raw, "expires_in": self._sso_ticket_ttl}
+
+    async def exchange_sso_ticket(self, ticket: str) -> TokenResponse:
+        # Issue #48: exchange a one-time ticket for the standard token pair.
+        # Atomic single-use consume; expired/replayed/unknown are uniform 401.
+        ticket_hash = hashlib.sha256(ticket.encode()).hexdigest()
+        rec = await self._store.consume_sso_ticket(ticket_hash)
+        if rec is None:
+            logger.warning("sso exchange: unknown/expired/replayed ticket rejected")
+            raise _unauthorized("invalid ticket")
+        user = await self._store.get_user(rec["user_id"])
+        if user is None or _is_locked(user) or user.get("status") in ("disabled", "locked"):
+            logger.warning("sso exchange: user=%s not exchangeable", rec["user_id"])
+            raise _unauthorized("invalid ticket")
+        tenant_status = await self._store.get_tenant_status(rec["tenant_id"])
+        if tenant_status != "active":
+            logger.warning(
+                "sso exchange: tenant=%s not active (%s)", rec["tenant_id"], tenant_status
+            )
+            raise _unauthorized("invalid ticket")
+        # Role is re-fetched from tenant_members (token role is advisory, L17).
+        role = await self._store.get_member_role(rec["tenant_id"], rec["user_id"])
+        if role is None:
+            logger.warning(
+                "sso exchange: user=%s no longer member of tenant=%s",
+                rec["user_id"],
+                rec["tenant_id"],
+            )
+            raise _unauthorized("invalid ticket")
+        logger.info("sso exchange: ok user=%s tid=%s", rec["user_id"], rec["tenant_id"])
+        return await self._issue_login_pair(
+            user, rec["tenant_id"], role, user["username"], audit_action="auth.ticket_exchanged"
+        )
 
     async def verify(self, req: VerifyRequest) -> VerifyResponse:
         claims = self._verify(req.token, token_type="access")

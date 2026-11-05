@@ -29,6 +29,16 @@ class LoginRequest(BaseModel):
     mfa_code: str | None = None
 
 
+class SsoTicketIssueResponse(BaseModel):
+    # Issue #48: one-time SSO ticket for fusion-site → web-shell handoff.
+    ticket: str
+    expires_in: int
+
+
+class SsoTicketExchangeRequest(BaseModel):
+    ticket: str = Field(min_length=1)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str
