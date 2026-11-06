@@ -479,6 +479,15 @@ class InMemoryStore:
                 return dict(u)
         return None
 
+    async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        # Issue #53: email lookup for duplicate-registration pre-check and the
+        # password recovery plane. Case-insensitive — emails are not case
+        # sensitive in practice and the UNIQUE column alone does not normalize.
+        for u in self._users.values():
+            if u.get("email") and u["email"].lower() == email.lower():
+                return dict(u)
+        return None
+
     async def get_user(self, user_id: str) -> dict[str, Any] | None:
         u = self._users.get(user_id)
         return dict(u) if u else None
@@ -537,6 +546,36 @@ class InMemoryStore:
             u["email_verify_token_hash"] = None
             u["email_verify_expires"] = None
             logger.info("verify_email_token: verified user=%s", u["user_id"])
+            return u["user_id"]
+        return None
+
+    async def set_password_reset_token(
+        self, user_id: str, token_hash: str, expires_at: float
+    ) -> bool:
+        # Issue #54: (re)arm the password reset token. Overwrite invalidates
+        # any previous token.
+        u = self._users.get(user_id)
+        if u is None:
+            return False
+        u["password_reset_token_hash"] = token_hash
+        u["password_reset_expires"] = expires_at
+        logger.info("set_password_reset_token: user=%s", user_id)
+        return True
+
+    async def consume_password_reset_token(self, token_hash: str) -> str | None:
+        # Issue #54: single-use redemption — lookup by token hash, expiry
+        # checked inline, columns cleared on success so the token cannot
+        # replay.
+        for u in self._users.values():
+            if u.get("password_reset_token_hash") != token_hash:
+                continue
+            expires = u.get("password_reset_expires")
+            if expires is not None and expires < _now():
+                logger.warning("consume_password_reset_token: expired token user=%s", u["user_id"])
+                return None
+            u["password_reset_token_hash"] = None
+            u["password_reset_expires"] = None
+            logger.info("consume_password_reset_token: consumed user=%s", u["user_id"])
             return u["user_id"]
         return None
 

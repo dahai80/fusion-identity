@@ -44,6 +44,10 @@ CREATE TABLE users (
     email_verified       BOOLEAN NOT NULL DEFAULT TRUE,
     email_verify_token_hash TEXT,
     email_verify_expires TIMESTAMPTZ,
+    -- Issue #54: password recovery. Reset token stored hashed (sha256),
+    -- single use, expiring; successful reset clears both columns.
+    password_reset_token_hash TEXT,
+    password_reset_expires TIMESTAMPTZ,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT users_algo_chk  CHECK (password_algo IN ('argon2id','scrypt','legacy')),
     CONSTRAINT users_status_chk CHECK (status IN ('active','disabled','locked'))

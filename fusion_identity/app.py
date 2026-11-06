@@ -128,6 +128,8 @@ TENANT_EXEMPT = frozenset(
         "/api/v1/auth/register-tenant",
         "/api/v1/auth/verify-email",
         "/api/v1/auth/verify-email/resend",
+        "/api/v1/auth/password/forgot",
+        "/api/v1/auth/password/reset",
         "/scim/v2/Users",
     }
 )

@@ -1,17 +1,29 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+import secrets
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from fusion_identity import metrics_collector as mc
 from fusion_identity.auth import AuthService
-from fusion_identity.deps import get_auth_service, require_bearer, require_service_token
+from fusion_identity.deps import (
+    get_auth_service,
+    get_settings,
+    get_store,
+    require_bearer,
+    require_service_token,
+)
+from fusion_identity.email_sender import EmailDeliveryError, send_password_reset_email
 from fusion_identity.jwt_utils import JwtError
 from fusion_identity.models import (
     LoginRequest,
     LogoutRequest,
     PasswordChangeRequest,
+    PasswordForgotRequest,
+    PasswordResetConfirmRequest,
     RefreshRequest,
     RevokeRequest,
     SessionIssueRequest,
@@ -24,6 +36,7 @@ from fusion_identity.models import (
     VerifyResponse,
 )
 from fusion_identity.ratelimit import check_login_rate
+from fusion_identity.store import hash_password
 
 logger = logging.getLogger(__name__)
 
@@ -225,3 +238,89 @@ async def exchange_sso_ticket(
     # like login against a pseudo tenant key.
     await check_login_rate(request, "_sso_ticket", None)
     return await svc.exchange_sso_ticket(req.ticket)
+
+
+def _mask_email(email: str) -> str:
+    name, _, domain = email.partition("@")
+    if not domain:
+        return "***"
+    shown = name[:2] if len(name) > 2 else name[:1]
+    return f"{shown}***@{domain}"
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@router.post("/password/forgot")
+async def forgot_password(
+    request: Request,
+    body: PasswordForgotRequest,
+    store=Depends(get_store),
+    settings=Depends(get_settings),
+) -> dict:
+    # Issue #54: request a password reset. The response is ALWAYS {"sent":
+    # true} — account existence never leaves this endpoint (no enumeration).
+    # Rate-limited per email pseudo key.
+    await check_login_rate(request, "_pw_forgot", body.email)
+    email = body.email.strip()
+    user = await store.get_user_by_email(email)
+    if user is None:
+        logger.info("forgot_password: no account for %s (uniform response)", _mask_email(email))
+        return {"sent": True}
+    token = secrets.token_urlsafe(32)
+    ok = await store.set_password_reset_token(
+        user["user_id"],
+        _hash_token(token),
+        time.time() + settings.password_reset_ttl_seconds,
+    )
+    if ok:
+        try:
+            await send_password_reset_email(settings, email, token, user["username"])
+        except EmailDeliveryError:
+            # Delivery failure must not leak account existence via the
+            # response — the user can simply request again.
+            logger.warning("forgot_password: delivery failed user=%s", user["user_id"])
+    else:
+        logger.error("forgot_password: failed to arm reset token user=%s", user["user_id"])
+    return {"sent": True}
+
+
+@router.post("/password/reset")
+async def reset_password(
+    request: Request,
+    body: PasswordResetConfirmRequest,
+    store=Depends(get_store),
+) -> dict:
+    # Issue #54: consume a single-use reset token and set the new password.
+    # Tenant-middleware-exempt (the token is the secret); uniform 400 for
+    # unknown/expired/replayed tokens. Mirrors change_password: rotate the
+    # argon2id hash, revoke every refresh token family so old sessions die.
+    await check_login_rate(request, "_pw_reset", None)
+    user_id = await store.consume_password_reset_token(_hash_token(body.token))
+    if user_id is None:
+        logger.warning("reset_password: invalid, expired, or replayed token")
+        raise HTTPException(status_code=400, detail="invalid or expired reset token")
+    pw_hash, salt, algo = hash_password(body.new_password)
+    await store.update_user(
+        user_id,
+        password_hash_v=pw_hash,
+        salt=salt,
+        password_algo=algo,
+        must_change_password=False,
+    )
+    revoked = await store.revoke_user_sessions(user_id)
+    try:
+        await store.append_audit(
+            tenant_id="_system",
+            user_id=user_id,
+            jti=None,
+            role="public",
+            action="auth.password_reset",
+            resource=None,
+            detail={"via": "self_service"},
+        )
+    except Exception:
+        logger.exception("reset_password: audit append failed user=%s", user_id)
+    logger.info("reset_password: user=%s revoked_sessions=%s", user_id, revoked)
+    return {"reset": True}

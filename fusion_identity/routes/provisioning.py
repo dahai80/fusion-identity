@@ -129,6 +129,13 @@ async def provision_core(
                 status_code=409,
                 detail=f"username {seed_admin.username!r} already exists",
             )
+        # Issue #53: same duplicate-email pre-flight — a seed-admin email that
+        # collides would otherwise surface as a raw 500 after tenant creation.
+        if seed_admin.email and await store.get_user_by_email(seed_admin.email):
+            raise HTTPException(
+                status_code=409,
+                detail="email already registered",
+            )
 
     try:
         tenant = await store.create_tenant(
