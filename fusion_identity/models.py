@@ -39,6 +39,24 @@ class SsoTicketExchangeRequest(BaseModel):
     ticket: str = Field(min_length=1)
 
 
+class PasswordForgotRequest(BaseModel):
+    # Issue #54: self-service password recovery. The response is uniform
+    # regardless of account existence — no enumeration.
+    email: str = Field(min_length=3, max_length=254)
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    # Issue #54: self-service reset — token arrives from the emailed link.
+    # Distinct from PasswordResetRequest (admin password set via members API).
+    token: str = Field(min_length=16, max_length=256)
+    new_password: str = Field(min_length=10, max_length=256)
+
+    @field_validator("new_password")
+    @classmethod
+    def _check_new_password(cls, v: str) -> str:
+        return _validate_password(v)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     refresh_token: str

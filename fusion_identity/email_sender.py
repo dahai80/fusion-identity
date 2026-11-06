@@ -21,6 +21,29 @@ _VERIFY_BODY = (
     "If you did not sign up, ignore this message.\n"
 )
 
+_RESET_BODY = (
+    "Hi {username},\n\n"
+    "A password reset was requested for your Fusion account. Set a new "
+    "password by visiting:\n\n"
+    "{base}/auth/reset?token={token}\n\n"
+    "This link is single-use and expires in {ttl_minutes} minutes.\n"
+    "If you did not request a reset, ignore this message — your password "
+    "is unchanged.\n"
+)
+
+
+def _public_base(settings: Any) -> str:
+    # Issue #51: shared base-URL contract for all emailed links. Empty →
+    # relative link + loud warning; delivery is never refused.
+    base = (getattr(settings, "public_base_url", "") or "").rstrip("/")
+    if not base:
+        logger.warning(
+            "email_sender: FUSION_IDENTITY_PUBLIC_BASE_URL unset — emailed links "
+            "will be relative and unresolvable; set it to the auth portal origin "
+            "(e.g. https://fusion-mlx.cn)"
+        )
+    return base
+
 
 def _send_sync(settings: Any, to_email: str, subject: str, body: str) -> None:
     msg = EmailMessage()
@@ -42,7 +65,7 @@ async def send_email(settings: Any, to_email: str, subject: str, body: str) -> s
     # still blocks login until completed, so the operator copies the link from
     # the log. Returns "sent" | "logged" so the caller can audit honestly.
     if not settings.smtp_host:
-        link = next((ln for ln in body.splitlines() if "verify=" in ln), body)
+        link = next((ln for ln in body.splitlines() if "verify=" in ln or "reset=" in ln), body)
         logger.warning(
             "email_sender: SMTP not configured — verification message for %s logged "
             "instead of sent (dev fallback): %s",
@@ -66,13 +89,7 @@ async def send_verification_email(settings: Any, to_email: str, token: str, user
     # (route owned by fusion-gateway web/auth/app.js). base comes from
     # FUSION_IDENTITY_PUBLIC_BASE_URL; when unset the link stays relative and
     # a loud warning tells the operator — delivery is never refused.
-    base = (getattr(settings, "public_base_url", "") or "").rstrip("/")
-    if not base:
-        logger.warning(
-            "email_sender: FUSION_IDENTITY_PUBLIC_BASE_URL unset — emailed verification "
-            "link will be relative and unresolvable; set it to the auth portal origin "
-            "(e.g. https://fusion-mlx.cn)"
-        )
+    base = _public_base(settings)
     body = _VERIFY_BODY.format(
         username=username,
         base=base,
@@ -80,3 +97,17 @@ async def send_verification_email(settings: Any, to_email: str, token: str, user
         ttl_hours=max(1, settings.email_verify_ttl_seconds // 3600),
     )
     return await send_email(settings, to_email, "Verify your Fusion account", body)
+
+
+async def send_password_reset_email(settings: Any, to_email: str, token: str, username: str) -> str:
+    # Issue #54: the password reset link body. The raw token travels ONLY in
+    # the email (never in an API response). Same base-URL contract as the
+    # verification link (issue #51).
+    base = _public_base(settings)
+    body = _RESET_BODY.format(
+        username=username,
+        base=base,
+        token=token,
+        ttl_minutes=max(1, settings.password_reset_ttl_seconds // 60),
+    )
+    return await send_email(settings, to_email, "Reset your Fusion password", body)

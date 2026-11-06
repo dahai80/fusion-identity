@@ -66,6 +66,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED` | 否 | `1` | 为 `1` 时注册必须提供邮箱并签发一次性验证 token；未验证前登录返回 403。`0` 时注册直接返回 token 对。 |
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | 否 | `86400` | 邮箱验证 token 有效期，秒。 |
 | `FUSION_IDENTITY_SSO_TICKET_TTL` | 否 | `60` | issue #48：一次性 SSO ticket 有效期，秒（钳制 5–600）。 |
+| `FUSION_IDENTITY_PASSWORD_RESET_TTL` | 否 | `3600` | issue #54：密码重置 token 有效期，秒。该 token 是可重置账号密码的 bearer 凭据 —— 请保持较短。 |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | 否 | `community` | 个人注册自动加入的租户。缺失时在首次个人注册时自动创建（绑定 free 计划模板）。 |
 | `FUSION_IDENTITY_SMTP_HOST` | 否 | —（打日志） | SMTP 中继主机。未设置时验证 token 以 WARNING 日志输出（开发兜底，已文档化）而非发信；验证仍阻断登录。 |
 | `FUSION_IDENTITY_SMTP_PORT` | 否 | `587` | SMTP 中继端口。 |
@@ -90,6 +91,8 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | POST | `/refresh` | 无 | `{refresh_token}` → 新 access token |
 | POST | `/ticket` | bearer | issue #48：签发一次性 SSO ticket（`fsso_…`，TTL `FUSION_IDENTITY_SSO_TICKET_TTL` 默认 60 秒，钳制 5–600），绑定会话的 sub + 租户，用于 fusion-site → web-shell 免二次登录交接。返回 `{ticket,expires_in}`；落库仅存 sha256 哈希。 |
 | POST | `/ticket/exchange` | 无（ticket 即凭据） | issue #48：`{ticket}` → 标准 `{access_token,refresh_token,…}`。原子单次使用（重放 → 401 `invalid ticket`）；兑换时从 tenant_members 重新取角色并复核成员关系/租户状态（fail-closed）。与 login 相同的限流。 |
+| POST | `/password/forgot` | 无 | issue #54：`{email}` → 请求密码重置。**恒返回** `{sent:true}` —— 账号是否存在不由此端点泄露（防枚举）。账号存在时，一次性带过期 token（sha256 落库，TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` 默认 1 小时）以 `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/reset?token={token}` 邮件发出。有限流。 |
+| POST | `/password/reset` | 无（token 即凭据） | issue #54：`{token,new_password}` → 消费一次性 token（原子，重放/过期/未知 → 统一 400），轮换 argon2id 哈希，撤销全部 refresh token 家族（旧会话全部失效），审计 `auth.password_reset` 记入 `_system`。密码策略强制（≥10 字符，含字母 + 数字）。 |
 | POST | `/revoke` | bearer（tenant_admin） | `{jti}` |
 
 ### 公开注册（`/api/v1/auth/register*` —— issue #39）
@@ -98,12 +101,16 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| POST | `/register` | 无 | 通道 A —— 个人注册。`{username,password,display_name?,email?}`。创建全局用户，自动加入 `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT`（缺失时首次注册自动创建并绑定 free 计划模板），角色 `member`。验证开启时：邮箱必填（否则 422），响应为 `{status:"verification_required"}`，`/verify-email` 完成前登录保持 403。验证关闭时：立即返回可用 `tokens`。用户名冲突 409；`FUSION_IDENTITY_REGISTRATION_ENABLED=0` 时 403。 |
-| POST | `/register-tenant` | 无 | 通道 B —— 租户注册。`{tenant_display_name,admin_username,admin_password（≥12）,admin_email?,plan?="free"}`。封装 `provision_core`（与管理员开通路径相同的 store 方法：租户 + 计划配额模板 + 种子 admin，自动激活，支持 `Idempotency-Key` 重放）。admin 密码绝不回显。返回开通结果 + 立即的 `tokens` 对（注册请求本身已出示凭据；后续登录仍需验证）。 |
+| POST | `/register` | 无 | 通道 A —— 个人注册。`{username,password,display_name?,email?}`。创建全局用户，自动加入 `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT`（缺失时首次注册自动创建并绑定 free 计划模板），角色 `member`。验证开启时：邮箱必填（否则 422），响应为 `{status:"verification_required"}`，`/verify-email` 完成前登录保持 403。验证关闭时：立即返回可用 `tokens`。用户名冲突 409；邮箱重复 409（issue #53 —— 大小写不敏感；此前表现为原始 500）；`FUSION_IDENTITY_REGISTRATION_ENABLED=0` 时 403。 |
+| POST | `/register-tenant` | 无 | 通道 B —— 租户注册。`{tenant_display_name,admin_username,admin_password（≥12）,admin_email?,plan?="free"}`。封装 `provision_core`（与管理员开通路径相同的 store 方法：租户 + 计划配额模板 + 种子 admin，自动激活，支持 `Idempotency-Key` 重放）。admin 密码绝不回显。admin 用户名或邮箱重复 409（issue #53，在租户创建前预检）。返回开通结果 + 立即的 `tokens` 对（注册请求本身已出示凭据；后续登录仍需验证）。 |
 | POST | `/verify-email` | 无 | `{token}` → 一次性、带过期的兑换（哈希落库、按哈希查找、成功后清列使重放返回 400）。无效/过期/重放一律 400 且不区分（防枚举）。 |
 | POST | `/verify-email/resend` | 无 | `{username}` → 重新签发（旧 token 失效）并重发。**故意公开** —— 未验证用户没有 bearer token，bearer 门控的重发会死锁。无论账号是否存在/状态如何，统一返回 `{resent:bool}`（防枚举）。 |
 
 **邮件投递**：`FUSION_IDENTITY_SMTP_HOST` 未设置时，验证 token 以 WARNING 日志输出（开发兜底）而非发信；验证仍阻断登录。SMTP 发送失败不使注册失败 —— 重发端点负责重试。
+
+### 密码找回（`/api/v1/auth/password/*` —— issue #54）
+
+为丢失密码的用户提供自助重置（此时不存在可用的 bearer token）。两个端点均豁免租户中间件且有限流。安全姿态：请求端点响应统一（无论账号是否存在均返回 `{sent:true}` —— 防枚举）；重置 token 为 `secrets.token_urlsafe(32)`，仅存 sha256，单次使用（在 UPDATE 内原子消费），带过期（TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` 默认 1 小时），仅经邮件传递；重置成功即轮换密码哈希并撤销全部 refresh token 家族。未知/过期/重放 token 一律返回同一 400。SMTP 未设置时的开发兜底与验证邮件一样输出重置链接日志。
 
 ### 租户加入策略（`join_policy` —— issue #40）
 

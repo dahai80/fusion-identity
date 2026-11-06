@@ -16,7 +16,7 @@ from fusion_identity.email_sender import EmailDeliveryError, send_verification_e
 from fusion_identity.models import LoginRequest, _validate_password
 from fusion_identity.ratelimit import check_login_rate
 from fusion_identity.routes.provisioning import ApiKeySpec, SeedAdminSpec, provision_core
-from fusion_identity.store import InMemoryStore
+from fusion_identity.store import InMemoryStore, StoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -151,17 +151,31 @@ async def register(
         )
     if await store.get_user_by_username(body.username) is not None:
         raise HTTPException(status_code=409, detail="username already exists")
+    # Issue #53: duplicate email previously surfaced as a raw 500 (unique
+    # constraint → StoreConflict). Pre-check for the readable 409; the
+    # StoreConflict catch below is the concurrency fallback.
+    if email is not None and await store.get_user_by_email(email) is not None:
+        logger.info("register: rejected duplicate email=%s", _mask_email(email))
+        raise HTTPException(status_code=409, detail="email already registered")
 
     user_id = "usr_" + secrets.token_hex(6)
     verified_now = not settings.email_verification_required
-    user = await store.create_user(
-        user_id,
-        body.username,
-        body.password,
-        email=email,
-        display_name=body.display_name,
-        email_verified=verified_now,
-    )
+    try:
+        user = await store.create_user(
+            user_id,
+            body.username,
+            body.password,
+            email=email,
+            display_name=body.display_name,
+            email_verified=verified_now,
+        )
+    except StoreConflict:
+        # Issue #53: two concurrent signups with the same username/email race
+        # past the pre-checks; the store's unique constraint catches it here.
+        logger.info("register: lost create race user=%s", user_id)
+        raise HTTPException(
+            status_code=409, detail="username or email already registered"
+        ) from None
 
     tenant_id = settings.registration_default_tenant
     if await store.get_tenant_status(tenant_id) is None:

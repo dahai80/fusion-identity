@@ -88,6 +88,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED` | no | `1` | When `1`, registration requires an email and issues a single-use verification token; login is 403-blocked until verified. `0` returns a token pair at signup directly. |
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | no | `86400` | Email verification token TTL, seconds. |
 | `FUSION_IDENTITY_SSO_TICKET_TTL` | no | `60` | Issue #48: one-time SSO ticket lifetime, seconds (clamped 5–600). |
+| `FUSION_IDENTITY_PASSWORD_RESET_TTL` | no | `3600` | Issue #54: password reset token lifetime, seconds. The token is a bearer capability that resets the account password — keep it short. |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | no | `community` | Tenant personal signups auto-join. Auto-created (free plan template) on first personal signup if missing. |
 | `FUSION_IDENTITY_SMTP_HOST` | no | — (logged) | SMTP relay host. Unset → the verification token is WARNING-logged (dev fallback, documented) instead of emailed; verification still gates login. |
 | `FUSION_IDENTITY_SMTP_PORT` | no | `587` | SMTP relay port. |
@@ -116,6 +117,8 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` and `X-Tenant-Id:
 | DELETE | `/sessions` | service token | Revoke all access/session jtis + refresh families for `{sub, tenant_id}` (issue #29 user-deletion flow) || POST | `/revoke` | bearer (tenant_admin) | `{jti}` — revokes the caller's own jti (attribution audited) |
 | POST | `/logout` | bearer | `{refresh_token?}` — revokes access jti + the refresh token |
 | POST | `/password` | bearer | `{old_password,new_password}` — change own password (NIST 800-63B policy) |
+| POST | `/password/forgot` | none | Issue #54: `{email}` → request a password reset. ALWAYS `{sent:true}` — account existence never leaves the endpoint (no enumeration). If the account exists, a single-use expiring token (`sha256` at rest, TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` default 1h) is emailed as `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/reset?token={token}`. Rate-limited. |
+| POST | `/password/reset` | none (token is the secret) | Issue #54: `{token,new_password}` → consumes the single-use token (atomic, replay/expired/unknown → uniform 400), rotates the argon2id hash, revokes every refresh token family (old sessions die), audits `auth.password_reset` to `_system`. Password policy enforced (min 10 chars, letter + digit). |
 
 ### Public registration (`/api/v1/auth/register*` — issue #39)
 
@@ -123,12 +126,16 @@ Self-service signup channels (design: `architecture/fusion-site-auth-1104.md`). 
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/register` | none | Channel A — personal signup. `{username,password,display_name?,email?}`. Creates the global user, auto-joins `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` (auto-created with the free plan template on first signup), role `member`. Verification on: email required (422 otherwise), response is `{status:"verification_required"}` and login stays 403 until `/verify-email`. Verification off: returns a usable `tokens` pair immediately. 409 on username conflict, 403 when `FUSION_IDENTITY_REGISTRATION_ENABLED=0`. |
-| POST | `/register-tenant` | none | Channel B — tenant signup. `{tenant_display_name,admin_username,admin_password (>=12),admin_email?,plan?="free"}`. Wraps `provision_core` (same store methods as the admin provision path: tenant + plan quota template + seed admin, auto-active, `Idempotency-Key` replay supported). Admin password never echoed back. Returns the provision result + an immediate `tokens` pair (signup presented the credentials; later logins still require verification). |
+| POST | `/register` | none | Channel A — personal signup. `{username,password,display_name?,email?}`. Creates the global user, auto-joins `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` (auto-created with the free plan template on first signup), role `member`. Verification on: email required (422 otherwise), response is `{status:"verification_required"}` and login stays 403 until `/verify-email`. Verification off: returns a usable `tokens` pair immediately. 409 on username conflict and on duplicate email (issue #53 — case-insensitive; previously surfaced as a raw 500), 403 when `FUSION_IDENTITY_REGISTRATION_ENABLED=0`. |
+| POST | `/register-tenant` | none | Channel B — tenant signup. `{tenant_display_name,admin_username,admin_password (>=12),admin_email?,plan?="free"}`. Wraps `provision_core` (same store methods as the admin provision path: tenant + plan quota template + seed admin, auto-active, `Idempotency-Key` replay supported). Admin password never echoed back. 409 on duplicate admin username or email (issue #53, pre-flighted before tenant creation). Returns the provision result + an immediate `tokens` pair (signup presented the credentials; later logins still require verification). |
 | POST | `/verify-email` | none | `{token}` → single-use, expiring redemption (hash-at-rest, lookup by hash, columns cleared on success so replay 400s). 400 on invalid/expired/replayed with no distinction (no enumeration). |
 | POST | `/verify-email/resend` | none | `{username}` → re-arms the token (old one invalidated) and re-sends. PUBLIC by design — an unverified user holds no bearer token, so a bearer-gated resend would deadlock. Uniform `{resent:bool}` response regardless of account existence/state (no enumeration). |
 
 **Email delivery**: `FUSION_IDENTITY_SMTP_HOST` unset → the verification token is WARNING-logged (dev fallback) instead of emailed; verification still gates login. SMTP send failures never fail the signup — resend covers retries.
+
+### Password recovery (`/api/v1/auth/password/*` — issue #54)
+
+Self-service reset for users who lost their password (no bearer token exists to change it). Both endpoints are tenant-middleware-exempt and rate-limited. Security posture: the request endpoint is uniform (`{sent:true}` regardless of account existence — no enumeration); the reset token is `secrets.token_urlsafe(32)`, stored only as sha256, single-use (consumed atomically inside the UPDATE), expiring (TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` default 1h), travels only in the email; a successful reset rotates the password hash and revokes every refresh token family. Unknown/expired/replayed tokens all return the same 400. SMTP-unset dev fallback logs the reset link like verification.
 
 ### Tenant join policy (`join_policy` — issue #40)
 

@@ -406,8 +406,40 @@ class PgStore:
             logger.warning("verify_email_token: no matching unexpired token")
         return val
 
+    async def set_password_reset_token(
+        self, user_id: str, token_hash: str, expires_at: float
+    ) -> bool:
+        # Issue #54: mirrors InMemoryStore.set_password_reset_token. Overwrite
+        # invalidates any previous token.
+        val = await self.fetchval(
+            "UPDATE users SET password_reset_token_hash=$2, password_reset_expires=$3 "
+            "WHERE user_id=$1 RETURNING user_id",
+            user_id,
+            token_hash,
+            _ts_from_epoch(expires_at),
+        )
+        return val is not None
+
+    async def consume_password_reset_token(self, token_hash: str) -> str | None:
+        # Issue #54: mirrors InMemoryStore — single use + expiry checked inside
+        # the UPDATE (atomic under concurrency).
+        val = await self.fetchval(
+            "UPDATE users SET password_reset_token_hash=NULL, password_reset_expires=NULL "
+            "WHERE password_reset_token_hash=$1 "
+            "AND (password_reset_expires IS NULL OR password_reset_expires > now()) "
+            "RETURNING user_id",
+            token_hash,
+        )
+        if val is None:
+            logger.warning("consume_password_reset_token: no matching unexpired token")
+        return val
+
     async def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         return await self.fetchrow("SELECT * FROM users WHERE username=$1", username)
+
+    async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
+        # Issue #53: case-insensitive email lookup (mirrors InMemoryStore).
+        return await self.fetchrow("SELECT * FROM users WHERE lower(email)=lower($1)", email)
 
     async def get_user(self, user_id: str) -> dict[str, Any] | None:
         return await self.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
