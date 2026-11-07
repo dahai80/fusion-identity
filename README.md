@@ -1,3 +1,19 @@
+---
+doc_id: fusion-identity/readme
+product: fusion-identity
+class: core
+entry: service
+doc_type: readme
+title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
+audience: engineer
+status: draft
+version: 0.2.24
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README.md
+---
+
 # fusion-identity
 
 Tenant-identity service for the Fusion ecosystem — the **sole JWT issuer** and **tenant registry** for multi-tenant isolation across all Fusion services.
