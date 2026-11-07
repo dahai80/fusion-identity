@@ -1,3 +1,19 @@
+---
+doc_id: fusion-identity/guide
+product: fusion-identity
+class: core
+entry: service
+doc_type: guide
+title: { zh: "fusion-identity 运维手册", en: "fusion-identity operations runbook" }
+audience: engineer
+status: draft
+version: 0.2.24
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/ops-runbook.md
+---
+
 # fusion-identity Operations Runbook
 
 Operational procedures for running fusion-identity in production. Scope: backup/restore, monitoring + alerting, SLO targets, key rotation (KEK + service token), and on-call escalation. Honest about which items depend on infrastructure outside this service.

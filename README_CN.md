@@ -1,3 +1,19 @@
+---
+doc_id: fusion-identity/guide
+product: fusion-identity
+class: core
+entry: service
+doc_type: guide
+title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
+audience: engineer
+status: draft
+version: 0.2.24
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README_CN.md
+---
+
 # fusion-identity
 
 Fusion 生态的租户身份服务 —— 全生态**唯一 JWT 签发方**与**租户注册表**，为所有 Fusion 服务提供多租隔离能力。
