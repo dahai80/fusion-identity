@@ -7,7 +7,7 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.24
+version: 0.2.25
 updated: 2026-11-07
 owner: @dahai
 source_of_truth:

@@ -7,7 +7,7 @@ doc_type: architecture
 title: { zh: "fusion-identity 架构", en: "fusion-identity architecture" }
 audience: engineer
 status: draft
-version: 0.2.24
+version: 0.2.25
 updated: 2026-11-07
 owner: @dahai
 source_of_truth:

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 fusion docs-system static validator (stdlib only, CI-ready)
 
@@ -25,7 +24,6 @@ import os
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------- constants
 
@@ -251,7 +249,7 @@ class Finding:
 @dataclass
 class Doc:
     path: str
-    meta: Dict[str, object] = field(default_factory=dict)
+    meta: dict[str, object] = field(default_factory=dict)
     body_start: int = 0
     body_lines: int = 0
 
@@ -262,8 +260,9 @@ KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
 ITEM_RE = re.compile(r"^\s*-\s+(.+)$")
 
 
-def parse_frontmatter(text: str) -> Tuple[Dict[str, object], int, int]:
-    """Return (meta, 1-based line number where frontmatter ends, total lines). No frontmatter -> ({}, 0, N)."""
+def parse_frontmatter(text: str) -> tuple[dict[str, object], int, int]:
+    # Return (meta, 1-based line number where frontmatter ends, total lines).
+    # No frontmatter -> ({}, 0, N).
     lines = text.splitlines()
     total = len(lines)
     if not lines or lines[0].strip() != "---":
@@ -276,8 +275,8 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, object], int, int]:
     if end is None:
         return {}, 0, total
 
-    meta: Dict[str, object] = {}
-    current: Optional[str] = None
+    meta: dict[str, object] = {}
+    current: str | None = None
     for raw in lines[1:end]:
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
@@ -301,7 +300,7 @@ def parse_frontmatter(text: str) -> Tuple[Dict[str, object], int, int]:
 
 
 def load_doc(path: str) -> Doc:
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         text = fh.read()
     meta, body_start, total = parse_frontmatter(text)
     return Doc(path=path, meta=meta, body_start=body_start, body_lines=total - body_start)
@@ -310,7 +309,7 @@ def load_doc(path: str) -> Doc:
 # ---------------------------------------------------------------- checks
 
 
-def check_frontmatter(doc: Doc, rel: str, out: List[Finding]) -> None:
+def check_frontmatter(doc: Doc, rel: str, out: list[Finding]) -> None:
     if not doc.meta:
         out.append(
             Finding(
@@ -327,7 +326,7 @@ def check_frontmatter(doc: Doc, rel: str, out: List[Finding]) -> None:
         if key not in doc.meta:
             out.append(Finding("ERROR", "FM-KEY", rel, 1, f"missing required key {key}"))
 
-    def val(k: str) -> Optional[str]:
+    def val(k: str) -> str | None:
         v = doc.meta.get(k)
         return v if isinstance(v, str) else None
 
@@ -376,7 +375,7 @@ def check_frontmatter(doc: Doc, rel: str, out: List[Finding]) -> None:
         out.append(Finding("ERROR", "FM-SOT", rel, 1, "source_of_truth must be a non-empty list"))
 
 
-def check_sot_paths(doc: Doc, rel: str, repo_root: str, out: List[Finding]) -> None:
+def check_sot_paths(doc: Doc, rel: str, repo_root: str, out: list[Finding]) -> None:
     sot = doc.meta.get("source_of_truth")
     if not isinstance(sot, list):
         return
@@ -397,7 +396,7 @@ def check_sot_paths(doc: Doc, rel: str, repo_root: str, out: List[Finding]) -> N
                 start = int(m.group(1))
                 end = int(m.group(2) or start)
                 try:
-                    with open(target, "r", encoding="utf-8", errors="replace") as fh:
+                    with open(target, encoding="utf-8", errors="replace") as fh:
                         n = sum(1 for _ in fh)
                 except OSError:
                     continue
@@ -413,7 +412,7 @@ def check_sot_paths(doc: Doc, rel: str, repo_root: str, out: List[Finding]) -> N
                     )
 
 
-def check_redlines(text: str, rel: str, out: List[Finding]) -> None:
+def check_redlines(text: str, rel: str, out: list[Finding]) -> None:
     lines = text.splitlines()
     in_fence = False
     in_inline = False  # inline-code span state, carried across lines
@@ -485,7 +484,7 @@ def check_redlines(text: str, rel: str, out: List[Finding]) -> None:
             )
 
 
-def check_links(doc_path: str, text: str, rel: str, out: List[Finding]) -> None:
+def check_links(doc_path: str, text: str, rel: str, out: list[Finding]) -> None:
     base = os.path.dirname(doc_path)
     # Strip fenced + inline code first: `layers[i](hidden)` is a call, not a link.
     # Inline-code state carries across lines; resets on blank lines.
@@ -527,7 +526,7 @@ def check_links(doc_path: str, text: str, rel: str, out: List[Finding]) -> None:
             )
 
 
-def check_budget(doc: Doc, rel: str, out: List[Finding]) -> None:
+def check_budget(doc: Doc, rel: str, out: list[Finding]) -> None:
     dt = doc.meta.get("doc_type")
     entry = doc.meta.get("entry")
     if not isinstance(dt, str):
@@ -548,7 +547,8 @@ def check_budget(doc: Doc, rel: str, out: List[Finding]) -> None:
                 "BUDGET",
                 rel,
                 0,
-                f"body {doc.body_lines} lines, exceeds the {dt} budget of {limit} lines (over by {over})",
+                f"body {doc.body_lines} lines, exceeds the {dt} budget of "
+                f"{limit} lines (over by {over})",
             )
         )
     elif doc.body_lines > int(limit * 0.9):
@@ -565,7 +565,7 @@ def check_budget(doc: Doc, rel: str, out: List[Finding]) -> None:
         out.append(Finding("INFO", "BUDGET", rel, 0, f"body {doc.body_lines} lines / cap {limit}"))
 
 
-def check_bi_lingual(doc: Doc, rel: str, out: List[Finding]) -> None:
+def check_bi_lingual(doc: Doc, rel: str, out: list[Finding]) -> None:
     # Only the frontmatter zh/en pairing is checked: title must exist in both languages
     title = doc.meta.get("title")
     if isinstance(title, str):
@@ -579,7 +579,7 @@ def check_bi_lingual(doc: Doc, rel: str, out: List[Finding]) -> None:
         )
 
 
-def check_inventory(root: str, cls: str, entry: str, out: List[Finding]) -> None:
+def check_inventory(root: str, cls: str, entry: str, out: list[Finding]) -> None:
     key = (cls, entry)
     if key not in TIER1:
         out.append(
@@ -588,7 +588,8 @@ def check_inventory(root: str, cls: str, entry: str, out: List[Finding]) -> None
                 "INV-KEY",
                 root,
                 0,
-                f"grid position does not exist: class={cls} entry={entry} (see master spec section 2.3)",
+                f"grid position does not exist: class={cls} entry={entry} "
+                "(see master spec section 2.3)",
             )
         )
         return
@@ -618,7 +619,7 @@ def check_inventory(root: str, cls: str, entry: str, out: List[Finding]) -> None
 # ---------------------------------------------------------------- main
 
 
-def iter_docs(root: str, skip_dirs: Tuple[str, ...]) -> List[str]:
+def iter_docs(root: str, skip_dirs: tuple[str, ...]) -> list[str]:
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in skip_dirs and not d.startswith(".")]
@@ -628,7 +629,7 @@ def iter_docs(root: str, skip_dirs: Tuple[str, ...]) -> List[str]:
     return sorted(found)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="fusion docs-system validator")
     ap.add_argument("--root", default=".", help="repository root directory")
     ap.add_argument("--product", help="e.g. fusion-mlx, used for the doc-set check")
@@ -662,7 +663,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     skip = tuple(x.strip() for x in args.skip_dirs.split(",") if x.strip())
-    findings: List[Finding] = []
+    findings: list[Finding] = []
 
     if args.product:
         if not args.cls or not args.entry:
@@ -681,7 +682,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for path in docs_paths:
         rel = os.path.relpath(path, root)
         doc = load_doc(path)
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
 
         check_frontmatter(doc, rel, findings)
@@ -711,7 +712,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print()
     print(
-        f"scanned {len(docs_paths)} docs | ERROR {len(errs)} | WARN {len(warns)} | INFO {len(infos)}"
+        f"scanned {len(docs_paths)} docs | ERROR {len(errs)} | WARN {len(warns)}"
+        f" | INFO {len(infos)}"
     )
 
     if errs:
