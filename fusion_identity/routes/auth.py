@@ -259,13 +259,19 @@ async def forgot_password(
     store=Depends(get_store),
     settings=Depends(get_settings),
 ) -> dict:
-    # Issue #54: request a password reset. The response is ALWAYS {"sent":
-    # true} — account existence never leaves this endpoint (no enumeration).
+    # Issue #54: request a password reset. Default response is ALWAYS
+    # {"sent": true} — account existence never leaves this endpoint (no
+    # enumeration). With settings.password_forgot_reveal_missing enabled
+    # (issue #58), unknown emails return 404 and SMTP delivery failures
+    # return 502 instead of a fake "sent" confirmation.
     # Rate-limited per email pseudo key.
     await check_login_rate(request, "_pw_forgot", body.email)
     email = body.email.strip()
     user = await store.get_user_by_email(email)
     if user is None:
+        if settings.password_forgot_reveal_missing:
+            logger.info("forgot_password: no account for %s (explicit 404)", _mask_email(email))
+            raise HTTPException(status_code=404, detail="no account for this email")
         logger.info("forgot_password: no account for %s (uniform response)", _mask_email(email))
         return {"sent": True}
     token = secrets.token_urlsafe(32)
@@ -278,6 +284,13 @@ async def forgot_password(
         try:
             await send_password_reset_email(settings, email, token, user["username"])
         except EmailDeliveryError:
+            if settings.password_forgot_reveal_missing:
+                logger.warning(
+                    "forgot_password: delivery failed user=%s (explicit 502)", user["user_id"]
+                )
+                raise HTTPException(
+                    status_code=502, detail="mail delivery failed; retry shortly"
+                ) from None
             # Delivery failure must not leak account existence via the
             # response — the user can simply request again.
             logger.warning("forgot_password: delivery failed user=%s", user["user_id"])
