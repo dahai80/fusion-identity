@@ -8,6 +8,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from fusion_identity.app import build_app
+from fusion_identity.email_sender import EmailDeliveryError
 from fusion_identity.store import InMemoryStore
 from tests.conftest import _settings
 
@@ -69,6 +70,32 @@ def test_forgot_unknown_email_uniform(client):
     r = client.post("/api/v1/auth/password/forgot", json={"email": "ghost@example.com"})
     assert r.status_code == 200
     assert r.json() == {"sent": True}
+
+
+def test_forgot_unknown_email_explicit_404_in_reveal_mode(client):
+    # Issue #58: reveal mode returns an explicit 404 instead of fake sent.
+    client.app.state.settings = dataclasses.replace(
+        client.app.state.settings, password_forgot_reveal_missing=True
+    )
+    r = client.post("/api/v1/auth/password/forgot", json={"email": "ghost@example.com"})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "no account for this email"
+
+
+def test_forgot_delivery_failure_502_in_reveal_mode(client, monkeypatch):
+    # Issue #58: in reveal mode a failed send must not claim sent.
+    client.app.state.settings = dataclasses.replace(
+        client.app.state.settings, password_forgot_reveal_missing=True
+    )
+
+    async def failing_send(settings, to_email, subject, body):
+        raise EmailDeliveryError("smtp unavailable")
+
+    monkeypatch.setattr("fusion_identity.email_sender.send_email", failing_send)
+    _signup(client, "reveal_df", "reveal-df@example.com")
+    r = client.post("/api/v1/auth/password/forgot", json={"email": "reveal-df@example.com"})
+    assert r.status_code == 502
+    assert r.json()["detail"] == "mail delivery failed; retry shortly"
     logger.info("uniform forgot response verified")
 
 
