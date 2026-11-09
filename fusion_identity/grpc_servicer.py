@@ -9,6 +9,7 @@ from typing import Any
 import grpc
 from fusion_core.tenant.context import TenantContext, reset, set_context
 
+from fusion_identity import billing
 from fusion_identity import metrics_collector as mc
 from fusion_identity.grpc import identity_pb2 as pb
 from fusion_identity.grpc import identity_pb2_grpc as pb_grpc
@@ -263,6 +264,27 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
             max_tokens = min(
                 _DEFAULT_MAX_TOKENS, remaining if remaining > 0 else _DEFAULT_MAX_TOKENS
             )
+
+            # Issue #60: optional sync billing hook (fusion-commerce wallet,
+            # owner decision: deduct per call). Runs after every local gate —
+            # a decline releases the just-acquired lease and refunds the
+            # reserved daily quota, then refuses with the existing
+            # quota-exhausted semantics so the caller parks the run.
+            try:
+                await billing.consume_wallet(
+                    tenant_id, lease_id, request.target_module, max_tokens
+                )
+            except billing.BillingRefused as exc:
+                await self._concurrency.release(tenant_id, lease_id, "billing_refused")
+                if self._cache is not None:
+                    await self._cache.refund_daily_quota(tenant_id, 0)
+                await self._store.log_lease(
+                    tenant_id, lease_id, "release", "billing_refused"
+                )
+                logger.info(
+                    "grpc authorize refuse billing tenant=%s lease=%s", tenant_id, lease_id
+                )
+                return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, exc.detail)
 
             logger.info(
                 "grpc authorize pass tenant=%s module=%s lease=%s priority=%s",
