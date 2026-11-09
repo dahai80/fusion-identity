@@ -25,7 +25,7 @@ _RESET_BODY = (
     "Hi {username},\n\n"
     "A password reset was requested for your Fusion account. Set a new "
     "password by visiting:\n\n"
-    "{base}/auth/reset?token={token}\n\n"
+    "{base}/auth/?reset={token}\n\n"
     "This link is single-use and expires in {ttl_minutes} minutes.\n"
     "If you did not request a reset, ignore this message — your password "
     "is unchanged.\n"
