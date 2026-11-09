@@ -60,8 +60,8 @@ def _forgot(client: TestClient, email: str, monkeypatch=None) -> str | None:
         return None
     body = captured.get("body", "")
     for ln in body.splitlines():
-        if "reset?token=" in ln:
-            return ln.split("token=")[1].strip()
+        if "/auth/?reset=" in ln:
+            return ln.split("reset=")[1].strip()
     return None
 
 
@@ -194,4 +194,6 @@ def test_reset_link_absolute_with_base_url(client, monkeypatch):
     assert "body" not in captured
     _signup(client, "frank", "frank@example.com")
     client.post("/api/v1/auth/password/forgot", json={"email": "frank@example.com"})
-    assert "https://fusion.example/auth/reset?token=" in captured["body"]
+    # Gateway auth portal SPA contract (#549): the reset pane is prefilled by
+    # /auth/?reset=<token> — /auth/reset is not a served route.
+    assert "https://fusion.example/auth/?reset=" in captured["body"]
