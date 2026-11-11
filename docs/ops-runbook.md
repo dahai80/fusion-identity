@@ -256,13 +256,18 @@ Operator rule: identity recovery NEVER requires client-side state cleanup — al
 
 ### Stall drill (operator drill, repeatable)
 
+Two evidence channels — keep them separate:
+
+**(a) Watchdog CRITICAL path** — validated by unit tests (`tests/test_watchdog.py`) and by REAL captures: on 2026-11-11 the live service logged `STALL detected` at 10:43:13 and 10:45:31 with `stall RECOVERED` after each (machine-level CPU starvation under load avg ~146; the watchdog made previously-silent stalls observable within one probe interval). NOTE: SIGSTOP/SIGKILL of the service process CANNOT produce a fresh CRITICAL — SIGSTOP freezes the watchdog thread together with the loop. Any drill claiming "SIGSTOP → new CRITICAL" is measuring the pre-existing log, not detection.
+
+**(b) Operator recovery drill** (quarterly, with the restore drill):
+
 1. Confirm watchdog live: `./start.sh log | grep watchdog` → `stall watchdog started url=http://127.0.0.1:11470/health interval=30s`.
-2. Inject the stall (accepts TCP, never answers — same signature as the incident). Easiest: SIGSTOP the service process:
-   `kill -STOP $(cat ~/.fusion-identity/identity.pid)` — the listen socket stays open, the loop cannot answer.
-3. Within ~35s (one watchdog interval + timeout), assert: identity.log contains `watchdog: event loop STALL detected`; a `curl -m 6 http://127.0.0.1:11470/health` from a fresh shell times out.
+2. Inject the stall: `kill -STOP $(cat ~/.fusion-identity/identity.pid)` — the listen socket stays open, the process cannot answer.
+3. Assert from a fresh shell: `curl -m 6 http://127.0.0.1:11470/health` times out.
 4. Assert gateway breaker: gateway requests to identity return a readable 502/504 within the bounded wait (not a hang); breaker opens at 3 strikes/30s (fusion-gateway#602 behavior).
-5. Recover: `kill -CONT $(cat ~/.fusion-identity/identity.pid)` — assert `watchdog: stall RECOVERED` in the log, gateway breaker closes, logins succeed again WITHOUT a gateway restart.
-6. Record the drill (date, timings, breaker behavior) in the incident-response log. Run quarterly alongside the restore drill.
+5. Recover: `kill -CONT $(cat ~/.fusion-identity/identity.pid)` — assert `/health` answers again, gateway breaker closes, logins succeed again WITHOUT a gateway restart.
+6. Record the drill (date, timings, breaker behavior) in the incident-response log.
 
 ### Registration abuse throttle
 
