@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.28
+version: 0.2.29
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -90,6 +90,9 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_SMTP_FROM` | 否 | — | 验证邮件的发件地址。 |
 | `FUSION_IDENTITY_SMTP_STARTTLS` | 否 | `1` | 连接中继时使用 STARTTLS。 |
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | 否 | — | issue #51：认证门户的公网 origin；验证邮件链接构造为 `{base}/auth/?verify={token}`（路由契约以 fusion-gateway `web/auth/app.js` 为准）。未设置 → 相对链接兜底 + 发送时响亮 WARNING。 |
+| `FUSION_IDENTITY_REDIS_URL` | 否 | `redis://127.0.0.1:6379/0`（经 start.sh 默认开启） | 身份热缓存 + 并发租约存储的 Redis 连接。issue #71：`start.sh` 默认开启，使配额/API-key 执法平面默认生效；按部署退出须导出 set-but-empty。进程内未设置仍为 REST-only 模式。 |
+| `FUSION_IDENTITY_GRPC_PORT` | 否 | `50051`（经 start.sh 默认开启） | gRPC `IdentityService` 端口（PRD §3.1）。`>0` 且配置 Redis 时启用。issue #71：`start.sh` 默认取已登记的 `50051`；导出 `0` 显式禁用。 |
+| `FUSION_IDENTITY_LEASE_TTL` | 否 | `120` | 并发租约 TTL，秒（Redis 原子锁）。 |
 
 引导仅在租户表为空时运行。租户表**非空**（操作员已带外建好首个 admin，例如通过 `psql`）时跳过引导，无需凭证即可启动。租户表**为空**且未设 `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` 时，服务**拒绝启动**（fail-closed —— 全新安装必须带外播种首个 admin，否则无人可管理）。
 

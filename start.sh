@@ -22,6 +22,19 @@ if [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE"
 fi
 
+# Issue #71: the enforcement plane (redis-backed api-key cache, daily-quota
+# counters, ConcurrencyManager leases, embedded gRPC AuthorizeAndAcquire) is
+# ON by default — quota values without enforcement are dead letters. Opt out
+# per deploy by exporting FUSION_IDENTITY_REDIS_URL="" (set-but-empty); the
+# ${VAR+set} test distinguishes empty from unset. GRPC_PORT 0 disables gRPC
+# explicitly. 50051 is the registered fusion-identity-grpc port.
+if [ "${FUSION_IDENTITY_REDIS_URL+set}" != "set" ]; then
+    export FUSION_IDENTITY_REDIS_URL="redis://127.0.0.1:6379/0"
+fi
+if [ "${FUSION_IDENTITY_GRPC_PORT+set}" != "set" ]; then
+    export FUSION_IDENTITY_GRPC_PORT="50051"
+fi
+
 if [ -z "${FUSION_IDENTITY_JWT_KEY:-}" ]; then
     echo "ERROR: FUSION_IDENTITY_JWT_KEY unset — service refuses to start (fail-closed)" >&2
     exit 2
@@ -89,6 +102,7 @@ start() {
             for var in FUSION_IDENTITY_JWT_KEY FUSION_IDENTITY_SERVICE_TOKEN \
                 FUSION_IDENTITY_KEK FUSION_IDENTITY_JWT_KEY_PREV \
                 FUSION_IDENTITY_KEK_PREV FUSION_IDENTITY_DATABASE_URL \
+                FUSION_IDENTITY_REDIS_URL FUSION_IDENTITY_GRPC_PORT \
                 FUSION_IDENTITY_HOST FUSION_IDENTITY_PORT; do
                 if [ -n "${!var:-}" ]; then
                     printf '%s=%q\n' "$var" "${!var}"

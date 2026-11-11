@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.28
+version: 0.2.29
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -92,8 +92,8 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_STALL_WATCHDOG` | no | `30` | Issue #64: interval in seconds for the loop-independent stall watchdog probing `/health`; stall logs CRITICAL, recovery logs a warning. `0` disables. |
 | `FUSION_IDENTITY_KEK` | **yes** | — | (See required env above.) Key-encryption key for IdP `client_secret` + TOTP secrets (AES-256-GCM). Must not equal the JWT signing key. |
 | `FUSION_IDENTITY_MFA_ENFORCE_ADMIN` | no | `0` | When `1`, `tenant_admin` logins are rejected until the admin has an enabled TOTP factor (AAL2 enforcement). |
-| `FUSION_IDENTITY_REDIS_URL` | no | — (disabled) | Redis URL for the identity hot cache + concurrency lease store, e.g. `redis://127.0.0.1:6379/0`. When unset, the cache/concurrency/gRPC plane is disabled (REST-only mode). |
-| `FUSION_IDENTITY_GRPC_PORT` | no | `0` (disabled) | gRPC `IdentityService` port (PRD §3.1). Enabled only when `>0` AND a Redis URL is set. Default `50051` in compose. |
+| `FUSION_IDENTITY_REDIS_URL` | no | `redis://127.0.0.1:6379/0` (via start.sh; unset in-process stays REST-only) | Redis URL for the identity hot cache + concurrency lease store. Issue #71: `start.sh` defaults it ON so the quota/api-key enforcement plane is live; opt out per deploy by exporting it set-but-empty. |
+| `FUSION_IDENTITY_GRPC_PORT` | no | `50051` (via start.sh; `0` in-process) | gRPC `IdentityService` port (PRD §3.1). Enabled when `>0` AND a Redis URL is set. Issue #71: `start.sh` defaults it to the registered `50051`; export `0` to disable. |
 | `FUSION_IDENTITY_LEASE_TTL` | no | `120` | Concurrency lease TTL in seconds (Redis-backed atomic locks). |
 | `FUSION_IDENTITY_DB_POOL_MAX` | no | `8` | Postgres connection pool max size (`PgStore` only). Size to expected HTTP+gRPC concurrency; production suggests 20-50. |
 | `FUSION_IDENTITY_KEK_PREV` | no | — | Previous KEK for online rotation dual-window. Set to the OLD key during a rotation; secrets still encrypted under it decrypt via this grace key. Must differ from `KEK` and `JWT_KEY`. Sweep with `POST /api/v1/admin/kek/reencrypt`, then drop. See [Operations](#operations). |
@@ -367,7 +367,7 @@ Self-service routes (`POST /api/v1/auth/password`, `logout`, `revoke`, all of `/
 
 ## gRPC IdentityService (PRD §3.1)
 
-The high-throughput authorization plane for inference gateways. Enabled when `FUSION_IDENTITY_GRPC_PORT>0` and `FUSION_IDENTITY_REDIS_URL` is set. Serves `fusion.identity.v1.IdentityService` on `127.0.0.1:<port>` with a gRPC health check (`grpc.health.v1`).
+The high-throughput authorization plane for inference gateways. Enabled when `FUSION_IDENTITY_GRPC_PORT>0` and `FUSION_IDENTITY_REDIS_URL` is set — `start.sh` now defaults BOTH on (issue #71: quota values without enforcement are dead letters; a tenant `fmu_` key must authorize end to end), so the plane is live by default and opt-out per deploy. Serves `fusion.identity.v1.IdentityService` on `127.0.0.1:<port>` with a gRPC health check (`grpc.health.v1`).
 
 Proto: [`fusion_identity/grpc/identity.proto`](fusion_identity/grpc/identity.proto). Regenerate the Python stubs after editing the proto with [`scripts/gen_proto.sh`](scripts/gen_proto.sh) (requires `grpcio-tools` in the venv; idempotent — it also patches the relative import in `identity_pb2_grpc.py` to the package-qualified form).
 
@@ -383,7 +383,7 @@ Priority is derived from `quotas.default_priority` (settable via the admin/quota
 
 [`fusion_identity/client/`](fusion_identity/client/) ships a Python client for gateways:
 
-- `IdentityClient` — long-lived gRPC channel, 10 ms default deadline, async `authorize_and_acquire` (optionally asserts `tenant_id`) / `release_lease` / `report_usage` / `health`.
+- `IdentityClient` — long-lived gRPC channel, 10 ms default deadline, async `authorize_and_acquire` (optionally asserts `tenant_id`) / `release_lease` / `report_usage` / `health`. Pass `service_token=` — the server-side `ServiceTokenInterceptor` gates EVERY rpc (fail-closed) and rejects calls without the `x-fusion-service-token` metadata (issue #71: the SDK previously sent none, so the client never worked against the gated server; the generated health stub's capitalized `Check` is tolerated too).
 - `lease_guard` — `asynccontextmanager` that acquires a lease, yields the response, and always releases on exit; raises `LeaseDenied` on refusal.
 - `KV_PREFIX = "fusion:identity:"` — shared Redis key namespace for cross-service coordination.
 

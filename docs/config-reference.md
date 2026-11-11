@@ -7,7 +7,7 @@ doc_type: config-reference
 title: { zh: "fusion-identity 配置参考", en: "fusion-identity config reference" }
 audience: engineer
 status: draft
-version: 0.2.28
+version: 0.2.29
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -55,8 +55,8 @@ source_of_truth:
 | `FUSION_IDENTITY_DATABASE_URL` | `postgresql://127.0.0.1:5432/fusion_identity` | Postgres 连接串;生产必须以低权限角色 `fusion_identity_app` 连接,RLS 才生效 |
 | `FUSION_IDENTITY_USE_PGSTORE` | 未设置 | 未设置时 `build_app()` 用 `InMemoryStore`(测试/bootstrap);生产必须设置并注入 `PgStore` |
 | `FUSION_IDENTITY_DB_POOL_MAX` | `8` | `PgStore` 连接池上限;生产建议 20-50 |
-| `FUSION_IDENTITY_REDIS_URL` | —(禁用) | 热缓存 + 并发租约 + gRPC 平面依赖;未设置 = REST-only 模式 |
-| `FUSION_IDENTITY_GRPC_PORT` | `0`(禁用) | 仅在 `>0` 且配置 Redis 时启用 gRPC;compose 默认 `50051` |
+| `FUSION_IDENTITY_REDIS_URL` | `redis://127.0.0.1:6379/0`(经 start.sh 默认开启, issue #71) | 热缓存 + 并发租约 + gRPC 平面依赖;进程内未设置仍为 REST-only。按部署退出:导出 set-but-empty |
+| `FUSION_IDENTITY_GRPC_PORT` | `50051`(经 start.sh 默认开启, issue #71) | 仅在 `>0` 且配置 Redis 时启用 gRPC;导出 `0` 显式禁用 |
 | `FUSION_IDENTITY_LEASE_TTL` | `120` | 并发租约 TTL(秒) |
 
 ## 引导 / Bootstrap

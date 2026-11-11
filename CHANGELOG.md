@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.28
+version: 0.2.29
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -19,9 +19,15 @@ source_of_truth:
 
 All notable changes are tracked via GitHub releases and merged PRs. Version in `pyproject.toml` is the source of truth for the current release.
 
-## 0.2.28
+## 0.2.29
 
 Current version (`pyproject.toml`).
+
+- #71: the quota/api-key enforcement plane is ON by default — `start.sh` now defaults `FUSION_IDENTITY_REDIS_URL` (`redis://127.0.0.1:6379/0`) + `FUSION_IDENTITY_GRPC_PORT` (`50051`, the registered fusion-identity-grpc port) and persists both in the env file; previously prod ran with redis unset, so gRPC authorize, concurrency leases and daily-quota counters were all disabled and tenant `fmu_` keys were dead letters. Opt out per deploy by exporting `FUSION_IDENTITY_REDIS_URL` set-but-empty (or `FUSION_IDENTITY_GRPC_PORT=0`)
+- #71: `IdentityClient` SDK fixes found by the live enforcement-chain acceptance tests — attach the `x-fusion-service-token` metadata on every rpc (the server interceptor gates all rpcs; the SDK previously sent none and could never authorize), and tolerate the generated health stub's capitalized `Check`
+- Acceptance (integration, real PG + redis + real gRPC socket): tenant key authorizes and acquires a lease; `ReportUsage` moves the daily-quota counter; `concurrent=1` makes the second parallel authorize fail `CONCURRENCY_LIMIT_EXCEEDED` (HTTP 429); release restores acquire. Gateway-side identity client config remains upstream (fusion-gateway)
+
+## 0.2.28
 
 - #69: `/refresh` now rate-limited (per-IP + per-account, `FUSION_IDENTITY_REFRESH_RATE_LIMIT` default 60/window) — a client refresh-retry loop issuing token pairs every second could queue logins ~2min behind the churn; garbage refresh tokens now 401 instead of an unhandled 500
 - #68: process-wide KDF concurrency cap (`FUSION_IDENTITY_KDF_CONCURRENCY` default 4) — bounds the ~64MB/CPU footprint of unbounded parallel argon2 off-loads under a login burst; slow logins/refreshes (>2s) log a WARNING for diagnosis
