@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.26
+version: 0.2.27
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:

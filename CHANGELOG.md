@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.26
+version: 0.2.27
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -19,7 +19,7 @@ source_of_truth:
 
 All notable changes are tracked via GitHub releases and merged PRs. Version in `pyproject.toml` is the source of truth for the current release.
 
-## 0.2.26
+## 0.2.27
 
 Current version (`pyproject.toml`).
 
