@@ -11,6 +11,7 @@ from fusion_identity.deps import (
     get_cache,
     get_settings,
     get_store,
+    invalidate_tenant_api_keys_cache,
     invalidate_tenant_cache,
     require_service_token,
 )
@@ -135,7 +136,14 @@ async def admin_update_tenant(
     quota_fields = _quota_fields(body)
     if quota_fields:
         await store.put_quota(tenant_id, **quota_fields)
-    await invalidate_tenant_cache(request, tenant_id)
+    if quota_fields:
+        # Issue #71: the per-api-key cache blob embeds max_concurrency/daily
+        # limits — a quota tighten via the admin plane must drop those blobs
+        # too, or the gRPC plane enforces the stale lenient quota for up to
+        # 300s (routes/quotas.py already did this; the admin path did not).
+        await invalidate_tenant_api_keys_cache(request, tenant_id)
+    else:
+        await invalidate_tenant_cache(request, tenant_id)
     if body.status is not None:
         await emit_event(
             store,

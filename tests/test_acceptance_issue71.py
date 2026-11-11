@@ -21,6 +21,10 @@ def _run_trace(extra_env: dict[str, str]) -> str:
     env.update(_BASE_ENV)
     env["FUSION_REGISTRY"] = str(Path(os.devnull).parent / "nonexistent-registry.yaml")
     env["FUSION_SKIP_REGISTRY_CHECK"] = "1"
+    # /dev/null sources as nothing — the persisted operator env file
+    # (~/.fusion-identity/env now carries the enforcement vars) must not
+    # leak into a test of the UNSET defaults.
+    env["FUSION_IDENTITY_ENV_FILE"] = os.devnull
     for var in ("FUSION_IDENTITY_REDIS_URL", "FUSION_IDENTITY_GRPC_PORT"):
         env.pop(var, None)
     env.update(extra_env)
@@ -103,6 +107,7 @@ async def enforce_stack():
     await store.ensure_schema()
     # FK-ordered cleanup of any leftover from a crashed prior run.
     for sql in (
+        "DELETE FROM event_outbox WHERE tenant_id=$1",
         "DELETE FROM usage_ledger WHERE tenant_id=$1",
         "DELETE FROM lease_log WHERE tenant_id=$1",
         "DELETE FROM api_keys WHERE tenant_id=$1",
@@ -162,6 +167,7 @@ async def enforce_stack():
         await rclient.delete(*keys)
     await rclient.aclose()
     for sql in (
+        "DELETE FROM event_outbox WHERE tenant_id=$1",
         "DELETE FROM usage_ledger WHERE tenant_id=$1",
         "DELETE FROM lease_log WHERE tenant_id=$1",
         "DELETE FROM api_keys WHERE tenant_id=$1",
@@ -237,6 +243,56 @@ async def test_enforcement_chain_concurrency_limit_429(enforce_stack):
         await ic.release_lease(third.lease_id, _TENANT)
     finally:
         await ic.close()
+
+
+@pytest.mark.integration
+async def test_admin_quota_tighten_invalidates_apikey_cache(enforce_stack):
+    # Issue #71 regression: the admin-plane PUT /tenants/{id} only dropped the
+    # tenant cache blob, NOT the per-api-key blobs that embed max_concurrency
+    # — a quota tighten via the admin path left the gRPC plane enforcing the
+    # stale lenient quota for up to 300s (routes/quotas.py already did it).
+    import dataclasses
+
+    from starlette.testclient import TestClient
+
+    from fusion_identity.app import build_app
+    from fusion_identity.client.identity_client import IdentityClient
+    from fusion_identity.db import PgStore
+    from fusion_identity.grpc import identity_pb2 as pb
+    from tests.conftest import _settings
+
+    # asyncpg pools are loop-bound: the HTTP app (TestClient portal loop) gets
+    # its OWN store; the gRPC server keeps enforce_stack.store (test loop).
+    http_store = PgStore(PG_URL)
+    s = dataclasses.replace(_settings(), redis_url=_REDIS_URL, grpc_port=0, lease_ttl_seconds=60)
+    app = build_app(s, store=http_store, run_bootstrap=False)
+    with TestClient(app) as http:
+        ic = IdentityClient(
+            target=f"127.0.0.1:{_TEST_GRPC_PORT}",
+            deadline_ms=2000,
+            service_token=enforce_stack.service_token,
+        )
+        try:
+            warm = await ic.authorize_and_acquire(enforce_stack.raw_key, "office")
+            assert warm.is_allowed, pb_msg(warm)
+            await ic.release_lease(warm.lease_id, _TENANT)
+            r = http.put(
+                f"/api/v1/admin/tenants/{_TENANT}",
+                json={"max_concurrency": 1},
+                headers={
+                    "Authorization": f"Bearer {enforce_stack.service_token}",
+                    "X-Tenant-Id": "_system",
+                },
+            )
+            assert r.status_code == 200, r.text
+            first = await ic.authorize_and_acquire(enforce_stack.raw_key, "office")
+            assert first.is_allowed, pb_msg(first)
+            second = await ic.authorize_and_acquire(enforce_stack.raw_key, "office")
+            assert not second.is_allowed, "stale api-key cache served old concurrency"
+            assert second.error_code == pb.AuthErrorCode.CONCURRENCY_LIMIT_EXCEEDED
+            await ic.release_lease(first.lease_id, _TENANT)
+        finally:
+            await ic.close()
 
 
 def pb_msg(resp) -> str:
