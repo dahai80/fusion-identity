@@ -18,8 +18,14 @@ VENV_DIR="${FUSION_IDENTITY_VENV:-/Users/dahai/fusion/.venv}"
 # FUSION_IDENTITY_ENV_FILE at the supervisor env file instead.
 ENV_FILE="${FUSION_IDENTITY_ENV_FILE:-$HOME/.fusion-identity/env}"
 if [ -f "$ENV_FILE" ]; then
+    # set -a: the persisted file uses plain KEY=VALUE assignments (no export
+    # keyword) — without allexport the sourced vars stay shell-local and the
+    # nohup'd service child never sees them (clean-shell restart dies with
+    # ConfigError: missing FUSION_IDENTITY_JWT_KEY).
+    set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
+    set +a
 fi
 
 # Issue #71: the enforcement plane (redis-backed api-key cache, daily-quota
@@ -105,7 +111,7 @@ start() {
                 FUSION_IDENTITY_REDIS_URL FUSION_IDENTITY_GRPC_PORT \
                 FUSION_IDENTITY_HOST FUSION_IDENTITY_PORT; do
                 if [ -n "${!var:-}" ]; then
-                    printf '%s=%q\n' "$var" "${!var}"
+                    printf 'export %s=%q\n' "$var" "${!var}"
                 fi
             done
         } >"$ENV_FILE"
