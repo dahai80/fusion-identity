@@ -322,6 +322,38 @@ async def admin_member_summary(
     return summary
 
 
+class AdminElevateAdminRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/tenants/{tenant_id}/admins")
+async def admin_elevate_tenant_admin(
+    tenant_id: str,
+    body: AdminElevateAdminRequest,
+    request: Request,
+    store: InMemoryStore = Depends(get_store),
+) -> dict[str, Any]:
+    # Issue #63: supported operator path to cure admin-less tenants (e.g.
+    # open-join communities created before the first-member elevation rule,
+    # or an admin-less tenant detected via members/summary by_role counts).
+    # Service-token gated like the rest of /api/v1/admin; promotes an
+    # EXISTING member — it does not create users.
+    if not await store.get_tenant(tenant_id):
+        raise HTTPException(status_code=404, detail="tenant not found")
+    current = await store.get_member_role(tenant_id, body.user_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail="user is not a member of this tenant")
+    if current == "tenant_admin":
+        return {"user_id": body.user_id, "role": "tenant_admin", "changed": False}
+    try:
+        m = await store.update_member_role(tenant_id, body.user_id, "tenant_admin")
+    except StoreConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await invalidate_tenant_cache(request, tenant_id)
+    logger.info("admin_elevate_tenant_admin: tenant=%s user=%s", tenant_id, body.user_id)
+    return {"user_id": body.user_id, "role": m["role"], "changed": True}
+
+
 @router.get("/tenants/{tenant_id}/idps/summary")
 async def admin_idp_summary(
     tenant_id: str,

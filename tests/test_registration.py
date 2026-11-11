@@ -64,7 +64,9 @@ def test_register_returns_tokens_when_verification_off(noverify_client):
     )
     assert v.status_code == 200
     assert v.json()["tid"] == "community"
-    assert v.json()["role"] == "member"
+    # Issue #63: alice is the FIRST member — the signup that auto-created the
+    # community tenant — so she is its tenant_admin.
+    assert v.json()["role"] == "tenant_admin"
 
 
 def test_register_auto_creates_community_tenant_once(noverify_client, store):
@@ -82,6 +84,66 @@ def test_register_auto_creates_community_tenant_once(noverify_client, store):
     # free plan template quota bound at auto-creation
     q = noverify_client.get("/api/v1/admin/tenants/community/quota", headers=_SVC_HEADERS).json()
     assert q["quota"]["rpm"] == 10
+    # Issue #63: the auto-created open-join tenant always has a tenant_admin
+    # (its first member); later joiners stay plain members.
+    summary = noverify_client.get(
+        "/api/v1/admin/tenants/community/members/summary", headers=_SVC_HEADERS
+    ).json()
+    assert summary["by_role"].get("tenant_admin", 0) == 1
+    assert summary["by_role"].get("member", 0) == 1
+
+
+def test_register_later_joiner_stays_member(noverify_client, store):
+    noverify_client.post(
+        "/api/v1/auth/register", json={"username": "first", "password": "Password123"}
+    )
+    noverify_client.post(
+        "/api/v1/auth/register", json={"username": "second", "password": "Password123"}
+    )
+    summary = noverify_client.get(
+        "/api/v1/admin/tenants/community/members/summary", headers=_SVC_HEADERS
+    ).json()
+    assert summary["by_role"].get("tenant_admin", 0) == 1
+    assert summary["by_role"].get("member", 0) == 1
+
+
+def test_admin_elevate_endpoint(noverify_client):
+    # Issue #63: supported cure for admin-less tenants — promote an existing
+    # member to tenant_admin via the service-token admin plane.
+    noverify_client.post(
+        "/api/v1/auth/register", json={"username": "eusera", "password": "Password123"}
+    )
+    noverify_client.post(
+        "/api/v1/auth/register", json={"username": "euserb", "password": "Password123"}
+    )
+    st = noverify_client.app.state.store
+    member_uid = next(
+        uid for (tid, uid), m in st._members.items() if tid == "community" and m["role"] == "member"
+    )
+    # Unknown tenant / non-member rejected.
+    r = noverify_client.post(
+        "/api/v1/admin/tenants/nope/admins", json={"user_id": member_uid}, headers=_SVC_HEADERS
+    )
+    assert r.status_code == 404
+    r = noverify_client.post(
+        "/api/v1/admin/tenants/community/admins",
+        json={"user_id": "usr_nosuchmember"},
+        headers=_SVC_HEADERS,
+    )
+    assert r.status_code == 404
+    # Happy path: promote, idempotent replay reports changed=False.
+    r = noverify_client.post(
+        "/api/v1/admin/tenants/community/admins", json={"user_id": member_uid}, headers=_SVC_HEADERS
+    )
+    assert r.status_code == 200 and r.json()["changed"] is True
+    r = noverify_client.post(
+        "/api/v1/admin/tenants/community/admins", json={"user_id": member_uid}, headers=_SVC_HEADERS
+    )
+    assert r.status_code == 200 and r.json()["changed"] is False
+    summary = noverify_client.get(
+        "/api/v1/admin/tenants/community/members/summary", headers=_SVC_HEADERS
+    ).json()
+    assert summary["by_role"].get("tenant_admin", 0) == 2
 
 
 def test_register_requires_email_when_verification_on(reg_client):
@@ -207,12 +269,15 @@ def test_register_tenant_full_flow(reg_client):
     # free plan quota bound at creation
     q = reg_client.get(f"/api/v1/admin/tenants/{tid}/quota", headers=_SVC_HEADERS).json()
     assert q["quota"]["rpm"] == 10
-    # admin is unverified (email given, verification on) → later logins blocked
-    login = reg_client.post(
-        "/api/v1/auth/login",
-        json={"username": "acmeadmin", "password": "Password123", "tenant_id": tid},
-    )
-    assert login.status_code == 403
+    # Issue #66: privileged path seeds the admin VERIFIED — a second login
+    # (no email redemption in between) must succeed even with verification
+    # enforced and no SMTP configured.
+    for _ in range(2):
+        login = reg_client.post(
+            "/api/v1/auth/login",
+            json={"username": "acmeadmin", "password": "Password123456", "tenant_id": tid},
+        )
+        assert login.status_code == 200, login.text
 
 
 def test_register_tenant_reuses_provision_internals(noverify_client):

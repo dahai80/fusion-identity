@@ -251,6 +251,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(registration_router)
     app.include_router(join_router)
     app.state.webhook_worker = None
+    app.state.watchdog = None
 
     def _verify_jwt(token: str) -> dict[str, Any] | None:
         try:
@@ -330,9 +331,24 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
             )
             app.state.webhook_worker.start()
             logger.info("build_app: webhook worker started url=%s", settings.webhook_url)
+        # Issue #64: stall watchdog — a threading.Timer OUTSIDE the event loop
+        # probes /health so a stalled loop is at least observable (CRITICAL
+        # log). Detection only; recovery is the operator's fusion-sv restart.
+        if settings.stall_watchdog_seconds > 0:
+            from fusion_identity.watchdog import StallWatchdog
+
+            app.state.watchdog = StallWatchdog(
+                settings.port,
+                host=settings.host,
+                interval=settings.stall_watchdog_seconds,
+            )
+            app.state.watchdog.start()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        if app.state.watchdog is not None:
+            app.state.watchdog.stop()
+            app.state.watchdog = None
         if app.state.webhook_worker is not None:
             try:
                 await app.state.webhook_worker.stop()

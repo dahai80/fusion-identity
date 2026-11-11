@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 from typing import Any
@@ -95,7 +96,9 @@ async def add_existing_member_by_proof(
     if existing is None:
         raise HTTPException(status_code=404, detail="user not found")
     uid = existing["user_id"]
-    ok, _needs = verify_password(
+    # Issue #64: KDF off the event loop (CPU-bound).
+    ok, _needs = await asyncio.to_thread(
+        verify_password,
         body.password,
         password_hash_v=existing.get("password_hash_v", ""),
         password_hash=existing.get("password_hash", ""),
@@ -205,7 +208,8 @@ async def reset_member_password(
     member = await store.get_member(tenant_id, user_id)
     if member is None:
         raise HTTPException(status_code=404, detail="member not found")
-    pw_hash, salt, algo = hash_password(body.new_password)
+    # Issue #64: argon2 off the event loop (CPU-bound).
+    pw_hash, salt, algo = await asyncio.to_thread(hash_password, body.new_password)
     u = await store.update_user(
         user_id,
         password_hash_v=pw_hash,

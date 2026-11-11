@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.25
-updated: 2026-11-07
+version: 0.2.26
+updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -18,6 +18,16 @@ source_of_truth:
 # Changelog
 
 All notable changes are tracked via GitHub releases and merged PRs. Version in `pyproject.toml` is the source of truth for the current release.
+
+## 0.2.26
+
+Current version (`pyproject.toml`).
+
+- #66: privileged creation paths (register-tenant, provision) seed the admin `email_verified=True` — a second login right after signup succeeds with verification enforced, no SMTP lockout
+- #63: auto-created open-join tenants are never admin-less — the founding signup becomes `tenant_admin` (later joiners stay `member`); new service-token endpoint `POST /api/v1/admin/tenants/{id}/admins` promotes an existing member to cure admin-less tenants
+- #64: event-loop stall observability — loop-independent watchdog thread (`FUSION_IDENTITY_STALL_WATCHDOG`, default 30s) probes `/health` and logs CRITICAL on stall / INFO-style recovery; all argon2 KDF calls (login, change/reset password, user creation) offloaded to worker threads; `start.sh` persists required env to `~/.fusion-identity/env` (0600) so clean-shell restart works
+- #65: registration abuse throttle evidence (per-IP + per-account, 429 + deny logs), logout→401 and single-use refresh rotation tests, stall drill playbook + degradation contract in `docs/ops-runbook.md`
+- fix(test): password-reset integration test updated for the PR #61 link contract (`/auth/?reset={token}`)
 
 ## 0.2.25
 

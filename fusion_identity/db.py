@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -358,7 +359,8 @@ class PgStore:
     ) -> dict[str, Any]:
         from fusion_identity.store import hash_password
 
-        pw_hash, salt, algo = hash_password(password)
+        # Issue #64: argon2 off the event loop (CPU-bound).
+        pw_hash, salt, algo = await asyncio.to_thread(hash_password, password)
         try:
             return await self.fetchrow(
                 "INSERT INTO users(user_id, username, email, password_hash_v, "

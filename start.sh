@@ -10,6 +10,17 @@ DEFAULT_PORT="11470"
 PID_FILE="${FUSION_IDENTITY_PID_FILE:-$HOME/.fusion-identity/identity.pid}"
 LOG_FILE="${FUSION_IDENTITY_LOG_FILE:-$HOME/.fusion-identity/identity.log}"
 VENV_DIR="${FUSION_IDENTITY_VENV:-/Users/dahai/fusion/.venv}"
+# Issue #64: persist the required env to a 0600 file so ./start.sh restart
+# works from a clean shell (the 2026-11-10 stall incident could not be
+# restarted because the env lived only in the launching shell). Sourced
+# before the fail-closed checks on every invocation; written on every
+# successful start. Supervisor-managed deploys can point
+# FUSION_IDENTITY_ENV_FILE at the supervisor env file instead.
+ENV_FILE="${FUSION_IDENTITY_ENV_FILE:-$HOME/.fusion-identity/env}"
+if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+fi
 
 if [ -z "${FUSION_IDENTITY_JWT_KEY:-}" ]; then
     echo "ERROR: FUSION_IDENTITY_JWT_KEY unset — service refuses to start (fail-closed)" >&2
@@ -72,6 +83,19 @@ start() {
     sleep 1
     if _is_running; then
         _log "started (pid $(cat "$PID_FILE"))"
+        # Issue #64: persist required env for clean-shell restarts. 0600 —
+        # signing keys and service token must not be world-readable.
+        {
+            for var in FUSION_IDENTITY_JWT_KEY FUSION_IDENTITY_SERVICE_TOKEN \
+                FUSION_IDENTITY_KEK FUSION_IDENTITY_JWT_KEY_PREV \
+                FUSION_IDENTITY_KEK_PREV FUSION_IDENTITY_DATABASE_URL \
+                FUSION_IDENTITY_HOST FUSION_IDENTITY_PORT; do
+                if [ -n "${!var:-}" ]; then
+                    printf '%s=%q\n' "$var" "${!var}"
+                fi
+            done
+        } >"$ENV_FILE"
+        chmod 600 "$ENV_FILE"
     else
         _log "FAILED to start — see $LOG_FILE"
         tail -n 20 "$LOG_FILE" >&2 || true

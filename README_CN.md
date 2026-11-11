@@ -7,8 +7,8 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.25
-updated: 2026-11-07
+version: 0.2.26
+updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
   - README_CN.md
@@ -117,8 +117,8 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
-| POST | `/register` | 无 | 通道 A —— 个人注册。`{username,password,display_name?,email?}`。创建全局用户，自动加入 `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT`（缺失时首次注册自动创建并绑定 free 计划模板），角色 `member`。验证开启时：邮箱必填（否则 422），响应为 `{status:"verification_required"}`，`/verify-email` 完成前登录保持 403。验证关闭时：立即返回可用 `tokens`。用户名冲突 409；邮箱重复 409（issue #53 —— 大小写不敏感；此前表现为原始 500）；`FUSION_IDENTITY_REGISTRATION_ENABLED=0` 时 403。 |
-| POST | `/register-tenant` | 无 | 通道 B —— 租户注册。`{tenant_display_name,admin_username,admin_password（≥12）,admin_email?,plan?="free"}`。封装 `provision_core`（与管理员开通路径相同的 store 方法：租户 + 计划配额模板 + 种子 admin，自动激活，支持 `Idempotency-Key` 重放）。admin 密码绝不回显。admin 用户名或邮箱重复 409（issue #53，在租户创建前预检）。返回开通结果 + 立即的 `tokens` 对（注册请求本身已出示凭据；后续登录仍需验证）。 |
+| POST | `/register` | 无 | 通道 A —— 个人注册。`{username,password,display_name?,email?}`。创建全局用户，自动加入 `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT`（缺失时首次注册自动创建并绑定 free 计划模板），角色 `member` —— 但触发自动建租户的**首个注册者**为 `tenant_admin`，保证 open-join 社区永无“无管理员”状态（issue #63；后续加入者仍为 `member`；存量无管理员租户可用 `POST /api/v1/admin/tenants/{id}/admins` 补救）。验证开启时：邮箱必填（否则 422），响应为 `{status:"verification_required"}`，`/verify-email` 完成前登录保持 403。验证关闭时：立即返回可用 `tokens`。用户名冲突 409；邮箱重复 409（issue #53 —— 大小写不敏感；此前表现为原始 500）；`FUSION_IDENTITY_REGISTRATION_ENABLED=0` 时 403。 |
+| POST | `/register-tenant` | 无 | 通道 B —— 租户注册。`{tenant_display_name,admin_username,admin_password（≥12）,admin_email?,plan?="free"}`。封装 `provision_core`（与管理员开通路径相同的 store 方法：租户 + 计划配额模板 + 种子 admin，自动激活，支持 `Idempotency-Key` 重放）。admin 密码绝不回显。admin 用户名或邮箱重复 409（issue #53，在租户创建前预检）。返回开通结果 + 立即的 `tokens` 对（注册请求本身已出示凭据；后续登录仍需验证）。issue #66：种子 admin 以 `email_verified=True` 创建 —— 特权创建路径绝不因验证邮件无法送达而把 admin 锁在门外；验证开启时注册后立即二次登录也成功。 |
 | POST | `/verify-email` | 无 | `{token}` → 一次性、带过期的兑换（哈希落库、按哈希查找、成功后清列使重放返回 400）。无效/过期/重放一律 400 且不区分（防枚举）。 |
 | POST | `/verify-email/resend` | 无 | `{username}` → 重新签发（旧 token 失效）并重发。**故意公开** —— 未验证用户没有 bearer token，bearer 门控的重发会死锁。无论账号是否存在/状态如何，统一返回 `{resent:bool}`（防枚举）。 |
 

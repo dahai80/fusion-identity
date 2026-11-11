@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -448,7 +449,8 @@ class InMemoryStore:
     ) -> dict[str, Any]:
         if user_id in self._users:
             raise StoreConflict(f"user {user_id} exists")
-        pw_hash, salt, algo = hash_password(password)
+        # Issue #64: argon2 off the event loop (CPU-bound).
+        pw_hash, salt, algo = await asyncio.to_thread(hash_password, password)
         self._users[user_id] = {
             "user_id": user_id,
             "username": username,

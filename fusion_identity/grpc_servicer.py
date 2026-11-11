@@ -271,19 +271,13 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
             # reserved daily quota, then refuses with the existing
             # quota-exhausted semantics so the caller parks the run.
             try:
-                await billing.consume_wallet(
-                    tenant_id, lease_id, request.target_module, max_tokens
-                )
+                await billing.consume_wallet(tenant_id, lease_id, request.target_module, max_tokens)
             except billing.BillingRefused as exc:
                 await self._concurrency.release(tenant_id, lease_id, "billing_refused")
                 if self._cache is not None:
                     await self._cache.refund_daily_quota(tenant_id, 0)
-                await self._store.log_lease(
-                    tenant_id, lease_id, "release", "billing_refused"
-                )
-                logger.info(
-                    "grpc authorize refuse billing tenant=%s lease=%s", tenant_id, lease_id
-                )
+                await self._store.log_lease(tenant_id, lease_id, "release", "billing_refused")
+                logger.info("grpc authorize refuse billing tenant=%s lease=%s", tenant_id, lease_id)
                 return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, exc.detail)
 
             logger.info(

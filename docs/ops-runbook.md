@@ -7,8 +7,8 @@ doc_type: guide
 title: { zh: "fusion-identity 运维手册", en: "fusion-identity operations runbook" }
 audience: engineer
 status: draft
-version: 0.2.25
-updated: 2026-11-07
+version: 0.2.26
+updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
   - docs/ops-runbook.md
@@ -227,6 +227,46 @@ D4 tests prove **state consistency across two service instances sharing one Post
 - **Connection pool sizing** — each instance opens `FUSION_IDENTITY_DB_POOL_MAX` (default 8) connections. Size Postgres `max_connections` for `instances × pool_max + headroom`.
 
 External load testing and penetration testing are separate engagements — file tracking issues, do not block release on this service's code.
+
+## Event-loop stall detection and drill (issues #64/#65)
+
+The 2026-11-10 incident: the uvicorn event loop stalled intermittently — TCP accepted, HTTP never answered, zero log output for minutes, gateway identity proxy pool poisoned, portal hard-hung. Two countermeasures landed in this service.
+
+### Stall watchdog (detection)
+
+`FUSION_IDENTITY_STALL_WATCHDOG` (default 30, seconds; `0` disables). A `threading.Timer` runs OUTSIDE the asyncio event loop and probes `http://{host}:{port}/health` every interval with a 5s timeout:
+
+- stall signature (`/health` unresponsive for >= 5s) → **CRITICAL** log `watchdog: event loop STALL detected` (once per stall, no spam);
+- probe answering again → WARNING `watchdog: stall RECOVERED`.
+
+The watchdog detects only. Recovery is the operator's `fusion-sv restart fusion-identity` (or the gateway breaker opening). Alert on the CRITICAL line in log shipping.
+
+### Degradation contract (what happens when identity is down or stalled)
+
+Per-surface behavior — decided here, not discovered in production:
+
+| Surface | Identity down/stalled | Contract |
+|---------|----------------------|----------|
+| Portal login | Cannot verify credentials | Gateway returns a **typed error within its bounded wait** (502/504 after breaker opens at 3 strikes/30s — fusion-gateway#602); portal shows a typed "service unavailable" error, never an infinite spinner |
+| Already-issued web-shell sessions | Access tokens remain verifiable only if identity answers | **Continue until TTL.** Access tokens are self-contained JWTs (8h default); the shell keeps working for already-routed traffic, new verifications fail closed at the gateway. This is the decision: expire-natural, NOT immediate kill |
+| SSO ticket exchange (`/auth/ticket/exchange`) | Identity unreachable | Typed error at the gateway; the ticket's 60s TTL means the user simply retries login after recovery — no sticky broken state |
+| gRPC `AuthorizeAndAcquire` (gateway lease path) | Identity unreachable | Gateway fails closed (deny request), breaker opens; when the concurrency/Redis plane is active, already-acquired leases simply expire after `FUSION_IDENTITY_LEASE_TTL` |
+
+Operator rule: identity recovery NEVER requires client-side state cleanup — all sessions ride self-contained tokens, all cross-service leases self-expire.
+
+### Stall drill (operator drill, repeatable)
+
+1. Confirm watchdog live: `./start.sh log | grep watchdog` → `stall watchdog started url=http://127.0.0.1:11470/health interval=30s`.
+2. Inject the stall (accepts TCP, never answers — same signature as the incident). Easiest: SIGSTOP the service process:
+   `kill -STOP $(cat ~/.fusion-identity/identity.pid)` — the listen socket stays open, the loop cannot answer.
+3. Within ~35s (one watchdog interval + timeout), assert: identity.log contains `watchdog: event loop STALL detected`; a `curl -m 6 http://127.0.0.1:11470/health` from a fresh shell times out.
+4. Assert gateway breaker: gateway requests to identity return a readable 502/504 within the bounded wait (not a hang); breaker opens at 3 strikes/30s (fusion-gateway#602 behavior).
+5. Recover: `kill -CONT $(cat ~/.fusion-identity/identity.pid)` — assert `watchdog: stall RECOVERED` in the log, gateway breaker closes, logins succeed again WITHOUT a gateway restart.
+6. Record the drill (date, timings, breaker behavior) in the incident-response log. Run quarterly alongside the restore drill.
+
+### Registration abuse throttle
+
+`/api/v1/auth/register` and `/api/v1/auth/register-tenant` share the login throttle (`FUSION_IDENTITY_LOGIN_RATE_LIMIT` per `FUSION_IDENTITY_LOGIN_RATE_WINDOW`, default 10/60s), enforced on BOTH the per-IP bucket and the per-account bucket (Redis-backed when the cache plane is active, so the limit is cross-worker). Mass-registration denial logs `login_ratelimit: 429 tenant=register ...` — alert on a spike. Evidence tests: `tests/test_acceptance_issue65.py`.
 
 ## On-call escalation
 

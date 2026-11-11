@@ -7,8 +7,8 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.25
-updated: 2026-11-07
+version: 0.2.26
+updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -86,7 +86,8 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_LOG_LEVEL` | no | `INFO` | Log level. |
 | `FUSION_IDENTITY_LOG_JSON` | no | `0` | Emit structured JSON logs with `tenant_id`/`user_id` from the tenant context. |
 | `FUSION_IDENTITY_LOGIN_RATE_LIMIT` | no | `10` | Max logins per IP per window. `0` = unlimited. |
-| `FUSION_IDENTITY_LOGIN_RATE_WINDOW` | no | `60` | Rate-limit window, seconds. |
+| `FUSION_IDENTITY_LOGIN_RATE_WINDOW` | no | `60` | Rate-limit window, seconds. Also throttles `/register` + `/register-tenant` (per-IP and per-account). |
+| `FUSION_IDENTITY_STALL_WATCHDOG` | no | `30` | Issue #64: interval in seconds for the loop-independent stall watchdog probing `/health`; stall logs CRITICAL, recovery logs a warning. `0` disables. |
 | `FUSION_IDENTITY_KEK` | **yes** | — | (See required env above.) Key-encryption key for IdP `client_secret` + TOTP secrets (AES-256-GCM). Must not equal the JWT signing key. |
 | `FUSION_IDENTITY_MFA_ENFORCE_ADMIN` | no | `0` | When `1`, `tenant_admin` logins are rejected until the admin has an enabled TOTP factor (AAL2 enforcement). |
 | `FUSION_IDENTITY_REDIS_URL` | no | — (disabled) | Redis URL for the identity hot cache + concurrency lease store, e.g. `redis://127.0.0.1:6379/0`. When unset, the cache/concurrency/gRPC plane is disabled (REST-only mode). |
@@ -142,8 +143,8 @@ Self-service signup channels (design: `architecture/fusion-site-auth-1104.md`). 
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/register` | none | Channel A — personal signup. `{username,password,display_name?,email?}`. Creates the global user, auto-joins `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` (auto-created with the free plan template on first signup), role `member`. Verification on: email required (422 otherwise), response is `{status:"verification_required"}` and login stays 403 until `/verify-email`. Verification off: returns a usable `tokens` pair immediately. 409 on username conflict and on duplicate email (issue #53 — case-insensitive; previously surfaced as a raw 500), 403 when `FUSION_IDENTITY_REGISTRATION_ENABLED=0`. |
-| POST | `/register-tenant` | none | Channel B — tenant signup. `{tenant_display_name,admin_username,admin_password (>=12),admin_email?,plan?="free"}`. Wraps `provision_core` (same store methods as the admin provision path: tenant + plan quota template + seed admin, auto-active, `Idempotency-Key` replay supported). Admin password never echoed back. 409 on duplicate admin username or email (issue #53, pre-flighted before tenant creation). Returns the provision result + an immediate `tokens` pair (signup presented the credentials; later logins still require verification). |
+| POST | `/register` | none | Channel A — personal signup. `{username,password,display_name?,email?}`. Creates the global user, auto-joins `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` (auto-created with the free plan template on first signup), role `member` — except the FOUNDING signup that auto-creates the tenant, which becomes its `tenant_admin` so an open-join community is never admin-less (issue #63; later joiners stay `member`; cure for legacy admin-less tenants: `POST /api/v1/admin/tenants/{id}/admins`). Verification on: email required (422 otherwise), response is `{status:"verification_required"}` and login stays 403 until `/verify-email`. Verification off: returns a usable `tokens` pair immediately. 409 on username conflict and on duplicate email (issue #53 — case-insensitive; previously surfaced as a raw 500), 403 when `FUSION_IDENTITY_REGISTRATION_ENABLED=0`. |
+| POST | `/register-tenant` | none | Channel B — tenant signup. `{tenant_display_name,admin_username,admin_password (>=12),admin_email?,plan?="free"}`. Wraps `provision_core` (same store methods as the admin provision path: tenant + plan quota template + seed admin, auto-active, `Idempotency-Key` replay supported). Admin password never echoed back. 409 on duplicate admin username or email (issue #53, pre-flighted before tenant creation). Returns the provision result + an immediate `tokens` pair (signup presented the credentials; later logins still require verification). Issue #66: the seed admin is created `email_verified=True` — a privileged creation path never locks its admin out behind an undeliverable verification email; a second login right after signup succeeds even with verification enforced. |
 | POST | `/verify-email` | none | `{token}` → single-use, expiring redemption (hash-at-rest, lookup by hash, columns cleared on success so replay 400s). 400 on invalid/expired/replayed with no distinction (no enumeration). |
 | POST | `/verify-email/resend` | none | `{username}` → re-arms the token (old one invalidated) and re-sends. PUBLIC by design — an unverified user holds no bearer token, so a bearer-gated resend would deadlock. Uniform `{resent:bool}` response regardless of account existence/state (no enumeration). |
 

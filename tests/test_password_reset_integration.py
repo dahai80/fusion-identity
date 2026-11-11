@@ -87,10 +87,13 @@ async def test_pg_password_reset_roundtrip(pg_reset):
     assert row is not None and row["password_reset_token_hash"]
     # Raw token never stored — only its sha256.
     token_hash = row["password_reset_token_hash"]
-    for ln in captured["body"].splitlines():
-        if "reset?token=" in ln:
-            raw = ln.split("token=")[1].strip()
-            break
+    # PR #61: the reset link follows the auth portal SPA contract —
+    # {base}/auth/?reset={token} (query param "reset=", not "reset?token=").
+    raw = next(
+        ln.split("reset=")[1].strip()
+        for ln in captured["body"].splitlines()
+        if "/auth/?reset=" in ln
+    )
     import hashlib
 
     assert hashlib.sha256(raw.encode()).hexdigest() == token_hash

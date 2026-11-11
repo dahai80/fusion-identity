@@ -7,8 +7,8 @@ doc_type: config-reference
 title: { zh: "fusion-identity 配置参考", en: "fusion-identity config reference" }
 audience: engineer
 status: draft
-version: 0.2.25
-updated: 2026-11-07
+version: 0.2.26
+updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -82,7 +82,8 @@ source_of_truth:
 | `FUSION_IDENTITY_LOG_LEVEL` | `INFO` | 日志级别 |
 | `FUSION_IDENTITY_LOG_JSON` | `0` | `1` = 结构化 JSON 日志,带 `tenant_id`/`user_id` |
 | `FUSION_IDENTITY_LOGIN_RATE_LIMIT` | `10` | 每 IP 每窗口最大登录数;`0` = 不限 |
-| `FUSION_IDENTITY_LOGIN_RATE_WINDOW` | `60` | 限流窗口(秒) |
+| `FUSION_IDENTITY_LOGIN_RATE_WINDOW` | `60` | 限流窗口(秒);同时作用于 `/register` + `/register-tenant`(按 IP 和按账号) |
+| `FUSION_IDENTITY_STALL_WATCHDOG` | `30` | 停摆看门狗探测 `/health` 的间隔(秒),停摆打 CRITICAL、恢复打 WARNING;`0` 关闭(issue #64) |
 | `FUSION_IDENTITY_MFA_ENFORCE_ADMIN` | `0` | `1` = `tenant_admin` 登录在启用 TOTP 前拒绝(AAL2) |
 
 ## 注册 / 邮箱 / SSO
