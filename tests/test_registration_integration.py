@@ -110,6 +110,14 @@ async def test_pg_register_personal_fk_holds(pg_client, monkeypatch):
         return "logged"
 
     monkeypatch.setattr("fusion_identity.routes.registration.send_verification_email", fake_send)
+    # Issue #63 made the role order-dependent: when this test runs FIRST
+    # (pytest-randomly) the community tenant may not exist yet, and this
+    # signup then FOUNDs it as tenant_admin. Assert the role consistent with
+    # the pre-existing state; the FK assertion is the actual target here.
+    community_existed = (
+        await pg_client._store.fetchval("SELECT status FROM tenants WHERE tenant_id='community'")
+        is not None
+    )
     r = pg_client.post(
         "/api/v1/auth/register",
         json={"username": "pgreguser1", "password": "Password123", "email": "pgreg1@example.com"},
@@ -121,7 +129,8 @@ async def test_pg_register_personal_fk_holds(pg_client, monkeypatch):
         body["user_id"],
     )
     assert member is not None
-    assert member["role"] == "member"
+    expected_role = "member" if community_existed else "tenant_admin"
+    assert member["role"] == expected_role
     assert member["added_by"] == body["user_id"]
 
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hashlib
 import logging
@@ -9,6 +8,7 @@ import time
 from typing import Any, Protocol
 
 from fusion_identity.jwt_utils import issue_token, jwt_get_unverified_header, verify_token
+from fusion_identity.kdf import run_kdf
 from fusion_identity.models import (
     LoginRequest,
     MfaStatusResponse,
@@ -261,7 +261,7 @@ class AuthService:
             # the same time as the known-username path (no enumeration side channel).
             # Issue #64: argon2 is CPU-bound (64MB memory_cost) — offload to a
             # worker thread so the event loop keeps serving /health.
-            await asyncio.to_thread(
+            await run_kdf(
                 verify_password,
                 req.password,
                 password_hash_v=_DUMMY_HASH_V,
@@ -302,7 +302,7 @@ class AuthService:
                 detail="email not verified — check your inbox for the verification link",
             )
         # Issue #64: argon2 off the event loop (CPU-bound, 64MB memory_cost).
-        ok, needs_rehash = await asyncio.to_thread(
+        ok, needs_rehash = await run_kdf(
             verify_password,
             req.password,
             password_hash_v=user.get("password_hash_v", ""),
@@ -314,7 +314,7 @@ class AuthService:
             await self._record_failed_login(user, req.tenant_id)
             raise _unauthorized("invalid credentials")
         if needs_rehash:
-            new_hash, new_salt, new_algo = await asyncio.to_thread(hash_password, req.password)
+            new_hash, new_salt, new_algo = await run_kdf(hash_password, req.password)
             await self._store.update_user(
                 user["user_id"],
                 password_hash_v=new_hash,
@@ -871,7 +871,7 @@ class AuthService:
         if user is None:
             raise _unauthorized("user not found")
         # Issue #64: argon2 off the event loop (CPU-bound).
-        ok, _ = await asyncio.to_thread(
+        ok, _ = await run_kdf(
             verify_password,
             old_password,
             password_hash_v=user.get("password_hash_v", ""),
@@ -887,7 +887,7 @@ class AuthService:
             # without tripping the lock.
             await self._record_failed_login(user, tenant_id)
             raise _unauthorized("invalid credentials")
-        pw_hash, salt, algo = await asyncio.to_thread(hash_password, new_password)
+        pw_hash, salt, algo = await run_kdf(hash_password, new_password)
         await self._store.update_user(
             user_id,
             password_hash_v=pw_hash,

@@ -166,6 +166,12 @@ class Settings:
     # operator's fusion-sv restart). Dataclass default 0 keeps offline tests
     # from probing real ports; load_settings defaults it ON for production.
     stall_watchdog_seconds: int = 0
+    # Issue #69: /refresh throttle budget (per-IP + per-account, same window
+    # as the login throttle). Higher than login's default because behind the
+    # gateway every portal refresh shares one source IP; the observed churn
+    # (a retry loop issuing pairs every second) trips it, legitimate use
+    # does not. 0 disables.
+    refresh_rate_limit: int = 60
 
 
 def load_settings() -> Settings:
@@ -359,4 +365,5 @@ def load_settings() -> Settings:
         # Issue #64: default ON for production; FUSION_IDENTITY_STALL_WATCHDOG=0
         # opts out. The watchdog only logs — no restart, no traffic.
         stall_watchdog_seconds=_int_env("FUSION_IDENTITY_STALL_WATCHDOG", 30),
+        refresh_rate_limit=_int_env("FUSION_IDENTITY_REFRESH_RATE_LIMIT", 60),
     )
