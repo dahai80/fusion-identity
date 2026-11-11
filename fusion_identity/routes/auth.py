@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import secrets
@@ -19,6 +18,7 @@ from fusion_identity.deps import (
 )
 from fusion_identity.email_sender import EmailDeliveryError, send_password_reset_email
 from fusion_identity.jwt_utils import JwtError
+from fusion_identity.kdf import run_kdf
 from fusion_identity.models import (
     LoginRequest,
     LogoutRequest,
@@ -51,11 +51,19 @@ async def login(
     svc: AuthService = Depends(get_auth_service),
 ) -> TokenResponse:
     await check_login_rate(request, req.tenant_id, req.username)
+    started = time.perf_counter()
     try:
         resp = await svc.login(req)
         # P3-1: the auth_requests_total counter only recorded gRPC authorize
         # calls; HTTP logins were invisible to monitoring. Record here too.
         mc.record_auth(req.tenant_id, "http", "login_ok", 200)
+        elapsed = time.perf_counter() - started
+        # Issue #68: a 20s login is invisible in the 200 line — surface it.
+        if elapsed > 2.0:
+            logger.warning(
+                "login: SLOW login took %.2fs (arg>2s — suspect KDF queue or machine load)",
+                elapsed,
+            )
         return resp
     except HTTPException as exc:
         mc.record_auth(req.tenant_id, "http", "login_fail", exc.status_code)
@@ -89,9 +97,33 @@ async def verify_post(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(
-    req: RefreshRequest, svc: AuthService = Depends(get_auth_service)
+    request: Request, req: RefreshRequest, svc: AuthService = Depends(get_auth_service)
 ) -> TokenResponse:
-    return await svc.refresh(req)
+    # Issue #69: /refresh was the last unthrottled credential plane — a client
+    # in a refresh retry loop (fusion-gateway session flow, no backoff) issued
+    # token pairs every second for minutes and logins queued ~2min behind the
+    # churn. Same shape as the login throttle (per-IP + per-account) with its
+    # own budget: behind the gateway every portal refresh shares one source
+    # IP, so the default is deliberately higher than login's.
+    settings = getattr(request.app.state, "settings", None)
+    await check_login_rate(
+        request,
+        "refresh",
+        limit=getattr(settings, "refresh_rate_limit", 60),
+        window=getattr(settings, "login_rate_window", 60),
+    )
+    started = time.perf_counter()
+    try:
+        resp = await svc.refresh(req)
+    except JwtError as exc:
+        # Issue #68/#69: garbage refresh tokens were an unhandled JwtError
+        # (500) — the refresh plane must fail closed with 401 like login.
+        logger.info("refresh: rejected token: %s", exc)
+        raise HTTPException(status_code=401, detail="invalid refresh token") from exc
+    elapsed = time.perf_counter() - started
+    if elapsed > 2.0:
+        logger.warning("refresh: slow token issuance took %.2fs (suspect machine load)", elapsed)
+    return resp
 
 
 @router.post("/revoke")
@@ -316,7 +348,7 @@ async def reset_password(
         logger.warning("reset_password: invalid, expired, or replayed token")
         raise HTTPException(status_code=400, detail="invalid or expired reset token")
     # Issue #64: argon2 off the event loop (CPU-bound).
-    pw_hash, salt, algo = await asyncio.to_thread(hash_password, body.new_password)
+    pw_hash, salt, algo = await run_kdf(hash_password, body.new_password)
     await store.update_user(
         user_id,
         password_hash_v=pw_hash,

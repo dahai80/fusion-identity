@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 代理角色定义", en: "fusion-identity agent role definition" }
 audience: engineer
 status: draft
-version: 0.2.27
+version: 0.2.28
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:

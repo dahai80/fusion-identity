@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.27
+version: 0.2.28
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -87,6 +87,8 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_LOG_JSON` | no | `0` | Emit structured JSON logs with `tenant_id`/`user_id` from the tenant context. |
 | `FUSION_IDENTITY_LOGIN_RATE_LIMIT` | no | `10` | Max logins per IP per window. `0` = unlimited. |
 | `FUSION_IDENTITY_LOGIN_RATE_WINDOW` | no | `60` | Rate-limit window, seconds. Also throttles `/register` + `/register-tenant` (per-IP and per-account). |
+| `FUSION_IDENTITY_REFRESH_RATE_LIMIT` | no | `60` | Per-IP + per-account `/refresh` budget per window (issue #69 — bounds a client refresh-retry loop; `0` disables). |
+| `FUSION_IDENTITY_KDF_CONCURRENCY` | no | `4` | Cap on concurrent off-loop argon2 operations (issue #68 — bounds the 64MB/CPU footprint of a login burst; excess logins queue). |
 | `FUSION_IDENTITY_STALL_WATCHDOG` | no | `30` | Issue #64: interval in seconds for the loop-independent stall watchdog probing `/health`; stall logs CRITICAL, recovery logs a warning. `0` disables. |
 | `FUSION_IDENTITY_KEK` | **yes** | — | (See required env above.) Key-encryption key for IdP `client_secret` + TOTP secrets (AES-256-GCM). Must not equal the JWT signing key. |
 | `FUSION_IDENTITY_MFA_ENFORCE_ADMIN` | no | `0` | When `1`, `tenant_admin` logins are rejected until the admin has an enabled TOTP factor (AAL2 enforcement). |

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import secrets
 from typing import Any
@@ -8,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from fusion_identity.deps import get_store, require_permission_of
+from fusion_identity.kdf import run_kdf
 from fusion_identity.models import (
     MemberCreate,
     MemberRoleUpdate,
@@ -97,7 +97,7 @@ async def add_existing_member_by_proof(
         raise HTTPException(status_code=404, detail="user not found")
     uid = existing["user_id"]
     # Issue #64: KDF off the event loop (CPU-bound).
-    ok, _needs = await asyncio.to_thread(
+    ok, _needs = await run_kdf(
         verify_password,
         body.password,
         password_hash_v=existing.get("password_hash_v", ""),
@@ -209,7 +209,7 @@ async def reset_member_password(
     if member is None:
         raise HTTPException(status_code=404, detail="member not found")
     # Issue #64: argon2 off the event loop (CPU-bound).
-    pw_hash, salt, algo = await asyncio.to_thread(hash_password, body.new_password)
+    pw_hash, salt, algo = await run_kdf(hash_password, body.new_password)
     u = await store.update_user(
         user_id,
         password_hash_v=pw_hash,

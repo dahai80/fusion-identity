@@ -119,12 +119,25 @@ def client_ip(request: Request) -> str:
     return peer
 
 
-async def check_login_rate(request: Request, tenant_id: str, username: str | None = None) -> None:
+async def check_login_rate(
+    request: Request,
+    tenant_id: str,
+    username: str | None = None,
+    *,
+    limit: int | None = None,
+    window: int | None = None,
+) -> None:
+    # Issue #69: optional limit/window override so non-login planes (e.g.
+    # /refresh) get their own budget instead of inheriting the login one.
     ip = client_ip(request)
     cache = getattr(request.app.state, "cache", None)
     settings = getattr(request.app.state, "settings", None)
-    limit = getattr(settings, "login_rate_limit", DEFAULT_LOGIN_LIMIT) or 0
-    window = getattr(settings, "login_rate_window", DEFAULT_LOGIN_WINDOW) or DEFAULT_LOGIN_WINDOW
+    if limit is None:
+        limit = getattr(settings, "login_rate_limit", DEFAULT_LOGIN_LIMIT) or 0
+    if window is None:
+        window = (
+            getattr(settings, "login_rate_window", DEFAULT_LOGIN_WINDOW) or DEFAULT_LOGIN_WINDOW
+        )
     # P1-4: prefer the Redis-backed limiter when the cache plane is active so
     # the configured limit is enforced across workers (in-memory gives N×).
     # Fall back to the process-local limiter only when redis is absent.
@@ -145,6 +158,19 @@ async def check_login_rate(request: Request, tenant_id: str, username: str | Non
         if allowed is True:
             return
     limiter = get_login_limiter(request)
+    if (limit, window) != (limiter.max_tokens, limiter.window):
+        # Issue #69: override budget (e.g. the /refresh plane) — separate
+        # limiter instance per (limit, window) so it does not share buckets
+        # or the token budget with the login limiter.
+        override: LoginRateLimiter | None = getattr(request.app.state, "rate_limiters", {}).get(
+            (limit, window)
+        )
+        if override is None:
+            override = LoginRateLimiter(max_tokens=limit, window=window)
+            if not hasattr(request.app.state, "rate_limiters"):
+                request.app.state.rate_limiters = {}
+            request.app.state.rate_limiters[(limit, window)] = override
+        limiter = override
     if not limiter.allow(tenant_id, ip, username):
         logger.warning("login_ratelimit: 429 tenant=%s ip=%s user=%s", tenant_id, ip, username)
         raise HTTPException(

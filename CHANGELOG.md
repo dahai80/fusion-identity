@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.27
+version: 0.2.28
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -18,6 +18,14 @@ source_of_truth:
 # Changelog
 
 All notable changes are tracked via GitHub releases and merged PRs. Version in `pyproject.toml` is the source of truth for the current release.
+
+## 0.2.28
+
+Current version (`pyproject.toml`).
+
+- #69: `/refresh` now rate-limited (per-IP + per-account, `FUSION_IDENTITY_REFRESH_RATE_LIMIT` default 60/window) — a client refresh-retry loop issuing token pairs every second could queue logins ~2min behind the churn; garbage refresh tokens now 401 instead of an unhandled 500
+- #68: process-wide KDF concurrency cap (`FUSION_IDENTITY_KDF_CONCURRENCY` default 4) — bounds the ~64MB/CPU footprint of unbounded parallel argon2 off-loads under a login burst; slow logins/refreshes (>2s) log a WARNING for diagnosis
+- Root cause (both): machine-level CPU starvation (load avg ~146) + fusion-gateway refresh retry loop without backoff (filed upstream); JWKS/issue_token verified IO-free and lock-free
 
 ## 0.2.27
 

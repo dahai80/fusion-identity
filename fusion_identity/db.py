@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -8,6 +7,7 @@ import time
 from datetime import UTC
 from typing import Any
 
+from fusion_identity.kdf import run_kdf
 from fusion_identity.store import JOIN_POLICIES, StoreConflict
 
 logger = logging.getLogger(__name__)
@@ -360,7 +360,7 @@ class PgStore:
         from fusion_identity.store import hash_password
 
         # Issue #64: argon2 off the event loop (CPU-bound).
-        pw_hash, salt, algo = await asyncio.to_thread(hash_password, password)
+        pw_hash, salt, algo = await run_kdf(hash_password, password)
         try:
             return await self.fetchrow(
                 "INSERT INTO users(user_id, username, email, password_hash_v, "
