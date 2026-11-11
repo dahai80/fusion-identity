@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -314,7 +315,8 @@ async def reset_password(
     if user_id is None:
         logger.warning("reset_password: invalid, expired, or replayed token")
         raise HTTPException(status_code=400, detail="invalid or expired reset token")
-    pw_hash, salt, algo = hash_password(body.new_password)
+    # Issue #64: argon2 off the event loop (CPU-bound).
+    pw_hash, salt, algo = await asyncio.to_thread(hash_password, body.new_password)
     await store.update_user(
         user_id,
         password_hash_v=pw_hash,

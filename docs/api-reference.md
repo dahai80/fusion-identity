@@ -7,8 +7,8 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.25
-updated: 2026-11-07
+version: 0.2.26
+updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -99,6 +99,7 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 | DELETE | `/tenants/{tid}/api-keys/{key_id}` 或 `/keys/{key_id}` | 吊销 |
 | GET | `/tenants/{tid}/usage/today` | 24h 并发 + token 用量 |
 | GET | `/tenants/{tid}/members/summary` | `{total,active,disabled,locked,by_role}`,不含用户名/邮箱 |
+| POST | `/tenants/{tid}/admins` | 提升已有成员为 `tenant_admin`(治理无管理员租户,issue #63);已是 admin 返回 `changed:false` |
 | GET | `/tenants/{tid}/idps/summary` | SSO 能力状态,不含 secret 材料 |
 | GET | `/app-secrets` | 跨 app 机密清单(无密钥材料) |
 | POST | `/tenants/provision` | 一次性开通:租户+配额模板+种子 admin+API key;`Idempotency-Key` 重放返回原结果 |

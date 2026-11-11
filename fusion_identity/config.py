@@ -160,6 +160,12 @@ class Settings:
     # link fallback with a loud warning (delivery is never refused).
     public_base_url: str = ""
     smtp_starttls: bool = True
+    # Issue #64: event-loop stall watchdog. >0 enables a loop-independent
+    # threading.Timer that probes /health every N seconds and logs CRITICAL
+    # when the loop stops answering (detection only — recovery is the
+    # operator's fusion-sv restart). Dataclass default 0 keeps offline tests
+    # from probing real ports; load_settings defaults it ON for production.
+    stall_watchdog_seconds: int = 0
 
 
 def load_settings() -> Settings:
@@ -350,4 +356,7 @@ def load_settings() -> Settings:
         public_base_url=os.environ.get("FUSION_IDENTITY_PUBLIC_BASE_URL", "").rstrip("/"),
         smtp_starttls=os.environ.get("FUSION_IDENTITY_SMTP_STARTTLS", "1").strip().lower()
         in ("1", "true", "yes"),
+        # Issue #64: default ON for production; FUSION_IDENTITY_STALL_WATCHDOG=0
+        # opts out. The watchdog only logs — no restart, no traffic.
+        stall_watchdog_seconds=_int_env("FUSION_IDENTITY_STALL_WATCHDOG", 30),
     )

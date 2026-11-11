@@ -7,8 +7,8 @@ doc_type: get-started
 title: { zh: "fusion-identity 快速上手", en: "fusion-identity quick start" }
 audience: engineer
 status: draft
-version: 0.2.25
-updated: 2026-11-07
+version: 0.2.26
+updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
   - README.md

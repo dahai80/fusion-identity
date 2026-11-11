@@ -9,7 +9,12 @@ from starlette.testclient import TestClient
 
 from fusion_identity.app import build_app
 from fusion_identity.db import PgStore
-from tests.conftest import _settings
+from tests.conftest import TEST_SERVICE_TOKEN, _settings
+
+_SVC_HEADERS = {
+    "Authorization": f"Bearer {TEST_SERVICE_TOKEN}",
+    "X-Tenant-Id": "_system",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -164,3 +169,87 @@ async def test_pg_verify_email_roundtrip(pg_client, monkeypatch):
     assert v.json()["verified"] is True
     replay = pg_client.post("/api/v1/auth/verify-email", json={"token": token})
     assert replay.status_code == 400
+
+
+async def test_pg_register_tenant_admin_verified_two_logins(pg_client, monkeypatch):
+    # Issue #66 acceptance: with email verification enforced, register-tenant
+    # seeds the admin VERIFIED — a second login without any email redemption
+    # must succeed (no SMTP lockout).
+    r = pg_client.post(
+        "/api/v1/auth/register-tenant",
+        json={
+            "tenant_display_name": "Pg66 Tenant",
+            "admin_username": "pgregadmin66",
+            "admin_password": "Password123456",
+            "admin_email": "pgregadmin66@example.com",
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = _track(r)
+    tid = body["tenant"]["tenant_id"]
+    uid = await pg_client._store.fetchval(
+        "SELECT email_verified FROM users WHERE user_id=$1", body["admin"]["user_id"]
+    )
+    assert uid is True
+    for _ in range(2):
+        login = pg_client.post(
+            "/api/v1/auth/login",
+            json={"username": "pgregadmin66", "password": "Password123456", "tenant_id": tid},
+        )
+        assert login.status_code == 200, login.text
+
+
+async def test_pg_first_member_of_auto_tenant_is_admin(pg_client, monkeypatch):
+    # Issue #63 acceptance: a freshly auto-created open-join tenant has at
+    # least one tenant_admin (its first member). Drop any community tenant
+    # left by earlier tests so THIS signup is the founding one.
+    for sql in (
+        "DELETE FROM tenant_members WHERE tenant_id='community'",
+        "DELETE FROM quotas WHERE tenant_id='community'",
+        "DELETE FROM event_outbox WHERE tenant_id='community'",
+        "DELETE FROM audit_log WHERE tenant_id='community'",
+        "DELETE FROM issued_jtis WHERE tenant_id='community'",
+        "DELETE FROM revoked_jtis WHERE tenant_id='community'",
+        "DELETE FROM refresh_tokens WHERE tenant_id='community'",
+        "DELETE FROM sso_tickets WHERE tenant_id='community'",
+        "DELETE FROM tenant_invites WHERE tenant_id='community'",
+        "DELETE FROM join_requests WHERE tenant_id='community'",
+        "DELETE FROM api_keys WHERE tenant_id='community'",
+        "DELETE FROM tenants WHERE tenant_id='community'",
+    ):
+        with contextlib.suppress(Exception):
+            await pg_client._store.execute(sql)
+    r = pg_client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "pgregfirst66",
+            "password": "Password123",
+            "email": "pgregfirst66@example.com",
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = _track(r)
+    member = await pg_client._store.fetchrow(
+        "SELECT role FROM tenant_members WHERE user_id=$1 AND tenant_id='community'",
+        body["user_id"],
+    )
+    assert member is not None and member["role"] == "tenant_admin"
+    # Elevation endpoint promotes an existing member on real PG.
+    r2 = pg_client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "pgregsecond66",
+            "password": "Password123",
+            "email": "pgregsecond66@example.com",
+        },
+    )
+    assert r2.status_code == 201, r2.text
+    uid2 = _track(r2)["user_id"]
+    r = pg_client.post(
+        "/api/v1/admin/tenants/community/admins", json={"user_id": uid2}, headers=_SVC_HEADERS
+    )
+    assert r.status_code == 200 and r.json()["changed"] is True
+    role = await pg_client._store.fetchval(
+        "SELECT role FROM tenant_members WHERE user_id=$1 AND tenant_id='community'", uid2
+    )
+    assert role == "tenant_admin"

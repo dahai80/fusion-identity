@@ -178,6 +178,7 @@ async def register(
         ) from None
 
     tenant_id = settings.registration_default_tenant
+    tenant_created_now = False
     if await store.get_tenant_status(tenant_id) is None:
         # Auto-create the default join tenant (free plan, decision 2) on
         # first personal signup.
@@ -190,11 +191,23 @@ async def register(
         )
         if template is not None:
             await store.put_quota(tenant_id, **template)
+        tenant_created_now = True
         logger.info("register: auto-created default join tenant=%s", tenant_id)
+    # Issue #63: an auto-created open-join tenant must never be admin-less.
+    # Its FIRST member — the signup that triggered the auto-creation — is
+    # elevated to tenant_admin; later joins stay role member (issue #40's
+    # forced-member rule is untouched for the join plane itself).
+    role = "tenant_admin" if tenant_created_now else "member"
     # added_by is FK-attributed to users(user_id) — a self-registered user
     # joins under their own id (a literal like "registration" would violate
     # tenant_members.added_by_fkey on Postgres; InMemory cannot catch this).
-    await store.add_member(tenant_id, user_id, "member", added_by=user_id)
+    await store.add_member(tenant_id, user_id, role, added_by=user_id)
+    if tenant_created_now:
+        logger.info(
+            "register: first member elevated to tenant_admin tenant=%s user=%s",
+            tenant_id,
+            user_id,
+        )
 
     tokens_out: dict[str, Any] | None = None
     if verified_now:
@@ -276,7 +289,12 @@ async def register_tenant(
             username=body.admin_username,
             password=body.admin_password,
             email=email,
-            email_verified=not settings.email_verification_required,
+            # Issue #66: register-tenant is a PRIVILEGED creation path (it
+            # provisions a whole tenant) — per the issue #39 contract,
+            # privileged paths seed users as verified. The signup-side default
+            # locked the admin out on every login after the first whenever the
+            # verification email went unredeemed (e.g. no SMTP configured).
+            email_verified=True,
         ),
         api_key=ApiKeySpec(),
         hook_url=None,
@@ -290,13 +308,14 @@ async def register_tenant(
     if result.get("admin") is not None:
         result["admin"].pop("initial_password", None)
 
-    if settings.email_verification_required and email and result.get("admin") is not None:
-        await _issue_verify_token(
-            store, settings, result["admin"]["user_id"], email, body.admin_username
-        )
+    # Issue #66: no verification token is issued here — the admin is seeded
+    # verified (privileged path), so the emailed token would be dead weight
+    # and the only out-of-band delivery is SMTP, which must not be a
+    # lockout dependency.
 
     # Issue #39: the signup request itself presented the credentials, so this
-    # one issuance bypasses the verification gate (later logins stay gated).
+    # one issuance bypasses the verification gate (later logins stay gated —
+    # belt-and-suspenders; the admin is verified now, per issue #66).
     tokens = dict(
         await svc.login(
             LoginRequest(
