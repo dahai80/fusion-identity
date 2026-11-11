@@ -6,6 +6,7 @@ import grpc
 
 from fusion_identity.grpc import identity_pb2 as pb
 from fusion_identity.grpc import identity_pb2_grpc as pb_grpc
+from fusion_identity.grpc_interceptor import SERVICE_TOKEN_METADATA_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +19,14 @@ class IdentityClient:
         self,
         target: str = "127.0.0.1:50051",
         deadline_ms: int = DEFAULT_DEADLINE_MS,
+        service_token: str = "",
     ) -> None:
         self._target = target
         self._deadline = deadline_ms / 1000
+        # Issue #71: the server-side ServiceTokenInterceptor gates EVERY rpc
+        # (fail-closed) — calls without the x-fusion-service-token metadata
+        # are rejected UNAUTHENTICATED. The SDK must attach it on each call.
+        self._metadata = ((SERVICE_TOKEN_METADATA_KEY, service_token),) if service_token else ()
         self._channel: grpc.aio.Channel | None = None
         self._stub: pb_grpc.IdentityServiceStub | None = None
 
@@ -45,10 +51,14 @@ class IdentityClient:
             await self.connect()
         assert self._channel is not None
         stub = health_pb2_grpc.HealthStub(self._channel)
+        # grpc_tools generates the health stub with capitalized method names
+        # (self.Check); older generators lowercased them. Tolerate both.
+        check = getattr(stub, "Check", None) or stub.check
         try:
-            resp = await stub.check(
+            resp = await check(
                 health_pb2.HealthCheckRequest(service=""),
                 timeout=self._deadline,
+                metadata=self._metadata,
             )
             return resp.status == health_pb2.HealthCheckResponse.SERVING
         except grpc.aio.AioRpcError as exc:
@@ -78,7 +88,9 @@ class IdentityClient:
             tenant_id=tenant_id,
         )
         try:
-            resp = await self._stub.AuthorizeAndAcquire(req, timeout=self._deadline)
+            resp = await self._stub.AuthorizeAndAcquire(
+                req, timeout=self._deadline, metadata=self._metadata
+            )
             logger.debug(
                 "authorize api_key=**%s allowed=%s",
                 api_key[-4:],
@@ -99,7 +111,9 @@ class IdentityClient:
         assert self._stub is not None
         req = pb.ReleaseLeaseRequest(lease_id=lease_id, tenant_id=tenant_id, reason=reason)
         try:
-            resp = await self._stub.ReleaseLease(req, timeout=self._deadline)
+            resp = await self._stub.ReleaseLease(
+                req, timeout=self._deadline, metadata=self._metadata
+            )
             return resp.success
         except grpc.aio.AioRpcError as exc:
             logger.warning("release_lease rpc failed: %s", exc)
@@ -130,7 +144,9 @@ class IdentityClient:
             release_after=release_after,
         )
         try:
-            return await self._stub.ReportUsage(req, timeout=self._deadline)
+            return await self._stub.ReportUsage(
+                req, timeout=self._deadline, metadata=self._metadata
+            )
         except grpc.aio.AioRpcError as exc:
             logger.warning("report_usage rpc failed: %s", exc)
             return None

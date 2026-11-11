@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 工程指南", en: "fusion-identity engineering guide" }
 audience: engineer
 status: draft
-version: 0.2.28
+version: 0.2.29
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -135,12 +135,14 @@ Pydantic v2 request/response schemas. No DB models — store layer uses plain di
 
 ### gRPC / concurrency / cache plane (PRD §3.1)
 
+Issue #71: `start.sh` defaults `FUSION_IDENTITY_REDIS_URL=redis://127.0.0.1:6379/0` + `FUSION_IDENTITY_GRPC_PORT=50051` ON (opt out by exporting REDIS_URL set-but-empty / GRPC_PORT 0), and persists both in the env file — the enforcement plane (api-key authorize, concurrency lease, daily quota) is live by default instead of dark. `reserve_daily_quota` only reserves a 0-token placeholder — the counter moves on `ReportUsage`.
+
 - **`grpc/identity.proto`** — `fusion.identity.v1.IdentityService` (`AuthorizeAndAcquire` / `ReleaseLease` / `ReportUsage`). Stubs generated via `grpc_tools.protoc`; import fixed to `from fusion_identity.grpc import identity_pb2`. The `grpc/*_pb2*.py` files are ruff-exempt (generated).
 - **`grpc_servicer.py`** — `IdentityServiceServicer(store, cache, concurrency)`. Authorize flow: api-key cache lookup → store `get_api_key_by_hash` fallback → tenant active / module+model allowlist → daily quota (`cache.check_daily_quota`) → `concurrency.try_acquire` (Redis Lua atomic) → `TenantContext.priority` (from `default_priority` or tier map). Refuses with `AuthErrorCode` enum labels; refusal HTTP status mapped via `_error_http_status`. Records Prometheus metrics (`metrics_collector`) with `target_module` + `status_code` labels. `ReportUsage` records token usage then computes `remaining_daily_quota` via `cache.remaining_quota` (NOT `record_token_usage`'s returned total — that was BUG #1) using the tenant quota `tpm` limit.
 - **`concurrency.py`** — `ConcurrencyManager(redis, lease_ttl)`. `ACQUIRE_LUA`/`RELEASE_LUA` scripts: `incr` with rollback-on-overflow, `set lease:{id} EX ttl`; release is `get→del→decr` (floor 0). Lease id = `{tid}:{uuid hex[:12]}`. `active_count(tid)` for admin usage reporting.
 - **`cache.py`** — `IdentityCache(redis)`: api-key→tenant (sha256, ttl 300), tenant cache, daily quota counters (`incrby` + 7d expire, clamps `max(0, limit-used)`). `record_token_usage` returns the new running total; `remaining_quota(tid, limit)` returns `max(0, limit-used)`.
 - **`grpc_server.py`** — `serve(app, host, port)` → `grpc.aio.server()` with the servicer + `grpc_health.v1` HealthServicer (SERVING for `""` and the service name).
-- **`client/`** — gateway SDK: `IdentityClient` (long-lived channel, 10ms deadline, async release/report, `health()`), `lease_guard` asynccontextmanager (raises `LeaseDenied`), `KV_PREFIX="fusion:identity:"`.
+- **`client/`** — gateway SDK: `IdentityClient` (long-lived channel, 10ms deadline, async release/report, `health()`; issue #71 — pass `service_token=`, the `ServiceTokenInterceptor` gates EVERY rpc and the generated health stub's capitalized `Check` is tolerated), `lease_guard` asynccontextmanager (raises `LeaseDenied`), `KV_PREFIX="fusion:identity:"`.
 - **`metrics_collector.py`** — prometheus_client `CollectorRegistry` with 5 labeled metrics (auth_requests_total, rpc_latency_seconds, tenant_active_concurrency, tokens_consumed_total, quota_remaining). Exposed via `GET /metrics` alongside the store gauges.
 
 ## The three red lines (multi-tenant PRD — do not violate)
