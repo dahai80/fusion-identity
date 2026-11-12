@@ -121,6 +121,7 @@ TENANT_EXEMPT = frozenset(
         "/api/v1/auth/refresh",
         "/api/v1/auth/introspect",
         "/api/v1/auth/ticket/exchange",
+        "/api/v1/auth/service-accounts/token",
         "/api/v1/auth/session",
         "/api/v1/auth/session/verify",
         "/api/v1/auth/sessions",
@@ -179,6 +180,7 @@ def _build_auth_service(settings: Settings, store: Any) -> AuthService:
         mfa_enforce_admin=settings.mfa_enforce_admin,
         email_verification_required=settings.email_verification_required,
         sso_ticket_ttl=settings.sso_ticket_ttl_seconds,
+        service_account_ttl=settings.service_account_ttl_seconds,
     )
 
 
@@ -226,6 +228,8 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.recharge import router as recharge_router
     from fusion_identity.routes.registration import router as registration_router
     from fusion_identity.routes.scim import router as scim_router
+    from fusion_identity.routes.service_accounts import admin_router as sa_admin_router
+    from fusion_identity.routes.service_accounts import auth_router as sa_auth_router
     from fusion_identity.routes.tenants import router as tenants_router
     from fusion_identity.routes.usage import router as usage_router
 
@@ -247,6 +251,8 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(mfa_router)
     app.include_router(admin_router)
     app.include_router(recharge_router)
+    app.include_router(sa_admin_router)
+    app.include_router(sa_auth_router)
     app.include_router(app_secrets_router)
     app.include_router(app_credentials_router)
     app.include_router(provisioning_router)

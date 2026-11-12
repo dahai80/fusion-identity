@@ -312,6 +312,10 @@ class InMemoryStore:
         # no balance column to drift).
         self._prepaid_orders: dict[str, dict[str, Any]] = {}
         self._balance_ledger: list[dict[str, Any]] = []
+        # Issue #76: headless service accounts (fsa_ credential, sha256 at
+        # rest) for acceptance suites — no human login, no captcha.
+        self._service_accounts: dict[str, dict[str, Any]] = {}
+        self._sa_cred_index: dict[str, str] = {}
         # Issue #12 (E5): per-tenant custom roles + runtime menu matrix.
         self._custom_roles: dict[tuple[str, str], dict[str, Any]] = {}
         self._menu_matrix: dict[tuple[str, str], list[str]] = {}
@@ -988,6 +992,76 @@ class InMemoryStore:
             balance,
         )
         return balance
+
+    # ------------------------------------------------------------------
+    # Issue #76: headless service accounts. The raw `fsa_` credential is
+    # returned exactly once at creation; only its sha256 hash is stored.
+    # Exchange mints a short-TTL tenant-pinned token with role "service"
+    # — distinguishable from human sessions in audit logs.
+    # ------------------------------------------------------------------
+
+    async def create_service_account(
+        self, tenant_id: str, name: str, scopes: list[str], created_by: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        raw = "fsa_" + secrets.token_urlsafe(32)
+        account_id = "sac_" + secrets.token_hex(6)
+        cred_hash = sha256_hash(raw)
+        rec = {
+            "account_id": account_id,
+            "tenant_id": tenant_id,
+            "name": name,
+            "scopes": list(scopes),
+            "cred_hash": cred_hash,
+            "prefix": raw[:8] + "****",
+            "status": "active",
+            "created_by": created_by,
+            "created_at": _now(),
+            "revoked_at": None,
+            "last_used_at": None,
+        }
+        self._service_accounts[account_id] = rec
+        self._sa_cred_index[cred_hash] = account_id
+        logger.info(
+            "create_service_account: %s tenant=%s name=%s scopes=%s",
+            account_id,
+            tenant_id,
+            name,
+            scopes,
+        )
+        return raw, dict(rec)
+
+    async def get_service_account(self, account_id: str) -> dict[str, Any] | None:
+        rec = self._service_accounts.get(account_id)
+        return dict(rec) if rec else None
+
+    async def list_service_accounts(self, tenant_id: str) -> list[dict[str, Any]]:
+        rows = [a for a in self._service_accounts.values() if a["tenant_id"] == tenant_id]
+        rows.sort(key=lambda a: a["created_at"], reverse=True)
+        out = []
+        for a in rows:
+            safe = dict(a)
+            safe.pop("cred_hash", None)
+            out.append(safe)
+        return out
+
+    async def revoke_service_account(self, account_id: str) -> bool:
+        rec = self._service_accounts.get(account_id)
+        if not rec or rec["status"] != "active":
+            return False
+        rec["status"] = "revoked"
+        rec["revoked_at"] = _now()
+        logger.info("revoke_service_account: %s", account_id)
+        return True
+
+    async def get_service_account_by_cred(self, cred_hash: str) -> dict[str, Any] | None:
+        account_id = self._sa_cred_index.get(cred_hash)
+        if not account_id:
+            return None
+        rec = self._service_accounts.get(account_id)
+        if not rec or rec["status"] != "active":
+            return None
+        rec["last_used_at"] = _now()
+        return dict(rec)
 
     async def issue_app_secret(
         self, app_id: str, grace_seconds: int

@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.30
+version: 0.2.31
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -92,6 +92,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | 否 | — | issue #51：认证门户的公网 origin；验证邮件链接构造为 `{base}/auth/?verify={token}`（路由契约以 fusion-gateway `web/auth/app.js` 为准）。未设置 → 相对链接兜底 + 发送时响亮 WARNING。 |
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | 否 | `stub` | issue #74：预付费充值平面的支付后端。`stub` 即时确认（仅开发/测试——不可用于真实资金）。未知值 fail-closed（充值端点返回 503）。 |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | 否 | `20` | issue #74：租户首笔已支付充值订单的赠送代币百分比（如 20 → 1000 代币 + 200 赠送）。`0` 关闭赠送。 |
+| `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | 否 | `900` | issue #76：服务账号会话 token 生命周期（秒，钳制 ≥60）。刻意取短——机器侧凭预置凭证换取，不持长效 bearer。 |
 | `FUSION_IDENTITY_REDIS_URL` | 否 | `redis://127.0.0.1:6379/0`（经 start.sh 默认开启） | 身份热缓存 + 并发租约存储的 Redis 连接。issue #71：`start.sh` 默认开启，使配额/API-key 执法平面默认生效；按部署退出须导出 set-but-empty。进程内未设置仍为 REST-only 模式。 |
 | `FUSION_IDENTITY_GRPC_PORT` | 否 | `50051`（经 start.sh 默认开启） | gRPC `IdentityService` 端口（PRD §3.1）。`>0` 且配置 Redis 时启用。issue #71：`start.sh` 默认取已登记的 `50051`；导出 `0` 显式禁用。 |
 | `FUSION_IDENTITY_LEASE_TTL` | 否 | `120` | 并发租约 TTL，秒（Redis 原子锁）。 |
@@ -271,6 +272,18 @@ Service token 门控（同 admin 平面）。消费模型：租户先用免费�
 | GET | `/api/v1/admin/tenants/{tid}/recharge/balance` | `{tenant_id, balance}` 当前余额 |
 
 消费执行（gRPC 执法平面）：`ReportUsage` 精确扣除越过每日上限的溢出部分（溢出增量，非整次上报），并返回 `remaining_balance`；`AuthorizeAndAcquire` 仅在"日配额用尽 **且** 余额 ≤ 0"时拒绝 `BALANCE_EXHAUSTED`（枚举值 8，HTTP 429）—— 充值后下一次 authorize 即时生效，无需换 key。
+
+### 服务账号（issue #76，迁移 `0022_service_accounts.sql`）
+
+无头机器主体，供验收套件 / CI 客户端使用（fusion-site#37 所有者裁定：**不做验证码后门**——机器走身份链认证）。服务账号租户绑定、持 scope 列表，`fsa_` 前缀凭证仅存 sha256 哈希（原文仅创建时返回一次），可吊销；全部事件以 `service` 角色入审计链，机器会话与人类会话可区分。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/admin/tenants/{tid}/service-accounts` | 创建 `{name, scopes}`——响应中的 `credential`（`fsa_…` 原文）仅返回一次；404 未知租户 |
+| GET | `/api/v1/admin/tenants/{tid}/service-accounts` | 清单（无哈希、无凭证） |
+| DELETE | `/api/v1/admin/tenants/{tid}/service-accounts/{account_id}` | 吊销（404 未知，409 已吊销）；吊销后凭证与在途 token 同时失效（共享鉴权谓词每次 bearer 调用都复核账号状态） |
+
+机器登录（豁免租户中间件——凭证即秘密；有限流）：`POST /api/v1/auth/service-accounts/token` `{credential}` → `{access_token, token_type: "bearer", expires_in, scope}`。仅 ACCESS token，TTL `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL`（默认 900s），无 refresh token——机器重新换凭。Token claims：`role: "service"`、`tid` = 所属租户、`sub` = `sac_…` 账号 id、`scope` = 账号 scopes。`/verify` 接受该主体（校验账号本身，非用户行）并返回只读形态（空 write classes + menus），网关侧可见一个受限的非人类会话。
 
 ### 应用密钥 — 业务应用密钥签发（issue #28）
 

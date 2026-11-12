@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.30
+version: 0.2.31
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -19,9 +19,14 @@ source_of_truth:
 
 All notable changes are tracked via GitHub releases and merged PRs. Version in `pyproject.toml` is the source of truth for the current release.
 
-## 0.2.30
+## 0.2.31
 
 Current version (`pyproject.toml`).
+
+- #76: headless service-account principal for acceptance suites / CI clients (owner verdict on fusion-site#37 — NO captcha backdoor). New `service_accounts` table (migration `0022`): tenant-pinned, `fsa_`-prefixed credential (sha256 at rest, raw returned exactly once), revocable, audit-logged. Admin plane (service-token gated): `POST/GET /api/v1/admin/tenants/{tid}/service-accounts`, `DELETE .../service-accounts/{id}` (audited `svc.created`/`svc.revoked`). Machine login: `POST /api/v1/auth/service-accounts/token` `{credential}` (tenant-middleware-exempt — the credential is the secret; rate-limited) → short-TTL ACCESS-only token (no refresh; machines re-exchange), role `service`, scopes from the account, TTL `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` default 900s
+- #76: the shared authorization predicate (`_authorize`, `resolve_bearer_claims`, `/verify`) validates the service ACCOUNT (no users row, no membership) before the human gates and keeps the account's token scope — service tokens authenticate against every bearer-protected surface, read-only by construction (empty write classes + menus), audited `svc.token_issued` with role `service` so non-human sessions are distinguishable in the audit chain
+
+## 0.2.30
 
 - #74: prepaid balance & recharge plane. New tables `prepaid_orders` (order state machine `created → paid`, migration `0021_prepaid_balance.sql`) and `balance_ledger` (append-only; balance is always `SUM(delta)` — no balance column to drift). Currency conversion happens at the payment layer; identity only ever sees tokens
 - #74: admin recharge API (service-token gated): `POST /api/v1/admin/tenants/{tid}/recharge/orders` (first paid order per tenant earns the first-purchase promo, `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` default 20%, 0 disables), `GET .../recharge/orders`, `GET .../recharge/orders/{id}`, `POST .../recharge/orders/{id}/pay` (idempotent — the ledger credit fires only on the `created → paid` transition), `GET .../recharge/balance`. Payment provider pluggable via `FUSION_IDENTITY_PAYMENT_PROVIDER` (default `stub`; unknown values fail closed with 503). Audited `recharge.paid`

@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.30
+version: 0.2.31
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -117,6 +117,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | no | — | Issue #51: public origin of the auth portal; verification links are built as `{base}/auth/?verify={token}` (route contract owned by fusion-gateway `web/auth/app.js`). Unset → relative link fallback + loud WARNING at send time. |
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | no | `stub` | Issue #74: payment backend for the prepaid recharge plane. `stub` confirms instantly (dev/test only — never real money). Unknown values fail closed (503 on recharge endpoints). |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | no | `20` | Issue #74: bonus-token percentage granted on a tenant's FIRST paid recharge order (e.g. 20 → 1000 tokens + 200 promo). `0` disables the promo. |
+| `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | no | `900` | Issue #76: service-account session token TTL, seconds (clamped ≥60). Short by design — machines re-exchange their pre-provisioned credential instead of holding a long-lived bearer. |
 
 Bootstrap runs only when the tenant table is empty. On an **empty** table with `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` unset, startup **refuses to start** (fail-closed — a fresh install must be seeded with a first admin; the service will not come up un-administerable). Bootstrap is a no-op when the table is **non-empty** (the operator pre-seeded the first admin out-of-band, e.g. via `psql`), so the service starts without those vars in that case.
 
@@ -430,6 +431,18 @@ Service-token gated (same headers as the admin plane). Tenants get a free daily 
 | GET | `/balance` | `{tenant_id, balance}` — current prepaid balance |
 
 Consumption (gRPC enforcement plane): `ReportUsage` debits exactly the tokens that crossed the daily limit (overflow delta), returning `remaining_balance`. `AuthorizeAndAcquire` refuses `BALANCE_EXHAUSTED` (enum 8, HTTP 429) only when the daily quota is used up AND the balance is ≤ 0 — a recharge takes effect on the next authorize with no key rotation.
+
+## Service accounts (`/api/v1/admin/tenants/{tenant_id}/service-accounts` — issue #76)
+
+Headless machine principals for acceptance suites / CI clients (owner verdict on fusion-site#37: **no CAPTCHA backdoor** — machines authenticate through the identity chain). A service account is tenant-pinned, holds a scope list, and carries an `fsa_`-prefixed credential whose sha256 hash is stored at rest (raw returned exactly once at creation). Revocable; every event audited as role `service` so non-human sessions are distinguishable in the audit chain.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/service-accounts` | create `{name, scopes}` — the response carries `credential` (raw `fsa_…`) exactly once; 404 unknown tenant |
+| GET | `/service-accounts` | inventory (no hash, no credential) |
+| DELETE | `/service-accounts/{account_id}` | revoke (404 unknown, 409 already revoked); a revoked account's credential and in-flight tokens both die (shared auth predicate re-checks the account on every bearer call) |
+
+Machine login (tenant-middleware-exempt — the credential is the secret; rate-limited): `POST /api/v1/auth/service-accounts/token` `{credential}` → `{access_token, token_type: "bearer", expires_in, scope}`. ACCESS-only, TTL `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` (default 900s), no refresh token — machines re-exchange the credential. Token claims: `role: "service"`, `tid` = owning tenant, `sub` = `sac_…` account id, `scope` = account scopes. `/verify` accepts the principal (validates the ACCOUNT, not a user row) and reports read-only shape (empty write classes + menus) so gateway enforcement sees a scoped non-human session.
 
 ## Provisioning automation (issue #14, migration `0010_provisioning.sql`)
 
