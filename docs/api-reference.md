@@ -7,7 +7,7 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.29
+version: 0.2.30
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -107,6 +107,16 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 | GET | `/events?cursor=&limit=` | outbox 增量拉取,返回 `next_cursor` |
 | POST | `/kek/reencrypt` | KEK 轮换后的重加密清扫 |
 
+## 预付费充值 — `/api/v1/admin/tenants/{tid}/recharge/*`(service token,issue #74)
+
+| Method | Path | 说明 / Notes |
+|---|---|---|
+| POST | `/orders` | 创建充值订单 `{tokens}`;首笔已支付订单享首购赠送(`FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT`,默认 20%) |
+| GET | `/orders` | 订单清单(新单在前) |
+| GET | `/orders/{order_id}` | 单笔订单(跨租户 404) |
+| POST | `/orders/{order_id}/pay` | 确认支付(渠道 `FUSION_IDENTITY_PAYMENT_PROVIDER`,默认 `stub`,未知值 503 fail-closed);幂等,账本仅在 `created → paid` 首次转换入账;审计 `recharge.paid` |
+| GET | `/balance` | `{tenant_id, balance}`,余额 = `balance_ledger` 的 `SUM(delta)` |
+
 ## 应用机密与凭证 — `/api/v1/apps/{app_id}/...`(service token,`_system`)
 
 | Method | Path | 说明 / Notes |
@@ -134,8 +144,8 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 
 | RPC | 说明 / Notes |
 |---|---|
-| `AuthorizeAndAcquire` | api_key → 租户上下文 + 模块/模型白名单 + RPM + 日配额 + 并发租约(Redis Lua 原子);请求可带 `tenant_id` 交叉校验(不匹配 fail-closed);拒绝码:`INVALID_API_KEY` / `TENANT_DISABLED` / `MODULE_UNAUTHORIZED` / `MODEL_UNAUTHORIZED` / `CONCURRENCY_LIMIT_EXCEEDED` / `DAILY_QUOTA_EXCEEDED` / `RATE_LIMIT_EXCEEDED` |
+| `AuthorizeAndAcquire` | api_key → 租户上下文 + 模块/模型白名单 + RPM + 日配额 + 并发租约(Redis Lua 原子);请求可带 `tenant_id` 交叉校验(不匹配 fail-closed);拒绝码:`INVALID_API_KEY` / `TENANT_DISABLED` / `MODULE_UNAUTHORIZED` / `MODEL_UNAUTHORIZED` / `CONCURRENCY_LIMIT_EXCEEDED` / `DAILY_QUOTA_EXCEEDED` / `RATE_LIMIT_EXCEEDED` / `BALANCE_EXHAUSTED`(issue #74:日配额用尽**且**预付费余额 ≤ 0,HTTP 429) |
 | `ReleaseLease` | 释放租约 |
-| `ReportUsage` | 记 token 用量(日配额计数)+ 释放租约 + 追加 usage ledger |
+| `ReportUsage` | 记 token 用量(日配额计数)+ 释放租约 + 追加 usage ledger;issue #74:扣除越过日配额的溢出部分(`balance_ledger` reason `consumption`),响应含 `remaining_balance` |
 
 客户端 SDK 在 `fusion_identity/client/`(`IdentityClient`、`lease_guard` 异步上下文管理器,`KV_PREFIX = "fusion:identity:"`)。

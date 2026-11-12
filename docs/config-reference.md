@@ -7,7 +7,7 @@ doc_type: config-reference
 title: { zh: "fusion-identity 配置参考", en: "fusion-identity config reference" }
 audience: engineer
 status: draft
-version: 0.2.29
+version: 0.2.30
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -104,6 +104,8 @@ source_of_truth:
 | `FUSION_IDENTITY_SMTP_USERNAME` / `_PASSWORD` | — | SMTP AUTH 凭证 |
 | `FUSION_IDENTITY_SMTP_FROM` | — | 发件地址 |
 | `FUSION_IDENTITY_SMTP_STARTTLS` | `1` | 连接 relay 时使用 STARTTLS |
+| `FUSION_IDENTITY_PAYMENT_PROVIDER` | `stub` | issue #74:充值平面支付渠道;`stub` 即时确认(仅开发/测试),未知值 fail-closed(503) |
+| `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | `20` | issue #74:租户首笔已支付订单的赠送代币百分比,`0` 关闭 |
 
 ## 事件 / Webhook
 

@@ -626,6 +626,109 @@ class PgStore:
         )
         return val is not None
 
+    # ------------------------------------------------------------------
+    # Issue #74: prepaid balance & recharge. mark_prepaid_order_paid is a
+    # single atomic UPDATE ... WHERE status='created' — the ledger credit
+    # fires only when that row transitions, so a replayed pay call can never
+    # double-credit even under concurrency.
+    # ------------------------------------------------------------------
+
+    async def create_prepaid_order(
+        self, tenant_id: str, tokens: int, promo_tokens: int, provider: str
+    ) -> dict[str, Any]:
+        import secrets as _s
+
+        order_id = "pre_" + _s.token_hex(8)
+        row = await self.fetchrow(
+            "INSERT INTO prepaid_orders(order_id, tenant_id, tokens, promo_tokens, provider) "
+            "VALUES ($1,$2,$3,$4,$5) RETURNING *",
+            order_id,
+            tenant_id,
+            tokens,
+            promo_tokens,
+            provider,
+        )
+        logger.info(
+            "create_prepaid_order: %s tenant=%s tokens=%d promo=%d provider=%s",
+            order_id,
+            tenant_id,
+            tokens,
+            promo_tokens,
+            provider,
+        )
+        return row
+
+    async def get_prepaid_order(self, order_id: str) -> dict[str, Any] | None:
+        return await self.fetchrow("SELECT * FROM prepaid_orders WHERE order_id=$1", order_id)
+
+    async def list_prepaid_orders(self, tenant_id: str) -> list[dict[str, Any]]:
+        return await self.fetch(
+            "SELECT * FROM prepaid_orders WHERE tenant_id=$1 ORDER BY created_at DESC",
+            tenant_id,
+        )
+
+    async def count_paid_prepaid_orders(self, tenant_id: str) -> int:
+        val = await self.fetchval(
+            "SELECT count(*) FROM prepaid_orders WHERE tenant_id=$1 AND status='paid'",
+            tenant_id,
+        )
+        return int(val or 0)
+
+    async def mark_prepaid_order_paid(
+        self, order_id: str, provider_ref: str | None
+    ) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            "UPDATE prepaid_orders SET status='paid', provider_ref=$2, paid_at=now() "
+            "WHERE order_id=$1 AND status='created' RETURNING *",
+            order_id,
+            provider_ref,
+        )
+        if row is not None:
+            total = row["tokens"] + row["promo_tokens"]
+            await self.fetchrow(
+                "INSERT INTO balance_ledger(tenant_id, delta, reason, ref_id) "
+                "VALUES ($1,$2,'recharge',$3)",
+                row["tenant_id"],
+                total,
+                order_id,
+            )
+            logger.info(
+                "mark_prepaid_order_paid: %s tenant=%s credited=%d",
+                order_id,
+                row["tenant_id"],
+                total,
+            )
+            return row
+        existing = await self.get_prepaid_order(order_id)
+        if existing is None:
+            return None
+        if existing["status"] == "paid":
+            logger.info("mark_prepaid_order_paid: %s already paid (idempotent replay)", order_id)
+            return existing
+        logger.warning(
+            "mark_prepaid_order_paid: %s in status=%s — refusing", order_id, existing["status"]
+        )
+        return None
+
+    async def get_balance(self, tenant_id: str) -> int:
+        val = await self.fetchval(
+            "SELECT COALESCE(SUM(delta),0) FROM balance_ledger WHERE tenant_id=$1",
+            tenant_id,
+        )
+        return int(val or 0)
+
+    async def debit_balance(self, tenant_id: str, tokens: int, ref_id: str | None) -> int:
+        if tokens > 0:
+            await self.fetchval(
+                "INSERT INTO balance_ledger(tenant_id, delta, reason, ref_id) "
+                "VALUES ($1,$2,'consumption',$3)",
+                tenant_id,
+                -tokens,
+                ref_id,
+            )
+            logger.info("debit_balance: tenant=%s tokens=%d ref=%s", tenant_id, tokens, ref_id)
+        return await self.get_balance(tenant_id)
+
     async def issue_app_secret(
         self, app_id: str, grace_seconds: int
     ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
