@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.29
+version: 0.2.30
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -115,6 +115,8 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_SMTP_FROM` | no | — | From address for verification emails. |
 | `FUSION_IDENTITY_SMTP_STARTTLS` | no | `1` | Use STARTTLS when connecting to the relay. |
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | no | — | Issue #51: public origin of the auth portal; verification links are built as `{base}/auth/?verify={token}` (route contract owned by fusion-gateway `web/auth/app.js`). Unset → relative link fallback + loud WARNING at send time. |
+| `FUSION_IDENTITY_PAYMENT_PROVIDER` | no | `stub` | Issue #74: payment backend for the prepaid recharge plane. `stub` confirms instantly (dev/test only — never real money). Unknown values fail closed (503 on recharge endpoints). |
+| `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | no | `20` | Issue #74: bonus-token percentage granted on a tenant's FIRST paid recharge order (e.g. 20 → 1000 tokens + 200 promo). `0` disables the promo. |
 
 Bootstrap runs only when the tenant table is empty. On an **empty** table with `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` unset, startup **refuses to start** (fail-closed — a fresh install must be seeded with a first admin; the service will not come up un-administerable). Bootstrap is a no-op when the table is **non-empty** (the operator pre-seeded the first admin out-of-band, e.g. via `psql`), so the service starts without those vars in that case.
 
@@ -414,6 +416,20 @@ Service-token gated cross-tenant management (operator/gateway use). Requests mus
 | GET | `/app-secrets` | cross-app key inventory (issue #35): `{apps: [{app_id, versions, current_version, status, created_at, grace_until}]}`, one row per app, no key material |
 
 Quotas now also support `default_priority` and `allowed_modules` via `PUT /api/v1/tenants/{tenant_id}/quotas`.
+
+## Prepaid balance & recharge (`/api/v1/admin/tenants/{tenant_id}/recharge/*` — issue #74)
+
+Service-token gated (same headers as the admin plane). Tenants get a free daily token quota (`tpm`); once it is used up, a positive prepaid balance covers the overflow. Balance is derived from an append-only ledger (`balance_ledger`) — never stored as a column. Currency conversion happens at the payment layer; all amounts here are tokens.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/orders` | create a recharge order `{tokens}`. The tenant's FIRST paid order earns the first-purchase promo (`FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT`, default 20%) — `promo_tokens` is computed at creation. 404 unknown tenant, 503 unknown payment provider (fail-closed) |
+| GET | `/orders` | list the tenant's orders (newest first) |
+| GET | `/orders/{order_id}` | one order (404 if not in this tenant) |
+| POST | `/orders/{order_id}/pay` | confirm payment via the configured provider (`FUSION_IDENTITY_PAYMENT_PROVIDER`, default `stub`). Idempotent: the ledger credit (`tokens + promo_tokens`, reason `recharge`) fires only on the `created → paid` transition; replays return the paid record unchanged. Audited `recharge.paid` |
+| GET | `/balance` | `{tenant_id, balance}` — current prepaid balance |
+
+Consumption (gRPC enforcement plane): `ReportUsage` debits exactly the tokens that crossed the daily limit (overflow delta), returning `remaining_balance`. `AuthorizeAndAcquire` refuses `BALANCE_EXHAUSTED` (enum 8, HTTP 429) only when the daily quota is used up AND the balance is ≤ 0 — a recharge takes effect on the next authorize with no key rotation.
 
 ## Provisioning automation (issue #14, migration `0010_provisioning.sql`)
 

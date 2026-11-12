@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.29
+version: 0.2.30
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -19,9 +19,15 @@ source_of_truth:
 
 All notable changes are tracked via GitHub releases and merged PRs. Version in `pyproject.toml` is the source of truth for the current release.
 
-## 0.2.29
+## 0.2.30
 
 Current version (`pyproject.toml`).
+
+- #74: prepaid balance & recharge plane. New tables `prepaid_orders` (order state machine `created → paid`, migration `0021_prepaid_balance.sql`) and `balance_ledger` (append-only; balance is always `SUM(delta)` — no balance column to drift). Currency conversion happens at the payment layer; identity only ever sees tokens
+- #74: admin recharge API (service-token gated): `POST /api/v1/admin/tenants/{tid}/recharge/orders` (first paid order per tenant earns the first-purchase promo, `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` default 20%, 0 disables), `GET .../recharge/orders`, `GET .../recharge/orders/{id}`, `POST .../recharge/orders/{id}/pay` (idempotent — the ledger credit fires only on the `created → paid` transition), `GET .../recharge/balance`. Payment provider pluggable via `FUSION_IDENTITY_PAYMENT_PROVIDER` (default `stub`; unknown values fail closed with 503). Audited `recharge.paid`
+- #74: gRPC consumption model — the free daily quota (`tpm`) is consumed first; once exhausted, a positive prepaid balance covers the overflow. Authorize refuses `BALANCE_EXHAUSTED` (new enum value 8, HTTP-mapped 429) only when the daily quota is used up AND the balance is ≤ 0; `ReportUsage` debits exactly the tokens that crossed the daily limit (overflow delta, not the whole report) and returns the new `remaining_balance` field. Mid-session recharge takes effect on the next authorize (balance is read live, api keys unchanged)
+
+## 0.2.29
 
 - #71: the quota/api-key enforcement plane is ON by default — `start.sh` now defaults `FUSION_IDENTITY_REDIS_URL` (`redis://127.0.0.1:6379/0`) + `FUSION_IDENTITY_GRPC_PORT` (`50051`, the registered fusion-identity-grpc port) and persists both in the env file; previously prod ran with redis unset, so gRPC authorize, concurrency leases and daily-quota counters were all disabled and tenant `fmu_` keys were dead letters. Opt out per deploy by exporting `FUSION_IDENTITY_REDIS_URL` set-but-empty (or `FUSION_IDENTITY_GRPC_PORT=0`)
 - #71: `IdentityClient` SDK fixes found by the live enforcement-chain acceptance tests — attach the `x-fusion-service-token` metadata on every rpc (the server interceptor gates all rpcs; the SDK previously sent none and could never authorize), and tolerate the generated health stub's capitalized `Check`

@@ -172,6 +172,13 @@ class Settings:
     # (a retry loop issuing pairs every second) trips it, legitimate use
     # does not. 0 disables.
     refresh_rate_limit: int = 60
+    # Issue #74: prepaid recharge plane. `payment_provider` selects the
+    # payment backend ("stub" only today — unknown values fail closed at
+    # use time so a typo'd env cannot silently skip payment confirmation).
+    # `first_purchase_promo_pct` grants bonus tokens on a tenant's FIRST
+    # paid order (0 disables the promo).
+    payment_provider: str = "stub"
+    first_purchase_promo_pct: int = 20
 
 
 def load_settings() -> Settings:
@@ -365,5 +372,7 @@ def load_settings() -> Settings:
         # Issue #64: default ON for production; FUSION_IDENTITY_STALL_WATCHDOG=0
         # opts out. The watchdog only logs — no restart, no traffic.
         stall_watchdog_seconds=_int_env("FUSION_IDENTITY_STALL_WATCHDOG", 30),
+        payment_provider=os.environ.get("FUSION_IDENTITY_PAYMENT_PROVIDER", "stub").strip(),
+        first_purchase_promo_pct=_int_env("FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT", 20),
         refresh_rate_limit=_int_env("FUSION_IDENTITY_REFRESH_RATE_LIMIT", 60),
     )

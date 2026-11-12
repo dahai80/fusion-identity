@@ -12,6 +12,7 @@ enum AuthErrorCode {
   CONCURRENCY_LIMIT_EXCEEDED = 5;
   DAILY_QUOTA_EXCEEDED       = 6;
   RATE_LIMIT_EXCEEDED        = 7;
+  BALANCE_EXHAUSTED          = 8;
 }
 
 enum PriorityLevel {
@@ -83,4 +84,5 @@ message ReportUsageRequest {
 message ReportUsageResponse {
   bool success                = 1;
   int64 remaining_daily_quota = 2;
+  int64 remaining_balance     = 3;
 }

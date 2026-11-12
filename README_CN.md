@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.29
+version: 0.2.30
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -90,6 +90,8 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_SMTP_FROM` | 否 | — | 验证邮件的发件地址。 |
 | `FUSION_IDENTITY_SMTP_STARTTLS` | 否 | `1` | 连接中继时使用 STARTTLS。 |
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | 否 | — | issue #51：认证门户的公网 origin；验证邮件链接构造为 `{base}/auth/?verify={token}`（路由契约以 fusion-gateway `web/auth/app.js` 为准）。未设置 → 相对链接兜底 + 发送时响亮 WARNING。 |
+| `FUSION_IDENTITY_PAYMENT_PROVIDER` | 否 | `stub` | issue #74：预付费充值平面的支付后端。`stub` 即时确认（仅开发/测试——不可用于真实资金）。未知值 fail-closed（充值端点返回 503）。 |
+| `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | 否 | `20` | issue #74：租户首笔已支付充值订单的赠送代币百分比（如 20 → 1000 代币 + 200 赠送）。`0` 关闭赠送。 |
 | `FUSION_IDENTITY_REDIS_URL` | 否 | `redis://127.0.0.1:6379/0`（经 start.sh 默认开启） | 身份热缓存 + 并发租约存储的 Redis 连接。issue #71：`start.sh` 默认开启，使配额/API-key 执法平面默认生效；按部署退出须导出 set-but-empty。进程内未设置仍为 REST-only 模式。 |
 | `FUSION_IDENTITY_GRPC_PORT` | 否 | `50051`（经 start.sh 默认开启） | gRPC `IdentityService` 端口（PRD §3.1）。`>0` 且配置 Redis 时启用。issue #71：`start.sh` 默认取已登记的 `50051`；导出 `0` 显式禁用。 |
 | `FUSION_IDENTITY_LEASE_TTL` | 否 | `120` | 并发租约 TTL，秒（Redis 原子锁）。 |
@@ -255,6 +257,20 @@ Schema：`custom_roles`、`role_menu_matrix`、`known_menus`（迁移 `0009_rbac
 - 推模式：设置 `FUSION_IDENTITY_WEBHOOK_URL` + `SECRET` 后后台 worker 以 HMAC-SHA256 签名（`X-Fusion-Signature`，及 `X-Fusion-Event`/`X-Fusion-Event-Id` 头）投递；失败按 tick 重试，超过上限进入死信（可查可重放）。
 
 **开通后钩子（M-D，可选）**：请求带 `hook_url` 时，identity 向该 URL POST `{"event": "provision.completed", "data": {tenant, quota, admin, api_key}}`（同一 HMAC 签名）。控制面可直接从负载把租户 key 注册进 fusion-gateway 等下游 —— 无需轮询，identity 内无任何网关专用代码。
+
+### 预付费余额与充值（issue #74，迁移 `0021_prepaid_balance.sql`）
+
+Service token 门控（同 admin 平面）。消费模型：租户先用免费每日 token 配额（`tpm`），超出部分由预付费余额扣抵。余额由追加式账本 `balance_ledger` 派生（`SUM(delta)`）—— 不落余额列，杜绝漂移。货币换算在支付层完成；identity 内一切金额均为 token。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/admin/tenants/{tid}/recharge/orders` | 创建充值订单 `{tokens}`。租户**首笔**已支付订单享首购赠送（`FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT`，默认 20%）—— `promo_tokens` 在创建时计算。404 未知租户，503 未知支付渠道（fail-closed） |
+| GET | `/api/v1/admin/tenants/{tid}/recharge/orders` | 列出租户订单（新单在前） |
+| GET | `/api/v1/admin/tenants/{tid}/recharge/orders/{order_id}` | 单笔订单（跨租户 404） |
+| POST | `/api/v1/admin/tenants/{tid}/recharge/orders/{order_id}/pay` | 经配置的支付渠道确认（`FUSION_IDENTITY_PAYMENT_PROVIDER`，默认 `stub`）。幂等：账本入账（`tokens + promo_tokens`，reason `recharge`）仅在 `created → paid` 首次转换时发生，重放返回原记录。审计 `recharge.paid` |
+| GET | `/api/v1/admin/tenants/{tid}/recharge/balance` | `{tenant_id, balance}` 当前余额 |
+
+消费执行（gRPC 执法平面）：`ReportUsage` 精确扣除越过每日上限的溢出部分（溢出增量，非整次上报），并返回 `remaining_balance`；`AuthorizeAndAcquire` 仅在"日配额用尽 **且** 余额 ≤ 0"时拒绝 `BALANCE_EXHAUSTED`（枚举值 8，HTTP 429）—— 充值后下一次 authorize 即时生效，无需换 key。
 
 ### 应用密钥 — 业务应用密钥签发（issue #28）
 

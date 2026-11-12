@@ -70,6 +70,7 @@ _ERROR_HTTP_STATUS = {
     pb.AuthErrorCode.CONCURRENCY_LIMIT_EXCEEDED: 429,
     pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED: 429,
     pb.AuthErrorCode.RATE_LIMIT_EXCEEDED: 429,
+    pb.AuthErrorCode.BALANCE_EXHAUSTED: 429,
 }
 
 
@@ -224,8 +225,27 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                 quota_ok, remaining = await self._cache.reserve_daily_quota(tenant_id, daily_limit)
             else:
                 quota_ok, remaining = True, daily_limit
-            if not quota_ok:
-                return _refuse(pb.AuthErrorCode.DAILY_QUOTA_EXCEEDED, "daily token quota exceeded")
+            if not quota_ok or remaining <= 0:
+                # Issue #74: prepaid model — the free daily quota is consumed
+                # first; once exhausted, a positive prepaid balance covers the
+                # overflow. Only when BOTH are gone is the tenant refused.
+                balance = await self._store.get_balance(tenant_id)
+                if balance <= 0:
+                    logger.info(
+                        "grpc authorize refuse balance tenant=%s daily_limit=%d balance=0",
+                        tenant_id,
+                        daily_limit,
+                    )
+                    return _refuse(
+                        pb.AuthErrorCode.BALANCE_EXHAUSTED,
+                        "daily quota and prepaid balance exhausted",
+                    )
+                logger.info(
+                    "grpc authorize: daily quota exhausted, prepaid balance covers overflow "
+                    "tenant=%s balance=%d",
+                    tenant_id,
+                    balance,
+                )
 
             max_concurrency = int(tenant_info.get("max_concurrency", 2))
             acquired = await self._concurrency.try_acquire(tenant_id, max_concurrency)
@@ -344,6 +364,13 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                 return pb.ReportUsageResponse(success=False, remaining_daily_quota=0)
             total_tokens = int(request.prompt_tokens) + int(request.completion_tokens)
             ledger_ok = True
+            daily_limit = _daily_limit_for(await self._store.get_quota(request.tenant_id))
+            # Issue #74: the prepaid debit covers exactly the tokens that
+            # crossed the daily limit (the overflow delta, not the whole
+            # report). record_token_usage returns the raw running total, so
+            # used_before = new_total - report. Without the enforcement plane
+            # (no cache) there is no usage tracking — no debit either.
+            used_before = 0
             if total_tokens > 0:
                 try:
                     await self._store.record_usage(
@@ -357,8 +384,23 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                 except Exception as exc:
                     logger.error("grpc ReportUsage ledger write failed: %s", exc)
                     ledger_ok = False
+            used_after = 0
             if self._cache is not None and total_tokens > 0 and ledger_ok:
-                await self._cache.record_token_usage(request.tenant_id, total_tokens)
+                used_after = await self._cache.record_token_usage(request.tenant_id, total_tokens)
+                used_before = used_after - total_tokens
+            remaining_balance = 0
+            if self._cache is not None and ledger_ok and used_after > 0:
+                overflow = max(0, used_after - daily_limit) - max(0, used_before - daily_limit)
+                if overflow > 0:
+                    remaining_balance = await self._store.debit_balance(
+                        request.tenant_id, overflow, request.lease_id or None
+                    )
+                    logger.info(
+                        "grpc usage prepaid debit tenant=%s overflow=%d balance=%d",
+                        request.tenant_id,
+                        overflow,
+                        remaining_balance,
+                    )
             if request.lease_id and request.release_after:
                 active = await self._concurrency.release(
                     request.tenant_id, request.lease_id, "usage_reported"
@@ -368,7 +410,6 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                         request.tenant_id, request.lease_id, "release", "usage_reported"
                     )
                     mc.set_active_concurrency(request.tenant_id, active)
-            daily_limit = _daily_limit_for(await self._store.get_quota(request.tenant_id))
             remaining = (
                 await self._cache.remaining_quota(request.tenant_id, daily_limit)
                 if self._cache is not None
@@ -382,14 +423,21 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                     "grpc",
                 )
             mc.set_quota_remaining(request.tenant_id, remaining)
+            if remaining_balance == 0:
+                remaining_balance = await self._store.get_balance(request.tenant_id)
             logger.info(
-                "grpc usage tenant=%s model=%s tokens=%s remaining=%s ledger_ok=%s",
+                "grpc usage tenant=%s model=%s tokens=%s remaining=%s balance=%d ledger_ok=%s",
                 request.tenant_id,
                 request.model_name,
                 total_tokens,
                 remaining,
+                remaining_balance,
                 ledger_ok,
             )
-            return pb.ReportUsageResponse(success=ledger_ok, remaining_daily_quota=remaining)
+            return pb.ReportUsageResponse(
+                success=ledger_ok,
+                remaining_daily_quota=remaining,
+                remaining_balance=remaining_balance,
+            )
         finally:
             reset(ctx_tok)

@@ -223,6 +223,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.provisioning import router as provisioning_router
     from fusion_identity.routes.quotas import router as quotas_router
     from fusion_identity.routes.rbac import router as rbac_router
+    from fusion_identity.routes.recharge import router as recharge_router
     from fusion_identity.routes.registration import router as registration_router
     from fusion_identity.routes.scim import router as scim_router
     from fusion_identity.routes.tenants import router as tenants_router
@@ -245,6 +246,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(scim_router)
     app.include_router(mfa_router)
     app.include_router(admin_router)
+    app.include_router(recharge_router)
     app.include_router(app_secrets_router)
     app.include_router(app_credentials_router)
     app.include_router(provisioning_router)

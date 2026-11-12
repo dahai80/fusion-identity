@@ -308,6 +308,10 @@ class InMemoryStore:
         self._mfa: dict[tuple[str, str], dict[str, Any]] = {}
         self._lease_log: list[dict[str, Any]] = []
         self._departments: dict[tuple[str, str], dict[str, Any]] = {}
+        # Issue #74: prepaid orders + balance ledger (balance = SUM(delta),
+        # no balance column to drift).
+        self._prepaid_orders: dict[str, dict[str, Any]] = {}
+        self._balance_ledger: list[dict[str, Any]] = []
         # Issue #12 (E5): per-tenant custom roles + runtime menu matrix.
         self._custom_roles: dict[tuple[str, str], dict[str, Any]] = {}
         self._menu_matrix: dict[tuple[str, str], list[str]] = {}
@@ -875,6 +879,115 @@ class InMemoryStore:
         k["revoked_at"] = _now()
         self._key_hash_index.pop(k["key_hash"], None)
         return True
+
+    # ------------------------------------------------------------------
+    # Issue #74: prepaid balance & recharge. Orders move created -> paid
+    # (idempotent); the first transition credits the balance ledger with
+    # tokens + promo_tokens. Balance is always SUM(delta) over the ledger.
+    # ------------------------------------------------------------------
+
+    async def create_prepaid_order(
+        self, tenant_id: str, tokens: int, promo_tokens: int, provider: str
+    ) -> dict[str, Any]:
+        order_id = "pre_" + secrets.token_hex(8)
+        rec = {
+            "order_id": order_id,
+            "tenant_id": tenant_id,
+            "tokens": tokens,
+            "promo_tokens": promo_tokens,
+            "status": "created",
+            "provider": provider,
+            "provider_ref": None,
+            "created_at": _now(),
+            "paid_at": None,
+        }
+        self._prepaid_orders[order_id] = rec
+        logger.info(
+            "create_prepaid_order: %s tenant=%s tokens=%d promo=%d provider=%s",
+            order_id,
+            tenant_id,
+            tokens,
+            promo_tokens,
+            provider,
+        )
+        return dict(rec)
+
+    async def get_prepaid_order(self, order_id: str) -> dict[str, Any] | None:
+        rec = self._prepaid_orders.get(order_id)
+        return dict(rec) if rec else None
+
+    async def list_prepaid_orders(self, tenant_id: str) -> list[dict[str, Any]]:
+        rows = [o for o in self._prepaid_orders.values() if o["tenant_id"] == tenant_id]
+        rows.sort(key=lambda o: o["created_at"], reverse=True)
+        return [dict(o) for o in rows]
+
+    async def count_paid_prepaid_orders(self, tenant_id: str) -> int:
+        # Promo grants once per tenant: on the FIRST paid order.
+        return sum(
+            1
+            for o in self._prepaid_orders.values()
+            if o["tenant_id"] == tenant_id and o["status"] == "paid"
+        )
+
+    async def mark_prepaid_order_paid(
+        self, order_id: str, provider_ref: str | None
+    ) -> dict[str, Any] | None:
+        rec = self._prepaid_orders.get(order_id)
+        if not rec:
+            return None
+        if rec["status"] == "paid":
+            logger.info("mark_prepaid_order_paid: %s already paid (idempotent replay)", order_id)
+            return dict(rec)
+        if rec["status"] != "created":
+            logger.warning(
+                "mark_prepaid_order_paid: %s in status=%s — refusing", order_id, rec["status"]
+            )
+            return None
+        rec["status"] = "paid"
+        rec["provider_ref"] = provider_ref
+        rec["paid_at"] = _now()
+        total = rec["tokens"] + rec["promo_tokens"]
+        await self._append_ledger(rec["tenant_id"], total, "recharge", order_id)
+        logger.info(
+            "mark_prepaid_order_paid: %s tenant=%s credited=%d (tokens=%d promo=%d)",
+            order_id,
+            rec["tenant_id"],
+            total,
+            rec["tokens"],
+            rec["promo_tokens"],
+        )
+        return dict(rec)
+
+    async def _append_ledger(
+        self, tenant_id: str, delta: int, reason: str, ref_id: str | None
+    ) -> dict[str, Any]:
+        entry = {
+            "id": len(self._balance_ledger) + 1,
+            "tenant_id": tenant_id,
+            "delta": delta,
+            "reason": reason,
+            "ref_id": ref_id,
+            "created_at": _now(),
+        }
+        self._balance_ledger.append(entry)
+        return dict(entry)
+
+    async def get_balance(self, tenant_id: str) -> int:
+        return sum(e["delta"] for e in self._balance_ledger if e["tenant_id"] == tenant_id)
+
+    async def debit_balance(self, tenant_id: str, tokens: int, ref_id: str | None) -> int:
+        if tokens <= 0:
+            return await self.get_balance(tenant_id)
+        await self._append_ledger(tenant_id, -tokens, "consumption", ref_id)
+        balance = await self.get_balance(tenant_id)
+        logger.info(
+            "debit_balance: tenant=%s tokens=%d ref=%s balance=%d",
+            tenant_id,
+            tokens,
+            ref_id,
+            balance,
+        )
+        return balance
 
     async def issue_app_secret(
         self, app_id: str, grace_seconds: int
