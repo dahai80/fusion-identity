@@ -7,8 +7,8 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.31
-updated: 2026-11-11
+version: 0.2.32
+updated: 2026-11-13
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -413,6 +413,8 @@ Service-token gated cross-tenant management (operator/gateway use). Requests mus
 | DELETE | `/tenants/{tenant_id}/keys/{key_id}` | alias of the above (PRD §3.2 `/keys` path) |
 | GET | `/tenants/{tenant_id}/usage/today` | 24h usage: `concurrency{current_active,max_limit}` + `tokens{prompt_tokens_today,completion_tokens_today,total_today,daily_limit,usage_percentage}` |
 | GET | `/tenants/{tenant_id}/members/summary` | count-only member aggregate for the Admin Console member zone (issue #35): `{total, active, disabled, locked, by_role}` — no usernames/emails; 404 unknown tenant |
+| GET | `/tenants/{tenant_id}/members` | paginated member enumeration for operator purge/offboarding (issue #79): `?limit=50&offset=0` → `{total, items: [{user_id, username, email, role, status, joined_at}]}`; 404 unknown tenant |
+| DELETE | `/tenants/{tenant_id}/members/{user_id}` | service-plane member removal (issue #79): same fail-closed pre-last-admin rule as the member plane (403 on the final `tenant_admin`); 404 unknown tenant/member; audited `member.remove` (role `service`) |
 | GET | `/tenants/{tenant_id}/idps/summary` | SSO capability state for the Admin Console (issue #35): `{configured, count, types, auto_provision}` — never `client_secret` material; 404 unknown tenant |
 | GET | `/app-secrets` | cross-app key inventory (issue #35): `{apps: [{app_id, versions, current_version, status, created_at, grace_until}]}`, one row per app, no key material |
 

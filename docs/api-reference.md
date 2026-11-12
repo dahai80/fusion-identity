@@ -7,8 +7,8 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.31
-updated: 2026-11-11
+version: 0.2.32
+updated: 2026-11-13
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -99,6 +99,8 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 | DELETE | `/tenants/{tid}/api-keys/{key_id}` 或 `/keys/{key_id}` | 吊销 |
 | GET | `/tenants/{tid}/usage/today` | 24h 并发 + token 用量 |
 | GET | `/tenants/{tid}/members/summary` | `{total,active,disabled,locked,by_role}`,不含用户名/邮箱 |
+| GET | `/tenants/{tid}/members?limit=&offset=` | 分页成员枚举(issue #79):`{total, items:[{user_id,username,email,role,status,joined_at}]}`;404 未知租户 |
+| DELETE | `/tenants/{tid}/members/{user_id}` | 服务平面移除成员(issue #79);最后一个 `tenant_admin` 403;404 未知租户/成员;审计 `member.remove`(role `service`) |
 | POST | `/tenants/{tid}/admins` | 提升已有成员为 `tenant_admin`(治理无管理员租户,issue #63);已是 admin 返回 `changed:false` |
 | GET | `/tenants/{tid}/idps/summary` | SSO 能力状态,不含 secret 材料 |
 | GET | `/app-secrets` | 跨 app 机密清单(无密钥材料) |

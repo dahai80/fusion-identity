@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from fusion_identity.deps import (
@@ -328,6 +328,63 @@ async def admin_member_summary(
     summary = await store.get_member_summary(tenant_id)
     logger.info("admin_member_summary: tenant=%s total=%d", tenant_id, summary["total"])
     return summary
+
+
+# Issue #79: service-plane member enumeration + removal for operator
+# purge/offboarding (e.g. gateway acceptance probe cleanup). The member-plane
+# routes require a member JWT — a service-plane operator cannot reach them,
+# and the summary endpoint is counts-only. Read returns identity fields;
+# removal keeps the same fail-closed pre-last-admin rule as the member plane.
+
+
+@router.get("/tenants/{tenant_id}/members")
+async def admin_list_members(
+    tenant_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    store: InMemoryStore = Depends(get_store),
+) -> dict[str, Any]:
+    if not await store.get_tenant(tenant_id):
+        raise HTTPException(status_code=404, detail="tenant not found")
+    out = await store.admin_list_members(tenant_id, limit, offset)
+    logger.info(
+        "admin_list_members: tenant=%s total=%d limit=%d offset=%d",
+        tenant_id,
+        out["total"],
+        limit,
+        offset,
+    )
+    return out
+
+
+@router.delete("/tenants/{tenant_id}/members/{user_id}")
+async def admin_remove_member(
+    tenant_id: str,
+    user_id: str,
+    request: Request,
+    store: InMemoryStore = Depends(get_store),
+) -> dict[str, Any]:
+    if not await store.get_tenant(tenant_id):
+        raise HTTPException(status_code=404, detail="tenant not found")
+    member = await store.get_member(tenant_id, user_id)
+    if member is None:
+        raise HTTPException(status_code=404, detail="member not found")
+    count = await store.count_members_by_role(tenant_id, "tenant_admin")
+    if member["role"] == "tenant_admin" and count <= 1:
+        raise HTTPException(status_code=403, detail="cannot remove last tenant_admin")
+    await store.remove_member(tenant_id, user_id)
+    await invalidate_tenant_cache(request, tenant_id)
+    await store.append_audit(
+        tenant_id,
+        "service",
+        None,
+        "service",
+        "member.remove",
+        "member",
+        {"user_id": user_id, "via": "admin"},
+    )
+    logger.info("admin_remove_member: tenant=%s user=%s", tenant_id, user_id)
+    return {"removed": True}
 
 
 class AdminElevateAdminRequest(BaseModel):

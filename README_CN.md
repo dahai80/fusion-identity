@@ -7,8 +7,8 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.31
-updated: 2026-11-11
+version: 0.2.32
+updated: 2026-11-13
 owner: "@dahai"
 source_of_truth:
   - README_CN.md
@@ -307,6 +307,13 @@ fusion-security Admin Console 是服务，只持有 service token（union-web if
 - `GET /api/v1/admin/app-secrets` —— 跨应用密钥清单：`{apps: [{app_id, versions, current_version, status, created_at, grace_until}]}`，每应用一行，无任何密钥材料。
 
 `app_id` 须匹配 `^[a-z0-9][a-z0-9_-]{0,63}$`。每次签发/轮换都写入哈希链审计账本（`app_secret.issued` / `app_secret.rotated`，租户 `_system`）。`app_secrets` 为平台级表（无 `tenant_id`、无 RLS —— service token 平面，与 `plan_templates` 同信任级）；迁移 `0013_app_secrets.sql`。
+
+### 管理平面成员枚举与移除（issue #79）
+
+运营清理/离职场景（如 gateway 验收探针用户的清除）此前无支持路径 —— 成员平面路由需要成员 JWT，聚合读又只有计数。现补齐 service token 门控的成员管理端点：
+
+- `GET /api/v1/admin/tenants/{tenant_id}/members?limit=50&offset=0` —— 分页枚举：`{total, items: [{user_id, username, email, role, status, joined_at}]}`；租户不存在 404。
+- `DELETE /api/v1/admin/tenants/{tenant_id}/members/{user_id}` —— 服务平面移除成员：与成员平面同一 fail-closed 规则（最后一个 `tenant_admin` 拒绝 403）；租户/成员不存在 404；审计 `member.remove`（role `service`）。
 
 ### SaaS 凭据 —— 供 provider 层存取（issue #34）
 

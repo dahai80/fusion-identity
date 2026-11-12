@@ -687,6 +687,30 @@ class InMemoryStore:
     async def remove_member(self, tenant_id: str, user_id: str) -> bool:
         return self._members.pop((tenant_id, user_id), None) is not None
 
+    async def admin_list_members(
+        self, tenant_id: str, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        # Issue #79: service-plane member enumeration (admin purge/offboarding).
+        # Joins membership with the user record for username/status — the
+        # summary endpoint (#35) is counts-only and unreachable for operators.
+        rows = [dict(m) for (tid, _), m in self._members.items() if tid == tenant_id]
+        rows.sort(key=lambda m: str(m.get("joined_at") or ""))
+        items = []
+        for m in rows:
+            u = self._users.get(m["user_id"]) or {}
+            items.append(
+                {
+                    "user_id": m["user_id"],
+                    "username": u.get("username"),
+                    "email": u.get("email"),
+                    "role": m.get("role"),
+                    "status": u.get("status"),
+                    "joined_at": m.get("joined_at"),
+                }
+            )
+        total = len(items)
+        return {"total": total, "items": items[offset : offset + limit]}
+
     async def is_valid_role(self, tenant_id: str, role: str) -> bool:
         # Issue #12: a role id is valid if built-in or a custom role of THIS
         # tenant. Cross-tenant custom role reuse is denied.
