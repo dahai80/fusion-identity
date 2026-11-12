@@ -763,10 +763,12 @@ class PgStore:
             name,
             scopes,
         )
-        return raw, row
+        # asyncpg returns jsonb as a raw string — decode like api_keys scopes.
+        return raw, _decode_scopes(row)
 
     async def get_service_account(self, account_id: str) -> dict[str, Any] | None:
-        return await self.fetchrow("SELECT * FROM service_accounts WHERE account_id=$1", account_id)
+        row = await self.fetchrow("SELECT * FROM service_accounts WHERE account_id=$1", account_id)
+        return _decode_scopes(row) if row else None
 
     async def list_service_accounts(self, tenant_id: str) -> list[dict[str, Any]]:
         rows = await self.fetch(

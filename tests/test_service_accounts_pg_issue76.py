@@ -52,6 +52,9 @@ async def test_pg_service_account_lifecycle(sa_pg):
     hit = await store.get_service_account_by_cred(rec["cred_hash"])
     assert hit is not None and hit["account_id"] == rec["account_id"]
     assert hit["last_used_at"] is not None
+    # jsonb scopes decode to a real list (live regression: raw string split
+    # into per-character tokens in the issued JWT scope claim).
+    assert hit["scopes"] == ["shell:read"]
     # Unknown hash -> None.
     assert await store.get_service_account_by_cred("deadbeef") is None
     # Revoke: lookup dead, replayed revoke 409-shaped False.
@@ -99,6 +102,7 @@ async def test_pg_service_token_exchange_and_verify(sa_pg):
         v = r.json()
         assert v["role"] == "service" and v["tid"] == _TENANT
         assert v["write_classes"] == [] and v["allowed_menus"] == []
+        assert v["scopes"] == ["shell:read"]
 
 
 async def store_create(store):
