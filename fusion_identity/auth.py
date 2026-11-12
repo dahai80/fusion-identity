@@ -151,6 +151,7 @@ class AuthService:
         mfa_enforce_admin: bool = False,
         email_verification_required: bool = False,
         sso_ticket_ttl: int = 60,
+        service_account_ttl: int = 900,
     ) -> None:
         self._store = store
         self._issuer = issuer
@@ -168,6 +169,9 @@ class AuthService:
         self._email_verification_required = email_verification_required
         # Issue #48: one-time SSO ticket lifetime (fusion-site → shell handoff)
         self._sso_ticket_ttl = max(5, min(int(sso_ticket_ttl), 600))
+        # Issue #76: service-account session token TTL (short — machines
+        # re-exchange their credential instead of holding a long bearer).
+        self._service_account_ttl = max(60, int(service_account_ttl))
         if key_ring is not None:
             self._key_ring = key_ring
         else:
@@ -221,6 +225,16 @@ class AuthService:
         if tenant_status in (None, "disabled", "deleted"):
             logger.warning("_authorize: tenant=%s not active (%s)", claims["tid"], tenant_status)
             raise _unauthorized("tenant disabled")
+        # Issue #76: service-account principals are not users — they carry no
+        # user row, no membership and no human role. Validate the ACCOUNT
+        # before the user checks (a sac_ sub has no users row).
+        if claims.get("role") == "service":
+            account = await self._store.get_service_account(claims["sub"])
+            if account is None or account["status"] != "active":
+                logger.warning("_authorize: service account=%s not active", claims["sub"])
+                raise _unauthorized("service account revoked")
+            claims["scope"] = list(account.get("scopes") or [])
+            return "service"
         user_status = await self._store.get_user_status(claims["sub"])
         # F6: None (deleted user) must deny, not pass. Locked also denies.
         if user_status in (None, "disabled", "locked"):
@@ -509,12 +523,80 @@ class AuthService:
             user, rec["tenant_id"], role, user["username"], audit_action="auth.ticket_exchanged"
         )
 
+    async def service_account_token(self, credential: str) -> dict[str, Any]:
+        # Issue #76: headless machine login. Pre-provisioned `fsa_` credential
+        # (sha256 at rest) exchanged for a short-TTL, tenant-pinned ACCESS-only
+        # token with role "service" — no captcha, no refresh token (machines
+        # re-exchange the credential), audited as a non-human session.
+        cred_hash = hashlib.sha256(credential.encode()).hexdigest()
+        account = await self._store.get_service_account_by_cred(cred_hash)
+        if account is None:
+            logger.warning("service account token: unknown/inactive credential rejected")
+            raise _unauthorized("invalid credential")
+        tenant_id = account["tenant_id"]
+        tenant_status = await self._store.get_tenant_status(tenant_id)
+        if tenant_status != "active":
+            logger.warning(
+                "service account token: tenant=%s not active (%s)", tenant_id, tenant_status
+            )
+            raise _unauthorized("invalid credential")
+        scopes = list(account.get("scopes") or [])
+        access, jti = issue_token(
+            sub=account["account_id"],
+            tid=tenant_id,
+            role="service",
+            scopes=scopes,
+            signing_key=self._signing_key(),
+            issuer=self._issuer,
+            audience=self._audience,
+            ttl_seconds=self._service_account_ttl,
+            token_type="access",
+            algorithm=self._algorithm,
+            kid=self._kid,
+        )
+        await self._store.record_issued_jti(jti, tenant_id, account["account_id"])
+        await self._store.append_audit(
+            tenant_id,
+            account["account_id"],
+            jti,
+            "service",
+            "svc.token_issued",
+            "session",
+            {"account": account["account_id"], "name": account["name"]},
+        )
+        logger.info(
+            "service account token: issued account=%s tid=%s ttl=%d scopes=%s",
+            account["account_id"],
+            tenant_id,
+            self._service_account_ttl,
+            scopes,
+        )
+        return {
+            "access_token": access,
+            "token_type": "bearer",
+            "expires_in": self._service_account_ttl,
+            "scope": scopes,
+        }
+
     async def verify(self, req: VerifyRequest) -> VerifyResponse:
         claims = self._verify(req.token, token_type="access")
         # L19/F6: shared authorization predicate (fail-closed on deleted user).
         await self._authorize(claims)
         tenant_status = await self._store.get_tenant_status(claims["tid"])
         quota = await self._store.get_quota(claims["tid"]) or {}
+        # Issue #76: service principals have no role row — the account IS the
+        # authorization surface (already re-validated inside _authorize).
+        # Empty write classes + menus: read-only by construction.
+        if claims.get("role") == "service":
+            return VerifyResponse(
+                tid=claims["tid"],
+                role="service",
+                scopes=list(claims.get("scope", [])),
+                quota=quota,
+                tenant_status=tenant_status or "active",
+                write_classes=[],
+                allowed_menus=[],
+            )
         # Issue #12 (E5): the verify response is the enforcement surface —
         # role + write classes + allowed menus so the shell and gateway enforce
         # server-side, never client-only. A role that no longer resolves
@@ -980,6 +1062,18 @@ class AuthService:
         # F6/L19: fail-closed on user status — a deleted/disabled/locked account
         # must not pass even with a valid signature. None means no user record
         # (deleted) → deny.
+        # Issue #76: service-account principals — validate the account BEFORE
+        # the user checks (a sac_ sub has no users row), keep the token scope
+        # (account scopes, not a human role matrix).
+        if claims.get("role") == "service":
+            account = await self._store.get_service_account(claims["sub"])
+            if account is None or account["status"] != "active":
+                logger.warning(
+                    "resolve_bearer_claims: service account=%s not active", claims["sub"]
+                )
+                raise _unauthorized("service account revoked")
+            claims["scope"] = list(account.get("scopes") or [])
+            return claims
         user_status = await self._store.get_user_status(claims["sub"])
         if user_status in (None, "disabled", "locked"):
             raise _unauthorized("account disabled")

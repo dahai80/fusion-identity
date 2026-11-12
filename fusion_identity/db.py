@@ -729,6 +729,70 @@ class PgStore:
             logger.info("debit_balance: tenant=%s tokens=%d ref=%s", tenant_id, tokens, ref_id)
         return await self.get_balance(tenant_id)
 
+    # ------------------------------------------------------------------
+    # Issue #76: headless service accounts (mirrors InMemoryStore). The
+    # raw fsa_ credential is returned exactly once; only the sha256 hash
+    # is stored. Cred lookup matches active accounts only.
+    # ------------------------------------------------------------------
+
+    async def create_service_account(
+        self, tenant_id: str, name: str, scopes: list[str], created_by: str | None
+    ) -> tuple[str, dict[str, Any]]:
+        import secrets as _s
+
+        from fusion_identity.store import sha256_hash
+
+        raw = "fsa_" + _s.token_urlsafe(32)
+        account_id = "sac_" + _s.token_hex(6)
+        row = await self.fetchrow(
+            "INSERT INTO service_accounts(account_id, tenant_id, name, scopes, "
+            "cred_hash, prefix, created_by) "
+            "VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7) RETURNING *",
+            account_id,
+            tenant_id,
+            name,
+            json.dumps(scopes),
+            sha256_hash(raw),
+            raw[:8] + "****",
+            created_by,
+        )
+        logger.info(
+            "create_service_account: %s tenant=%s name=%s scopes=%s",
+            account_id,
+            tenant_id,
+            name,
+            scopes,
+        )
+        return raw, row
+
+    async def get_service_account(self, account_id: str) -> dict[str, Any] | None:
+        return await self.fetchrow("SELECT * FROM service_accounts WHERE account_id=$1", account_id)
+
+    async def list_service_accounts(self, tenant_id: str) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT account_id, tenant_id, name, scopes, prefix, status, created_by, "
+            "created_at, revoked_at, last_used_at FROM service_accounts "
+            "WHERE tenant_id=$1 ORDER BY created_at DESC",
+            tenant_id,
+        )
+        return [_decode_scopes(r) for r in rows]
+
+    async def revoke_service_account(self, account_id: str) -> bool:
+        val = await self.fetchval(
+            "UPDATE service_accounts SET status='revoked', revoked_at=now() "
+            "WHERE account_id=$1 AND status='active' RETURNING account_id",
+            account_id,
+        )
+        return val is not None
+
+    async def get_service_account_by_cred(self, cred_hash: str) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            "UPDATE service_accounts SET last_used_at=now() "
+            "WHERE cred_hash=$1 AND status='active' RETURNING *",
+            cred_hash,
+        )
+        return _decode_scopes(row) if row else None
+
     async def issue_app_secret(
         self, app_id: str, grace_seconds: int
     ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:

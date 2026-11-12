@@ -7,7 +7,7 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.30
+version: 0.2.31
 updated: 2026-11-11
 owner: "@dahai"
 source_of_truth:
@@ -116,6 +116,15 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 | GET | `/orders/{order_id}` | 单笔订单(跨租户 404) |
 | POST | `/orders/{order_id}/pay` | 确认支付(渠道 `FUSION_IDENTITY_PAYMENT_PROVIDER`,默认 `stub`,未知值 503 fail-closed);幂等,账本仅在 `created → paid` 首次转换入账;审计 `recharge.paid` |
 | GET | `/balance` | `{tenant_id, balance}`,余额 = `balance_ledger` 的 `SUM(delta)` |
+
+## 服务账号 — `/api/v1/admin/tenants/{tid}/service-accounts`(service token,issue #76)
+
+| Method | Path | 说明 / Notes |
+|---|---|---|
+| POST | `/service-accounts` | 创建 `{name, scopes}`;`fsa_` 凭证原文仅一次,仅存 sha256 |
+| GET | `/service-accounts` | 清单(无哈希/凭证) |
+| DELETE | `/service-accounts/{account_id}` | 吊销(404/409);吊销后凭证与在途 token 同死 |
+| POST | `/api/v1/auth/service-accounts/token` | 机器登录 `{credential}`(豁免租户中间件,有限流)→ 短 TTL ACCESS-only token,`role: "service"`,无 refresh,审计 `svc.token_issued` |
 
 ## 应用机密与凭证 — `/api/v1/apps/{app_id}/...`(service token,`_system`)
 

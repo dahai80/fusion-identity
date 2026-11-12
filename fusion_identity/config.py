@@ -179,6 +179,10 @@ class Settings:
     # paid order (0 disables the promo).
     payment_provider: str = "stub"
     first_purchase_promo_pct: int = 20
+    # Issue #76: service-account session token TTL. Short by design — the
+    # machine re-exchanges its pre-provisioned credential instead of holding
+    # a long-lived bearer.
+    service_account_ttl_seconds: int = 900
 
 
 def load_settings() -> Settings:
@@ -374,5 +378,6 @@ def load_settings() -> Settings:
         stall_watchdog_seconds=_int_env("FUSION_IDENTITY_STALL_WATCHDOG", 30),
         payment_provider=os.environ.get("FUSION_IDENTITY_PAYMENT_PROVIDER", "stub").strip(),
         first_purchase_promo_pct=_int_env("FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT", 20),
+        service_account_ttl_seconds=_int_env("FUSION_IDENTITY_SERVICE_ACCOUNT_TTL", 900),
         refresh_rate_limit=_int_env("FUSION_IDENTITY_REFRESH_RATE_LIMIT", 60),
     )
