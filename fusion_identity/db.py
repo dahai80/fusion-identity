@@ -581,6 +581,25 @@ class PgStore:
         )
         return val is not None
 
+    async def admin_list_members(
+        self, tenant_id: str, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        # Issue #79: service-plane member enumeration. LEFT JOIN keeps members
+        # whose users row was deleted out of the total count but still listed
+        # with username=None — membership is the authoritative row here.
+        total = await self.fetchval(
+            "SELECT COUNT(*) FROM tenant_members WHERE tenant_id=$1", tenant_id
+        )
+        rows = await self.fetch(
+            "SELECT m.user_id, u.username, u.email, m.role, u.status, m.joined_at "
+            "FROM tenant_members m LEFT JOIN users u ON u.user_id = m.user_id "
+            "WHERE m.tenant_id=$1 ORDER BY m.joined_at LIMIT $2 OFFSET $3",
+            tenant_id,
+            limit,
+            offset,
+        )
+        return {"total": total, "items": [dict(r) for r in rows]}
+
     async def create_api_key(
         self,
         tenant_id: str,

@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.31
-updated: 2026-11-11
+version: 0.2.32
+updated: 2026-11-13
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -16,6 +16,13 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.32
+
+Current version (`pyproject.toml`).
+
+- #79: service-plane member enumeration + removal for operator purge/offboarding (motivated by gateway#642 probe-user cleanup, which previously had no supported path — the member plane needs a member JWT and the #35 summary is counts-only). `GET /api/v1/admin/tenants/{tid}/members?limit=&offset=` returns `{total, items:[{user_id, username, email, role, status, joined_at}]}` (`limit` 1–200 default 50; store method `admin_list_members` on both stores — PgStore LEFT JOINs users for username/status). `DELETE /api/v1/admin/tenants/{tid}/members/{user_id}` removes a membership with the same fail-closed pre-last-admin rule as the member plane (403 on the final `tenant_admin`), invalidates the tenant cache, and audits `member.remove` with role `service`; 404 on unknown tenant/member
+
 
 All notable changes are tracked via GitHub releases and merged PRs. Version in `pyproject.toml` is the source of truth for the current release.
 
