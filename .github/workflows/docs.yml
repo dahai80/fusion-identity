@@ -18,14 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Issue #81: cache the pip download wheel cache keyed on the project
-      # metadata hash — setup-python only needs it for the validator's imports
-      # (stdlib-only script, so this is cheap insurance for future deps).
+      # Issue #81: dependency cache assessed — NOT applicable. The job runs a
+      # stdlib-only validator and installs nothing via pip, so there is no
+      # wheel cache to key on (setup-python's cache: pip hard-fails when
+      # ~/.cache/pip never materializes). Revisit if the job gains deps.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
       - name: Validate docs contract
         run: |
           python3 ci/validate_docs.py --root . --product fusion-identity \
