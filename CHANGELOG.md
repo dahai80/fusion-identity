@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.32
-updated: 2026-11-13
+version: 0.2.33
+updated: 2026-11-16
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -16,6 +16,12 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.33
+
+Current version (`pyproject.toml`).
+
+- #81: CI efficiency retrofit per dahai80/fusion#2 checklist — `concurrency: docs-${{ github.ref }}` with `cancel-in-progress: true` (superseded pushes no longer queue redundant validates). Dependency cache, sharding, and nightly tier assessed as not applicable: the only workflow job runs a stdlib-only validator in ~11s (setup-python `cache: pip` hard-fails when no pip install ever populates `~/.cache/pip`; the offline pytest suite is ~34s, far under the shard threshold; no CI-run tests need a nightly tier). No runtime code change.
 
 ## 0.2.32
 

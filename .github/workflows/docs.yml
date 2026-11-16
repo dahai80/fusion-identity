@@ -7,11 +7,21 @@ on:
       - "ci/validate_docs.py"
       - ".github/workflows/docs.yml"
 
+# Issue #81 (fusion#2 CI efficiency retrofit): cancel superseded runs on the
+# same ref so rapid pushes do not queue redundant validates.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Issue #81: dependency cache assessed — NOT applicable. The job runs a
+      # stdlib-only validator and installs nothing via pip, so there is no
+      # wheel cache to key on (setup-python's cache: pip hard-fails when
+      # ~/.cache/pip never materializes). Revisit if the job gains deps.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
