@@ -13,6 +13,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      skip-pypi:
+        description: "Skip the PyPI publish job (e.g. re-uploading release tarballs only)"
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -44,12 +49,16 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # checkout@v4 clones with fetch-depth=1 and no tags — describe
+            # would fail with "No names found"; fetch the release tags.
+            git fetch --tags --force
             TAG="$(git describe --tags --abbrev=0)"
           fi
           gh release upload "$TAG" dist/fusion-identity-venv-*.tar.gz --repo "$GITHUB_REPOSITORY" --clobber
 
   pypi:
     name: publish to PyPI
+    if: ${{ github.event_name == 'release' || !inputs.skip-pypi }}
     runs-on: ubuntu-24.04
     # Trusted Publishing exchanges an OIDC token with PyPI — id-token: write
     # is required for the ACTIONS_ID_TOKEN_REQUEST_TOKEN to be issued.
