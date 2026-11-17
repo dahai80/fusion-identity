@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 from fusion_core.http import create_app
@@ -379,6 +380,12 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
 
 
 def main() -> None:
+    # Homebrew formula test block (and operators) need a version probe that
+    # does not boot the whole fail-closed settings/app stack.
+    if "--version" in sys.argv or "-V" in sys.argv:
+        print(f"fusion-identity {_package_version()}")
+        return
+
     import uvicorn
 
     settings = load_settings()

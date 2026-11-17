@@ -1,15 +1,18 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "fusion-identity"
-version = "0.2.34"
+version = "0.2.35"
 description = "Fusion tenant-identity service — JWT issuer + tenant registry + Postgres fusion_identity (multi-tenant PRD §3)"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
 authors = [{ name = "dahai80" }]
 dependencies = [
+    "fusion-core>=0.12",
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "pydantic>=2.6",

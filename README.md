@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.34
+version: 0.2.35
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -38,6 +38,36 @@ Implements the multi-tenant PRD §3 (tenant model), §4 (tenant context fabric),
 1. **Fail-closed** — missing `tenant_id`, invalid token, or missing required env (`FUSION_IDENTITY_JWT_KEY`, `FUSION_IDENTITY_SERVICE_TOKEN`) → `401` / refuses to start. No default-tenant degradation.
 2. **Cross-tenant denied** — a `tenant_admin` of tenant A is blocked (403) from tenant B's members, api-keys, quotas, and audit. Enforced by `require_tenant_admin_of()` comparing token `tid` against both the `X-Tenant-Id` header and the path `{tenant_id}`.
 3. **Data isolation layering** — strong = Postgres RLS (prod), medium = `tenant_id` column + guards (this service), namespace = key-prefix. Layers are not mixed.
+
+## Install
+
+Three supported channels:
+
+**PyPI** (service + `fusion-identity` console script):
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install fusion-identity
+fusion-identity --version
+```
+
+**Homebrew** (macOS/Linux; pre-built relocatable venv, no compiler needed):
+
+```bash
+brew tap dahai80/homebrew-fusion-mlx
+brew install fusion-identity
+fusion-identity --version
+```
+
+The bottle is built by `scripts/package-venv.sh` (venv created with `--copies`, pyvenv.cfg and script shebangs rewritten at install time by the formula against Homebrew's `python@3.12`).
+
+**From source** (monorepo dev):
+
+```bash
+cd /Users/dahai/fusion
+source .venv/bin/activate
+pip install -e fusion-core && pip install -e fusion-identity
+```
 
 ## Quick start
 

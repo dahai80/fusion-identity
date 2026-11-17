@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.34
+version: 0.2.35
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -35,6 +35,36 @@ Fusion 生态的租户身份服务 —— 全生态**唯一 JWT 签发方**与**
 1. **Fail-closed** —— 缺 `tenant_id`、token 无效、或缺必填环境变量（`FUSION_IDENTITY_JWT_KEY`、`FUSION_IDENTITY_SERVICE_TOKEN`）→ `401` 或拒绝启动。无默认租户降级。
 2. **跨租户拒绝** —— 租户 A 的 `tenant_admin` 访问租户 B 的 members/api-keys/quotas/audit 会被 403 拦截。由 `require_tenant_admin_of()` 校验：token `tid` 必须同时匹配 `X-Tenant-Id` 头与路径中的 `{tenant_id}`。
 3. **数据隔离分层** —— 强 = Postgres RLS（生产），中 = `tenant_id` 列 + 守卫（本服务），命名空间 = key 前缀。层之间不混用。
+
+## 安装
+
+三种安装渠道：
+
+**PyPI**（服务本体 + `fusion-identity` 命令行）：
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install fusion-identity
+fusion-identity --version
+```
+
+**Homebrew**（macOS/Linux；预构建可重定位 venv，无需编译器）：
+
+```bash
+brew tap dahai80/homebrew-fusion-mlx
+brew install fusion-identity
+fusion-identity --version
+```
+
+安装包由 `scripts/package-venv.sh` 构建（`--copies` venv，formula 安装时对 Homebrew `python@3.12` 重写 pyvenv.cfg 与脚本 shebang）。
+
+**源码安装**（monorepo 开发）：
+
+```bash
+cd /Users/dahai/fusion
+source .venv/bin/activate
+pip install -e fusion-core && pip install -e fusion-identity
+```
 
 ## 快速开始
 

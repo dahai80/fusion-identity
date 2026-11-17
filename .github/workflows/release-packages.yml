@@ -1,0 +1,70 @@
+name: release-packages
+
+# Runs when a release is published: builds the Homebrew venv tarballs
+# (one per platform, each smoke-tested for relocation before upload) and
+# publishes the sdist + wheel to PyPI via Trusted Publishing.
+#
+# PyPI side one-time setup: register a pending publisher on pypi.org for
+# project fusion-identity — owner dahai80, repository fusion-identity,
+# workflow release-packages.yml, environment pypi. No token secret is
+# stored here.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  venv-tarball:
+    name: venv ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: darwin, arch: arm64, runner: macos-14 }
+          - { os: darwin, arch: x64, runner: macos-13 }
+          - { os: linux, arch: x64, runner: ubuntu-24.04 }
+          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build relocatable venv tarball (includes relocation smoke test)
+        run: scripts/package-venv.sh dist
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="$(git describe --tags --abbrev=0)"
+          fi
+          gh release upload "$TAG" dist/fusion-identity-venv-*.tar.gz --repo "$GITHUB_REPOSITORY" --clobber
+
+  pypi:
+    name: publish to PyPI
+    runs-on: ubuntu-24.04
+    permissions: {}
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --no-cache-dir build twine
+          python -m build
+          twine check dist/*
+      - name: Publish (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
