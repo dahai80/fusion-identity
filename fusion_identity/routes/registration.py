@@ -150,11 +150,32 @@ async def register(
             detail="email is required while email verification is enforced",
         )
     if await store.get_user_by_username(body.username) is not None:
+        # Issue #83: 409 on a taken username is a deliberate, documented
+        # accepted risk (the issue explicitly asks for 4xx here) — username
+        # existence may be probed, email existence may not.
         raise HTTPException(status_code=409, detail="username already exists")
-    # Issue #53: duplicate email previously surfaced as a raw 500 (unique
-    # constraint → StoreConflict). Pre-check for the readable 409; the
-    # StoreConflict catch below is the concurrency fallback.
+    # Issue #84 (option 1, enum-free): a duplicate email must be
+    # indistinguishable from a fresh signup. With email verification ON
+    # (production) a fresh signup returns the verification_required shape —
+    # so does a duplicate: a SILENT NO-OP. Nothing is persisted and,
+    # critically, NO verification email is sent to the already-registered
+    # address. The throwaway user_id keeps the response shape identical
+    # without creating a row; owners of the address recover access via the
+    # public /verify-email/resend. With verification OFF the endpoint returns
+    # a live token pair for a NEW account — issuing one for an existing
+    # account would be a takeover, so the readable 409 stays (dev-only mode,
+    # documented accepted risk).
     if email is not None and await store.get_user_by_email(email) is not None:
+        if settings.email_verification_required:
+            logger.info("register: duplicate email silent no-op email=%s", _mask_email(email))
+            return {
+                "user_id": "usr_" + secrets.token_hex(6),
+                "username": body.username,
+                "tenant_id": settings.registration_default_tenant,
+                "email_verified": False,
+                "status": "verification_required",
+                "message": "check your inbox for the verification link, then log in",
+            }
         logger.info("register: rejected duplicate email=%s", _mask_email(email))
         raise HTTPException(status_code=409, detail="email already registered")
 

@@ -26,7 +26,7 @@ CREATE INDEX tenants_status_idx ON tenants(status) WHERE status <> 'deleted';
 -- password_hash = legacy scrypt fixed-salt (migration), password_hash_v = argon2id per-user salt
 CREATE TABLE users (
     user_id              TEXT PRIMARY KEY,
-    username             TEXT NOT NULL,
+    username             TEXT NOT NULL UNIQUE,
     email                TEXT UNIQUE,
     display_name         TEXT,
     password_hash        TEXT NOT NULL DEFAULT '',

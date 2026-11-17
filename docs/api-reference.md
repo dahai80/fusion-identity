@@ -7,8 +7,8 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.33
-updated: 2026-11-16
+version: 0.2.34
+updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -43,7 +43,7 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 
 | Method | Path | Auth | 说明 / Notes |
 |---|---|---|---|
-| POST | `/register` | none | 个人注册;自动加入 `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT`(默认 `community`,首次自动创建 free 模板),role `member`;验证开启时返回 `{status:"verification_required"}`;用户名/邮箱(大小写不敏感)冲突 409;`REGISTRATION_ENABLED=0` → 403 |
+| POST | `/register` | none | 个人注册;自动加入 `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT`(默认 `community`,首次自动创建 free 模板),role `member`;验证开启时返回 `{status:"verification_required"}`;用户名冲突 409(issue #83,UNIQUE 索引防并发竞态);邮箱重复 enum-free 静默无操作(issue #84 方案 1,响应与全新注册同形,不落库不发信;验证关闭的 dev 模式保留 409);`REGISTRATION_ENABLED=0` → 403 |
 | POST | `/register-tenant` | none | 租户注册;`admin_password` 必须 >= 12;复用 `provision_core`,支持 `Idempotency-Key` 重放;密码不回显 |
 | POST | `/verify-email` | none | `{token}` 原子单用;无效/过期/重放统一 400 |
 | POST | `/verify-email/resend` | none | `{username}`;响应恒 `{resent:bool}`(防枚举);PUBLIC by design |

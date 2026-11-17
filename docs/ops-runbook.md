@@ -7,8 +7,8 @@ doc_type: guide
 title: { zh: "fusion-identity 运维手册", en: "fusion-identity operations runbook" }
 audience: engineer
 status: draft
-version: 0.2.33
-updated: 2026-11-16
+version: 0.2.34
+updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
   - docs/ops-runbook.md

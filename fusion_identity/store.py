@@ -458,6 +458,11 @@ class InMemoryStore:
     ) -> dict[str, Any]:
         if user_id in self._users:
             raise StoreConflict(f"user {user_id} exists")
+        # Issue #83: mirror the PG users_username_uniq index — login resolves
+        # usernames via a single-row lookup, so a raced duplicate would be a
+        # login-hijack vector.
+        if any(u["username"] == username for u in self._users.values()):
+            raise StoreConflict(f"username {username} exists")
         # Issue #64: argon2 off the event loop (CPU-bound).
         pw_hash, salt, algo = await run_kdf(hash_password, password)
         self._users[user_id] = {
