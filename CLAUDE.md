@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 工程指南", en: "fusion-identity engineering guide" }
 audience: engineer
 status: draft
-version: 0.2.34
+version: 0.2.35
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -31,6 +31,12 @@ cd /Users/dahai/fusion
 source .venv/bin/activate         # REQUIRED — shared monorepo venv, not a local one
 pip install -e fusion-identity     # editable install; depends on fusion-core (pip install -e fusion-core first if not present)
 ```
+
+## Packaging (PyPI + Homebrew)
+
+Two distribution channels ship alongside the monorepo dev install; `fusion-core` is a real PyPI package (`pip install fusion-identity` just works):
+- **PyPI**: sdist + wheel published by `.github/workflows/release-packages.yml` on release (Trusted Publishing — one-time pending-publisher registration on pypi.org: owner `dahai80`, repo `fusion-identity`, workflow `release-packages.yml`). No token secret.
+- **Homebrew**: `packaging/homebrew/fusion-identity.rb` (in-repo source of truth) installs a pre-built relocatable venv tarball from the GitHub release — built by `scripts/package-venv.sh` (`venv --copies`, `__pycache__` stripped, pyvenv.cfg + shebangs rewritten against Homebrew `python@3.12` at install time, relocation smoke-tested before upload). 4 platforms: darwin-arm64/x64, linux-arm64/x64. On each release: copy the formula into `dahai80/homebrew-fusion-mlx` tap with the real tarball sha256s (manual, no tap automation).
 
 ## Required env (fail-closed — service refuses to start without both)
 

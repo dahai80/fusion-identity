@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.34
+version: 0.2.35
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,13 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.35
+
+### Added
+
+- **PyPI distribution** — `pip install fusion-identity` now works from PyPI. `fusion-core>=0.12` (already published) added to dependencies; sdist + wheel built and published by the new `.github/workflows/release-packages.yml` (Trusted Publishing, no token secret; one-time pending-publisher registration on pypi.org required). `fusion-identity --version` added to the console entry.
+- **Homebrew install** — formula `packaging/homebrew/fusion-identity.rb` installs a pre-built relocatable venv tarball (one per platform: darwin-arm64/darwin-x64/linux-x64/linux-arm64) from the GitHub release. Tarballs are built by `scripts/package-venv.sh` (`python -m venv --copies`; pyvenv.cfg + console-script shebangs rewritten at install time against Homebrew `python@3.12`; every artifact smoke-tested for relocation before upload). Formula is copied into the `dahai80/homebrew-fusion-mlx` tap on each release.
 
 ## 0.2.34
 
