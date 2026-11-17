@@ -51,7 +51,11 @@ jobs:
   pypi:
     name: publish to PyPI
     runs-on: ubuntu-24.04
-    permissions: {}
+    # Trusted Publishing exchanges an OIDC token with PyPI — id-token: write
+    # is required for the ACTIONS_ID_TOKEN_REQUEST_TOKEN to be issued.
+    permissions:
+      id-token: write
+      contents: read
     environment: pypi
     steps:
       - uses: actions/checkout@v4
