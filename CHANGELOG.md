@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.33
-updated: 2026-11-16
+version: 0.2.34
+updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.34
+
+Current version (`pyproject.toml`).
+
+- #83: username uniqueness enforced end-to-end. The register route's pre-check existed since #39, but the `users` table had no UNIQUE constraint on `username` (only `email` did) — two concurrent signups with the same username both passed the pre-check and both inserted, and login resolves usernames via a single-row lookup (login-hijack vector). Migration `0023` adds `users_username_uniq`; the raced insert now falls into the existing `StoreConflict` catch → 409 fallback. `InMemoryStore.create_user` mirrors the check. 409-on-taken-username remains a documented accepted risk (the issue explicitly requires 4xx)
+- #84 (option 1, enum-free): duplicate-email registration with email verification ON is now a SILENT NO-OP — the response is byte-shape-identical to a fresh signup's 201 `{status:"verification_required"}` (throwaway user_id), nothing is persisted, and NO verification email is sent to the already-registered address (an emailed link for an address the attacker just probed would be worse than the oracle). Replaces the issue #53 readable 409, which was an account-existence oracle for the whole email base. Recovery path for legitimate owners is unchanged: the public `/verify-email/resend`. With verification OFF (dev-only mode) the 409 stays — the endpoint returns a live token pair for a NEW account, and issuing one for an existing account would be a takeover
+
 
 ## 0.2.33
 

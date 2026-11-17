@@ -26,21 +26,29 @@ def _register(client: TestClient, username: str, email: str):
     )
 
 
-def test_duplicate_email_conflict(client):
+def test_duplicate_email_enum_free(client):
+    # Issue #84 (option 1): duplicate email is a silent no-op returning the
+    # SAME 201 verification_required shape as a fresh signup — the response
+    # cannot distinguish registered from unregistered emails. Replaces the
+    # issue #53 readable 409 (which was an account-existence oracle).
     r1 = _register(client, "alice", "alice@example.com")
     assert r1.status_code == 201
     r2 = _register(client, "alice2", "alice@example.com")
-    assert r2.status_code == 409
-    assert r2.json()["detail"] == "email already registered"
-    logger.info("duplicate email 409 verified")
+    assert r2.status_code == 201
+    assert set(r2.json()) == set(r1.json())
+    assert r2.json()["status"] == "verification_required"
+    logger.info("duplicate email enum-free no-op verified")
 
 
-def test_duplicate_email_case_insensitive(client):
+def test_duplicate_email_case_insensitive_enum_free(client):
+    # Issue #84: case-insensitive matching (issue #53) kept, response is now
+    # enum-free — indistinguishable from a fresh signup.
     r1 = _register(client, "bob", "bob@Example.com")
     assert r1.status_code == 201
     r2 = _register(client, "bob2", "BOB@example.com")
-    assert r2.status_code == 409
-    assert r2.json()["detail"] == "email already registered"
+    assert r2.status_code == 201
+    assert set(r2.json()) == set(r1.json())
+    assert r2.json()["status"] == "verification_required"
 
 
 def test_duplicate_username_still_conflicts(client):
