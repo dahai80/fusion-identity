@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 工程指南", en: "fusion-identity engineering guide" }
 audience: engineer
 status: draft
-version: 0.2.36
+version: 0.2.37
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -84,7 +84,7 @@ Tests use Starlette `TestClient` against `build_app(store=InMemoryStore(), run_b
 
 Routers included: `auth`, `account`, `tenants`, `members`, `api_keys`, `quotas`, `audit`, `usage`, `metrics`, `jwks`, `idps`, `oidc`, `scim`, `mfa`, `admin`, `registration`, `join`. Tenant middleware installed from `fusion_core.tenant` with `TENANT_EXEMPT` paths (health/docs/login/verify/refresh/register/register-tenant/verify-email/password/reset-request/account-delete/account-export — exact-match only). Startup order: connect store → ensure_schema → build Redis → init cache+concurrency scripts → bootstrap → start gRPC (only if `grpc_port>0` AND concurrency present) → retention worker (issue #91, when `retention_sweep_seconds>0`) → stall watchdog (issue #64, when `stall_watchdog_seconds>0`). Shutdown: watchdog.stop → webhook/retention worker stops → grpc.stop → redis.aclose → store.close. Issue #91: a `RetentionWorker` (`fusion_identity/retention.py`, WebhookWorker-style asyncio task) sweeps every `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS` (default 3600): due account purges (grace `FUSION_IDENTITY_DELETE_GRACE_SECONDS` default 7d) + tombstone audit `account.purged`, expired token-ledger pruning, audit pruning at `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` (default 12). All steps idempotent. Issue #64: a loop-independent `StallWatchdog` (`fusion_identity/watchdog.py`, `threading.Timer` outside asyncio) probes `/health` every `FUSION_IDENTITY_STALL_WATCHDOG` seconds (default 30, `0` = off; dataclass default 0 keeps tests off) and logs CRITICAL once on stall (TCP accepts, HTTP never answers) + WARNING on recovery — detection only, recovery is `fusion-sv restart fusion-identity`. All argon2 KDF calls (login incl. the L17 dummy verify, change/reset password, `create_user` in both stores) are wrapped in `asyncio.to_thread` so a 64MB-memory-cost hash cannot stall the loop. `start.sh` persists required env to `~/.fusion-identity/env` (0600, sourced before the fail-closed checks on every invocation) so clean-shell restart works.
 
-Note: `build_app` defaults to `InMemoryStore` — production must inject a `PgStore`. The DDL in `deploy/sql/schema.sql` is applied by operator/CI; `PgStore.ensure_schema` only warns. The gRPC/cache/concurrency plane is **disabled** unless `FUSION_IDENTITY_REDIS_URL` is set.
+Note: `build_app` defaults to `InMemoryStore` — production must inject a `PgStore`. The DDL in `deploy/sql/schema.sql` is applied by operator/CI; `PgStore.ensure_schema` only warns. Issue #94: the migration runner (`migrations.py`) GRANTs `SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public` to the app role (`FUSION_IDENTITY_APP_ROLE`, default `fusion_identity_app`) + `ALTER DEFAULT PRIVILEGES` on every startup, then runs a fail-closed privilege probe — a table the app role cannot SELECT aborts startup with a RuntimeError listing it (migration 0024 shipped without its grant and 500'd the whole login plane on prod). Operator backstop: `deploy/sql/ensure-grants.sql`. The gRPC/cache/concurrency plane is **disabled** unless `FUSION_IDENTITY_REDIS_URL` is set.
 
 ### Store layer (`store.py`, `db.py`)
 
