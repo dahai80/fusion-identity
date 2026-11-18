@@ -43,6 +43,88 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 _MIG_LOCK_KEY = 0x4944454E  # "IDEN" — stable advisory-lock constant for identity migrations
 
+# Issue #94: every table must be readable/writable by the application role or
+# the login plane 500s in prod (tests run as superuser/owner and cannot catch
+# it). The runner grants the standard privilege set after migrations (works
+# when the runner runs as superuser or as the owning role) and then PROBES —
+# a missing grant fails startup loudly instead of at first login.
+APP_ROLE_ENV = "FUSION_IDENTITY_APP_ROLE"
+DEFAULT_APP_ROLE = "fusion_identity_app"
+
+_GRANT_SQL = """
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}
+"""
+
+_DEFAULT_PRIVS_SQL = """
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role}
+"""
+
+
+def _app_role() -> str:
+    import os
+
+    role = os.environ.get(APP_ROLE_ENV, DEFAULT_APP_ROLE).strip()
+    return role or DEFAULT_APP_ROLE
+
+
+async def grant_app_role(conn: Any) -> bool:
+    # Best-effort: succeeds when the runner runs as superuser or as a role
+    # owning the tables; a permission failure is logged as an ERROR with the
+    # operator fix — the probe below still fails startup if grants are
+    # actually missing.
+    role = _app_role()
+    exists = await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", role)
+    if not exists:
+        logger.warning("migrations: app role %s does not exist, skip grant", role)
+        return False
+    try:
+        await conn.execute(_GRANT_SQL.format(role=role))
+        await conn.execute(_DEFAULT_PRIVS_SQL.format(role=role))
+        logger.info("migrations: granted standard table privileges to %s", role)
+        return True
+    except Exception as exc:
+        logger.error(
+            "migrations: could not GRANT to %s (%s) — if the privilege probe "
+            "fails, run as the table owner: GRANT SELECT, INSERT, UPDATE, DELETE "
+            "ON ALL TABLES IN SCHEMA public TO %s",
+            role,
+            exc,
+            role,
+        )
+        return False
+
+
+async def assert_app_role_privileges(conn: Any) -> None:
+    # Issue #94 deployment check: fail-closed probe — the app role must be
+    # able to SELECT from every non-internal table, otherwise startup aborts
+    # instead of serving 500s on the login plane.
+    role = _app_role()
+    exists = await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", role)
+    if not exists:
+        logger.warning("migrations: app role %s does not exist, probe skipped", role)
+        return
+    rows = await conn.fetch(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='public' AND table_type='BASE TABLE' "
+        "AND table_name <> 'schema_migrations' ORDER BY table_name"
+    )
+    missing = []
+    for r in rows:
+        ok = await conn.fetchval(
+            "SELECT has_table_privilege($1, $2, 'SELECT')", role, r["table_name"]
+        )
+        if not ok:
+            missing.append(r["table_name"])
+    if missing:
+        raise RuntimeError(
+            f"app role {role} lacks SELECT on {len(missing)} table(s): "
+            f"{', '.join(missing)} — run GRANT SELECT, INSERT, UPDATE, DELETE "
+            f"ON ALL TABLES IN SCHEMA public TO {role} as the table owner "
+            f"(issue #94)"
+        )
+    logger.info("migrations: app role %s privilege probe passed (%d tables)", role, len(rows))
+
 
 async def run_migrations(pool: Any) -> list[str]:
     # A8: serialize concurrent startup migrations with a session-level advisory
@@ -73,6 +155,10 @@ async def run_migrations(pool: Any) -> list[str]:
                 logger.info("migration: applied %s %s", mig.version, mig.name)
             if not done:
                 logger.info("migration: no pending migrations (schema current)")
+            # Issue #94: grant + probe run on EVERY startup (not just when
+            # migrations applied) so an out-of-band DDL change is caught too.
+            await grant_app_role(conn)
+            await assert_app_role_privileges(conn)
             return done
         finally:
             await conn.execute("SELECT pg_advisory_unlock($1)", _MIG_LOCK_KEY)

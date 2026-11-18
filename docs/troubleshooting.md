@@ -7,7 +7,7 @@ doc_type: troubleshooting
 title: { zh: "fusion-identity 故障排查", en: "fusion-identity troubleshooting" }
 audience: engineer
 status: draft
-version: 0.2.36
+version: 0.2.37
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:

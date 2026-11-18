@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 运维手册", en: "fusion-identity operations runbook" }
 audience: engineer
 status: draft
-version: 0.2.36
+version: 0.2.37
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -99,6 +99,16 @@ Redis holds: api-key→tenant cache, tenant cache, daily quota counters, active 
 - `FUSION_IDENTITY_SERVICE_TOKEN` — shared with downstream verifiers. Loss = `/verify` callers must be reconfigured.
 
 Store all three in the secrets manager with access logging. Never in the DB backup plaintext.
+
+### App-role grants after migrations (issue #94)
+
+A migration that creates a table without granting it to `fusion_identity_app` breaks the whole login plane in prod (every login 500s on `permission denied`) while tests stay green — they run as superuser/owner. Since 0.2.37 the migration runner grants the standard privilege set on every startup and then runs a fail-closed probe: a table the app role cannot SELECT aborts startup with a RuntimeError naming the table.
+
+When the runner connects AS the app role it cannot grant on owner tables — fix manually as superuser, then restart:
+
+```bash
+sudo -u postgres psql -d fusion_identity -f deploy/sql/ensure-grants.sql
+```
 
 ## Monitoring and alerting
 

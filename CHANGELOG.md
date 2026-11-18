@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.36
+version: 0.2.37
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,15 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.37
+
+### Issue #94 — migrations ship with app-role grants (login-plane 500 fix)
+- Regression fixed: migration `0024` reached prod without the `fusion_identity_app` GRANT — every login 500'd (`permission denied for table account_deletions`) because the login plane consults the tombstone table while tests ran as superuser/owner.
+- Migration runner (`fusion_identity/migrations.py`) now, on EVERY startup: best-effort `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO <app-role>` + `ALTER DEFAULT PRIVILEGES` (covers fresh installs and future migrations), then a fail-closed **privilege probe** — if the app role cannot SELECT any user table, startup aborts with a loud RuntimeError listing the tables.
+- Role name via `FUSION_IDENTITY_APP_ROLE` (default `fusion_identity_app`); missing role → probe skipped with a warning.
+- Operator backstop: `deploy/sql/ensure-grants.sql` (superuser GRANT + DO-block probe).
+- PG integration tests: fresh-DB full migration run leaves every table readable by the app role (acceptance criterion), REVOKE → probe raises loudly, unknown role → noop.
 
 ## 0.2.36
 
