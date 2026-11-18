@@ -31,8 +31,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: darwin, arch: arm64, runner: macos-14 }
-          - { os: darwin, arch: x64, runner: macos-13 }
+          - { os: darwin, arch: arm64, runner: macos-latest }
+          - { os: darwin, arch: x64, runner: macos-15-intel }
           - { os: linux, arch: x64, runner: ubuntu-24.04 }
           - { os: linux, arch: arm64, runner: ubuntu-24.04-arm }
     steps:
