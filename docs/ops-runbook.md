@@ -7,8 +7,8 @@ doc_type: guide
 title: { zh: "fusion-identity 运维手册", en: "fusion-identity operations runbook" }
 audience: engineer
 status: draft
-version: 0.2.37
-updated: 2026-11-17
+version: 0.2.38
+updated: 2026-11-18
 owner: "@dahai"
 source_of_truth:
   - docs/ops-runbook.md
@@ -102,7 +102,7 @@ Store all three in the secrets manager with access logging. Never in the DB back
 
 ### App-role grants after migrations (issue #94)
 
-A migration that creates a table without granting it to `fusion_identity_app` breaks the whole login plane in prod (every login 500s on `permission denied`) while tests stay green — they run as superuser/owner. Since 0.2.37 the migration runner grants the standard privilege set on every startup and then runs a fail-closed probe: a table the app role cannot SELECT aborts startup with a RuntimeError naming the table.
+A migration that creates a table without granting it to `fusion_identity_app` breaks the whole login plane in prod (every login 500s on `permission denied`) while tests stay green — they run as superuser/owner. Since 0.2.37 the migration runner grants the standard privilege set on every startup and then runs a fail-closed probe (tightened to SELECT, INSERT, UPDATE, DELETE per issue #96 in 0.2.38): a table the app role lacks any of the four privileges on aborts startup with a RuntimeError naming each `table:privilege` pair.
 
 When the runner connects AS the app role it cannot grant on owner tables — fix manually as superuser, then restart:
 

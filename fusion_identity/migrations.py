@@ -95,10 +95,15 @@ async def grant_app_role(conn: Any) -> bool:
         return False
 
 
+_PROBE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
+
+
 async def assert_app_role_privileges(conn: Any) -> None:
-    # Issue #94 deployment check: fail-closed probe — the app role must be
-    # able to SELECT from every non-internal table, otherwise startup aborts
-    # instead of serving 500s on the login plane.
+    # Issue #94 deployment check, tightened by issue #96: fail-closed probe —
+    # the app role must hold the full standard privilege set on every
+    # non-internal table, otherwise startup aborts. SELECT-only probing is
+    # not enough: login also INSERTs (issued_jtis, audit_log), so a table
+    # readable but not writable would still 500 the login plane.
     role = _app_role()
     exists = await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", role)
     if not exists:
@@ -111,17 +116,18 @@ async def assert_app_role_privileges(conn: Any) -> None:
     )
     missing = []
     for r in rows:
-        ok = await conn.fetchval(
-            "SELECT has_table_privilege($1, $2, 'SELECT')", role, r["table_name"]
-        )
-        if not ok:
-            missing.append(r["table_name"])
+        for priv in _PROBE_PRIVILEGES:
+            ok = await conn.fetchval(
+                "SELECT has_table_privilege($1, $2, $3)", role, r["table_name"], priv
+            )
+            if not ok:
+                missing.append(f"{r['table_name']}:{priv}")
     if missing:
         raise RuntimeError(
-            f"app role {role} lacks SELECT on {len(missing)} table(s): "
+            f"app role {role} lacks privileges on {len(missing)} table/privilege pair(s): "
             f"{', '.join(missing)} — run GRANT SELECT, INSERT, UPDATE, DELETE "
             f"ON ALL TABLES IN SCHEMA public TO {role} as the table owner "
-            f"(issue #94)"
+            f"(issues #94, #96)"
         )
     logger.info("migrations: app role %s privilege probe passed (%d tables)", role, len(rows))
 

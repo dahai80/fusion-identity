@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.37
-updated: 2026-11-17
+version: 0.2.38
+updated: 2026-11-18
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.38
+
+### Issue #96 — privilege probe tightened to the full grant set
+- Follow-up to #94: the startup probe only checked `SELECT`, but the login plane also INSERTs (`issued_jtis`, `audit_log`) — a table readable but not writable would still 500 prod while the probe passed.
+- `assert_app_role_privileges` now probes `SELECT, INSERT, UPDATE, DELETE` on every user table and fails startup listing each missing `table:privilege` pair.
+- Backfill audit of migrations 0001–0024: no per-migration GRANTs added — the convention stays the runner-level grant on every startup (the shared post-migration step allowed by the issue), which covers all tables regardless of which migration created them; `deploy/sql/ensure-grants.sql` remains the operator backstop for psql-applied migrations.
+- PG integration tests: REVOKE of INSERT/UPDATE/DELETE on `users` each aborts startup; fresh-DB full migration run passes the tightened 4-privilege probe with no manual GRANTs (issue #96 acceptance).
 
 ## 0.2.37
 
