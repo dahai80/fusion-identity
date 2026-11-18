@@ -7,7 +7,7 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.35
+version: 0.2.36
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -36,8 +36,21 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 | POST | `/revoke` | bearer (tenant_admin) | `{jti}` 吊销(归属入审计) |
 | DELETE | `/sessions` | service token | `{sub,tenant_id}` 吊销该主体全部 access/session jti 与 refresh family(幂等,未知租户 404) |
 | POST | `/password` | bearer | `{old_password,new_password}`(NIST 800-63B 策略) |
-| POST | `/password/forgot` | none | `{email}` → 恒 `{sent:true}`(防枚举);token `secrets.token_urlsafe(32)`,sha256 落库,TTL 默认 3600s |
-| POST | `/password/reset` | none | `{token,new_password}` → 原子单用;成功后轮换 argon2id 哈希并吊销全部 refresh family;无效/过期/重放统一 400 |
+| POST | `/password/forgot` | none | `{email}` → 恒 `{sent:true}`(防枚举);token `secrets.token_urlsafe(32)`,sha256 落库,TTL 默认 1800s;真实命中审计 `auth.password_reset_requested`(issue #90) |
+| POST | `/password/reset-request` | none | issue #90:`/password/forgot` 的一等别名,行为完全一致 |
+| POST | `/password/reset` | none | `{token,new_password}` → 原子单用;成功后轮换 argon2id 哈希并吊销全部 refresh family,并向账号持有者发确认邮件(发送失败不使重置失败,issue #90);无效/过期/重放统一 400 |
+
+## 账号生命周期 — `/api/v1/auth/account/*`(bearer,issue #91)
+
+用户维度平面(豁免租户中间件,无需 `X-Tenant-Id`);删除需密码二次确认。
+
+| Method | Path | Auth | 说明 / Notes |
+|---|---|---|---|
+| POST | `/account/delete` | bearer + `{password}` | 安排宽限期清除(默认 7d,幂等取首次截止);立即吊销全部会话;窗口内登录/bearer/refresh/gRPC 拒绝(`account is scheduled for deletion`);审计 `account.delete_requested` |
+| DELETE | `/account/delete` | bearer | 撤销待执行删除(无则 404);审计 `account.delete_cancelled` |
+| GET | `/account/export` | bearer | `{profile, memberships, audit}` —— 不含密码哈希/会话密钥/他租户数据 |
+
+到期由 `RetentionWorker`(tick `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS`)单事务清除:成员/api-key 引用/邀请 `created_by`/jtis/MFA/join/SSO 删除或墓碑,审计行 `user_id` 置 NULL(链连续),users 行删除,墓碑审计 `account.purged` 入 `_system`;同轮修剪过期 token 台账与超 `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` 的审计行。
 
 ## 注册与邮箱验证 — `/api/v1/auth/register*`
 

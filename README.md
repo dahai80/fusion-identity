@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.35
+version: 0.2.36
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -137,7 +137,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED` | no | `1` | When `1`, registration requires an email and issues a single-use verification token; login is 403-blocked until verified. `0` returns a token pair at signup directly. |
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | no | `86400` | Email verification token TTL, seconds. |
 | `FUSION_IDENTITY_SSO_TICKET_TTL` | no | `60` | Issue #48: one-time SSO ticket lifetime, seconds (clamped 5–600). |
-| `FUSION_IDENTITY_PASSWORD_RESET_TTL` | no | `3600` | Issue #54: password reset token lifetime, seconds. The token is a bearer capability that resets the account password — keep it short. |
+| `FUSION_IDENTITY_PASSWORD_RESET_TTL` | no | `1800` (30min) | Issue #54/#90: password reset token lifetime, seconds. The token is a bearer capability that resets the account password — kept ≤ 30 minutes. |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | no | `community` | Tenant personal signups auto-join. Auto-created (free plan template) on first personal signup if missing. |
 | `FUSION_IDENTITY_SMTP_HOST` | no | — (logged) | SMTP relay host. Unset → the verification token is WARNING-logged (dev fallback, documented) instead of emailed; verification still gates login. |
 | `FUSION_IDENTITY_SMTP_PORT` | no | `587` | SMTP relay port. |
@@ -148,6 +148,9 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | no | `stub` | Issue #74: payment backend for the prepaid recharge plane. `stub` confirms instantly (dev/test only — never real money). Unknown values fail closed (503 on recharge endpoints). |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | no | `20` | Issue #74: bonus-token percentage granted on a tenant's FIRST paid recharge order (e.g. 20 → 1000 tokens + 200 promo). `0` disables the promo. |
 | `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | no | `900` | Issue #76: service-account session token TTL, seconds (clamped ≥60). Short by design — machines re-exchange their pre-provisioned credential instead of holding a long-lived bearer. |
+| `FUSION_IDENTITY_DELETE_GRACE_SECONDS` | no | `604800` (7d) | Issue #91: account-deletion grace window, seconds. Between `POST /api/v1/auth/account/delete` and the purge the login/bearer/gRPC planes all refuse the account (`account is scheduled for deletion`); the window is cancelable. |
+| `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` | no | `12` | Issue #91: audit-log retention window, months. The retention worker deletes audit rows older than this. |
+| `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS` | no | `3600` | Issue #91: retention worker tick, seconds (due purges + token-ledger + audit pruning; all idempotent). `0` disables the in-process worker. |
 
 Bootstrap runs only when the tenant table is empty. On an **empty** table with `FUSION_BOOTSTRAP_ADMIN_USER`/`PASS` unset, startup **refuses to start** (fail-closed — a fresh install must be seeded with a first admin; the service will not come up un-administerable). Bootstrap is a no-op when the table is **non-empty** (the operator pre-seeded the first admin out-of-band, e.g. via `psql`), so the service starts without those vars in that case.
 
@@ -169,8 +172,9 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` and `X-Tenant-Id:
 | DELETE | `/sessions` | service token | Revoke all access/session jtis + refresh families for `{sub, tenant_id}` (issue #29 user-deletion flow) || POST | `/revoke` | bearer (tenant_admin) | `{jti}` — revokes the caller's own jti (attribution audited) |
 | POST | `/logout` | bearer | `{refresh_token?}` — revokes access jti + the refresh token |
 | POST | `/password` | bearer | `{old_password,new_password}` — change own password (NIST 800-63B policy) |
-| POST | `/password/forgot` | none | Issue #54: `{email}` → request a password reset. ALWAYS `{sent:true}` — account existence never leaves the endpoint (no enumeration). If the account exists, a single-use expiring token (`sha256` at rest, TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` default 1h) is emailed as `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/reset?token={token}`. Rate-limited. |
-| POST | `/password/reset` | none (token is the secret) | Issue #54: `{token,new_password}` → consumes the single-use token (atomic, replay/expired/unknown → uniform 400), rotates the argon2id hash, revokes every refresh token family (old sessions die), audits `auth.password_reset` to `_system`. Password policy enforced (min 10 chars, letter + digit). |
+| POST | `/password/forgot` | none | Issue #54: `{email}` → request a password reset. ALWAYS `{sent:true}` — account existence never leaves the endpoint (no enumeration). If the account exists, a single-use expiring token (`sha256` at rest, TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` default 30min) is emailed as `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/reset?token={token}`. Issue #90: real hits are audited (`auth.password_reset_requested`). Rate-limited. |
+| POST | `/password/reset-request` | none | Issue #90: first-class alias of `/password/forgot` — identical behavior, response, rate limit, and audit. Clients should prefer this name. |
+| POST | `/password/reset` | none (token is the secret) | Issue #54: `{token,new_password}` → consumes the single-use token (atomic, replay/expired/unknown → uniform 400), rotates the argon2id hash, revokes every refresh token family (old sessions die), audits `auth.password_reset` to `_system`. Issue #90: a confirmation email ("your password was changed") goes to the account holder — a delivery failure is logged, never fails the reset. Password policy enforced (min 10 chars, letter + digit). |
 
 ### Public registration (`/api/v1/auth/register*` — issue #39)
 
@@ -187,7 +191,19 @@ Self-service signup channels (design: `architecture/fusion-site-auth-1104.md`). 
 
 ### Password recovery (`/api/v1/auth/password/*` — issue #54)
 
-Self-service reset for users who lost their password (no bearer token exists to change it). Both endpoints are tenant-middleware-exempt and rate-limited. Security posture: the request endpoint is uniform (`{sent:true}` regardless of account existence — no enumeration); the reset token is `secrets.token_urlsafe(32)`, stored only as sha256, single-use (consumed atomically inside the UPDATE), expiring (TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` default 1h), travels only in the email; a successful reset rotates the password hash and revokes every refresh token family. Unknown/expired/replayed tokens all return the same 400. SMTP-unset dev fallback logs the reset link like verification.
+Self-service reset for users who lost their password (no bearer token exists to change it). Both endpoints are tenant-middleware-exempt and rate-limited. Security posture: the request endpoint is uniform (`{sent:true}` regardless of account existence — no enumeration); the reset token is `secrets.token_urlsafe(32)`, stored only as sha256, single-use (consumed atomically inside the UPDATE), expiring (TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` default 30min, issue #90), travels only in the email; a successful reset rotates the password hash and revokes every refresh token family, then emails a confirmation (issue #90 — delivery failures never fail the reset). Unknown/expired/replayed tokens all return the same 400. SMTP-unset dev fallback logs the reset link like verification.
+
+### Account lifecycle (`/api/v1/auth/account/*` — issue #91)
+
+Self-service account deletion (GDPR-style, grace window + cancel) and a JSON data export. The plane is user-scoped, not tenant-scoped — tenant-middleware-exempt, bearer-only, and deletion additionally requires a password re-confirm (a stolen bearer gets a grace window to notice, not a wipe).
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| POST | `/account/delete` | bearer + password re-confirm | `{password}` → schedules the purge at `now + FUSION_IDENTITY_DELETE_GRACE_SECONDS` (default 7d, idempotent — the FIRST deadline always wins). All sessions (access jtis + refresh families) revoked immediately; the users row survives until the deadline so login/bearer/refresh/gRPC all refuse with `account is scheduled for deletion` while the window runs. Audited `account.delete_requested`. |
+| DELETE | `/account/delete` | bearer | Cancels a pending deletion (404 when none). Restores normal login on the next attempt. Audited `account.delete_cancelled`. |
+| GET | `/account/export` | bearer | `{profile, memberships, audit}` — profile fields, tenant memberships (tenant + role), and the user's own audit trail (newest first, ≤500). Password hashes, session secrets, and other tenants' data never leave the service. |
+
+**Purge semantics**: at the deadline the in-process retention worker (`RetentionWorker`, tick `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS`) purges the account in ONE transaction — members, api-keys (user refs tombstoned to NULL), invites (`created_by` NULL), refresh/issued/revoked jtis, MFA factors, join requests, SSO tickets deleted; audit rows tombstoned (`user_id` NULL) so the hash chain stays continuous; the `users` row dropped. A tombstone `account.purged` audit event is written to `_system`. Expired/revoked token ledgers and audit rows older than `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` are pruned in the same sweep (all steps idempotent — a crashed tick self-heals).
 
 ### Tenant join policy (`join_policy` — issue #40)
 

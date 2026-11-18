@@ -7,7 +7,7 @@ doc_type: config-reference
 title: { zh: "fusion-identity 配置参考", en: "fusion-identity config reference" }
 audience: engineer
 status: draft
-version: 0.2.35
+version: 0.2.36
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -97,7 +97,10 @@ source_of_truth:
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | `86400` | 验证 token TTL(秒) |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | `community` | 个人注册自动加入的租户(缺失时自动创建 free 模板) |
 | `FUSION_IDENTITY_SSO_TICKET_TTL` | `60` | SSO ticket 生命周期(秒,钳制 5–600) |
-| `FUSION_IDENTITY_PASSWORD_RESET_TTL` | `3600` | 密码重置 token TTL(秒)——bearer 能力,保持短 |
+| `FUSION_IDENTITY_PASSWORD_RESET_TTL` | `1800` | 密码重置 token TTL(秒)——bearer 能力,≤30 分钟(issue #90) |
+| `FUSION_IDENTITY_DELETE_GRACE_SECONDS` | `604800` | 账号删除宽限期(秒,issue #91);窗口内登录/bearer/gRPC 全拒绝 |
+| `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` | `12` | 审计日志保留窗口(月,issue #91) |
+| `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS` | `3600` | retention worker 扫描间隔(秒,issue #91);`0` 关闭 |
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | — | 验证/重置链接的公开 origin(`{base}/auth/?verify={token}`,契约归 fusion-gateway);未设置则相对链接 + WARNING |
 | `FUSION_IDENTITY_SMTP_HOST` | —(日志回退) | SMTP relay;未设置时验证 token 走 WARNING 日志(dev fallback),验证仍拦登录 |
 | `FUSION_IDENTITY_SMTP_PORT` | `587` | SMTP 端口 |

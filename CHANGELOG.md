@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.35
+version: 0.2.36
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,20 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.36
+
+### Issue #90 — password reset flow hardening
+- `POST /api/v1/auth/password/reset-request` — first-class alias of `/password/forgot` (identical behavior, rate limit, audit); clients get a well-named endpoint.
+- Reset token TTL default tightened to 1800s (30 minutes) — the token is a bearer capability that resets the password.
+- Reset-request real hits are audited (`auth.password_reset_requested`); unknown emails stay enum-free with no audit row.
+- Successful reset now emails a "your password was changed" confirmation (`send_password_reset_success_email`); delivery failures are logged, never fail the reset.
+
+### Issue #91 — account deletion / export / retention
+- New account plane `/api/v1/auth/account/*` (bearer, tenant-middleware-exempt, user-scoped): `POST /delete` (password re-confirm → 7d grace window, sessions revoked immediately), `DELETE /delete` (cancel), `GET /export` (`{profile, memberships, audit}`).
+- Deletion gate in all 4 auth planes (login, bearer verification, gRPC authorize, refresh): pending deletion → `account is scheduled for deletion`.
+- `RetentionWorker` background sweep: due purges (single PgStore transaction, audit tombstoned so the hash chain stays continuous), expired token-ledger pruning, audit pruning at `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` (default 12). All idempotent.
+- Migration `0024_account_deletion.sql` — table `account_deletions` (29 tables total). Env: `FUSION_IDENTITY_DELETE_GRACE_SECONDS` (604800), `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` (12), `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS` (3600).
 
 ## 0.2.35
 

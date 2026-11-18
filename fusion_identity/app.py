@@ -132,6 +132,12 @@ TENANT_EXEMPT = frozenset(
         "/api/v1/auth/verify-email/resend",
         "/api/v1/auth/password/forgot",
         "/api/v1/auth/password/reset",
+        "/api/v1/auth/password/reset-request",
+        # Issue #91: the account plane is user-scoped, not tenant-scoped —
+        # bearer auth is enforced by the routes themselves (multi-tenant
+        # users must not need an X-Tenant-Id here).
+        "/api/v1/auth/account/delete",
+        "/api/v1/auth/account/export",
         "/scim/v2/Users",
     }
 )
@@ -208,6 +214,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.state.concurrency = None
     app.state.grpc_server = None
 
+    from fusion_identity.routes.account import router as account_router
     from fusion_identity.routes.admin import router as admin_router
     from fusion_identity.routes.api_keys import router as api_keys_router
     from fusion_identity.routes.app_credentials import router as app_credentials_router
@@ -235,6 +242,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.usage import router as usage_router
 
     app.include_router(auth_router)
+    app.include_router(account_router)
     app.include_router(health_router)
     app.include_router(tenants_router)
     app.include_router(members_router)
@@ -260,6 +268,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(registration_router)
     app.include_router(join_router)
     app.state.webhook_worker = None
+    app.state.retention_worker = None
     app.state.watchdog = None
 
     def _verify_jwt(token: str) -> dict[str, Any] | None:
@@ -340,6 +349,22 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
             )
             app.state.webhook_worker.start()
             logger.info("build_app: webhook worker started url=%s", settings.webhook_url)
+        # Issue #91: retention sweep — due account purges, token-ledger and
+        # audit-log pruning. Runs in-process on a tick; all steps idempotent.
+        if settings.retention_sweep_seconds > 0:
+            from fusion_identity.retention import RetentionWorker
+
+            app.state.retention_worker = RetentionWorker(
+                app.state.store,
+                audit_retention_months=settings.audit_retention_months,
+                tick_seconds=settings.retention_sweep_seconds,
+            )
+            app.state.retention_worker.start()
+            logger.info(
+                "build_app: retention worker started tick=%ss audit_months=%s",
+                settings.retention_sweep_seconds,
+                settings.audit_retention_months,
+            )
         # Issue #64: stall watchdog — a threading.Timer OUTSIDE the event loop
         # probes /health so a stalled loop is at least observable (CRITICAL
         # log). Detection only; recovery is the operator's fusion-sv restart.
@@ -364,6 +389,12 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
             except Exception as exc:
                 logger.warning("webhook worker stop: %s", exc)
             app.state.webhook_worker = None
+        if app.state.retention_worker is not None:
+            try:
+                await app.state.retention_worker.stop()
+            except Exception as exc:
+                logger.warning("retention worker stop: %s", exc)
+            app.state.retention_worker = None
         if app.state.grpc_server is not None:
             try:
                 await app.state.grpc_server.stop(grace=2.0)

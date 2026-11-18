@@ -138,9 +138,14 @@ class Settings:
     email_verify_ttl_seconds: int = 86400
     # Issue #48: one-time SSO ticket lifetime (fusion-site → web-shell handoff)
     sso_ticket_ttl_seconds: int = 60
-    # Issue #54: password reset token lifetime. Short TTL — the token is a
-    # bearer capability that resets the account password.
-    password_reset_ttl_seconds: int = 3600
+    # Issue #54: password reset token lifetime. Issue #90 caps it at
+    # 30 minutes — the token is a bearer capability that resets the
+    # account password.
+    password_reset_ttl_seconds: int = 1800
+    # Issue #91: self-service account deletion + retention plane.
+    delete_grace_seconds: int = 7 * 24 * 3600
+    audit_retention_months: int = 12
+    retention_sweep_seconds: int = 3600
     # Explicit error mode for password recovery (issue #58). Default keeps
     # the uniform anti-enumeration response; when enabled, unknown emails
     # and SMTP delivery failures return explicit errors instead of a
@@ -355,7 +360,10 @@ def load_settings() -> Settings:
         in ("1", "true", "yes"),
         email_verify_ttl_seconds=_int_env("FUSION_IDENTITY_EMAIL_VERIFY_TTL", 86400),
         sso_ticket_ttl_seconds=_int_env("FUSION_IDENTITY_SSO_TICKET_TTL", 60),
-        password_reset_ttl_seconds=_int_env("FUSION_IDENTITY_PASSWORD_RESET_TTL", 3600),
+        password_reset_ttl_seconds=_int_env("FUSION_IDENTITY_PASSWORD_RESET_TTL", 1800),
+        delete_grace_seconds=_int_env("FUSION_IDENTITY_DELETE_GRACE_SECONDS", 604800),
+        audit_retention_months=_int_env("FUSION_IDENTITY_AUDIT_RETENTION_MONTHS", 12),
+        retention_sweep_seconds=_int_env("FUSION_IDENTITY_RETENTION_SWEEP_SECONDS", 3600),
         password_forgot_reveal_missing=os.environ.get(
             "FUSION_IDENTITY_PASSWORD_FORGOT_REVEAL_MISSING", ""
         )

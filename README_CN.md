@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.35
+version: 0.2.36
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:
@@ -112,7 +112,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_EMAIL_VERIFICATION_REQUIRED` | 否 | `1` | 为 `1` 时注册必须提供邮箱并签发一次性验证 token；未验证前登录返回 403。`0` 时注册直接返回 token 对。 |
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | 否 | `86400` | 邮箱验证 token 有效期，秒。 |
 | `FUSION_IDENTITY_SSO_TICKET_TTL` | 否 | `60` | issue #48：一次性 SSO ticket 有效期，秒（钳制 5–600）。 |
-| `FUSION_IDENTITY_PASSWORD_RESET_TTL` | 否 | `3600` | issue #54：密码重置 token 有效期，秒。该 token 是可重置账号密码的 bearer 凭据 —— 请保持较短。 |
+| `FUSION_IDENTITY_PASSWORD_RESET_TTL` | 否 | `1800`（30 分钟） | issue #54/#90：密码重置 token 有效期，秒。该 token 是可重置账号密码的 bearer 凭据 —— 收紧至 ≤30 分钟。 |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | 否 | `community` | 个人注册自动加入的租户。缺失时在首次个人注册时自动创建（绑定 free 计划模板）。 |
 | `FUSION_IDENTITY_SMTP_HOST` | 否 | —（打日志） | SMTP 中继主机。未设置时验证 token 以 WARNING 日志输出（开发兜底，已文档化）而非发信；验证仍阻断登录。 |
 | `FUSION_IDENTITY_SMTP_PORT` | 否 | `587` | SMTP 中继端口。 |
@@ -123,6 +123,9 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | 否 | `stub` | issue #74：预付费充值平面的支付后端。`stub` 即时确认（仅开发/测试——不可用于真实资金）。未知值 fail-closed（充值端点返回 503）。 |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | 否 | `20` | issue #74：租户首笔已支付充值订单的赠送代币百分比（如 20 → 1000 代币 + 200 赠送）。`0` 关闭赠送。 |
 | `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | 否 | `900` | issue #76：服务账号会话 token 生命周期（秒，钳制 ≥60）。刻意取短——机器侧凭预置凭证换取，不持长效 bearer。 |
+| `FUSION_IDENTITY_DELETE_GRACE_SECONDS` | 否 | `604800`（7 天） | issue #91：账号删除宽限期，秒。从 `POST /api/v1/auth/account/delete` 到清除执行期间，登录/bearer/gRPC 全部拒绝该账号（`account is scheduled for deletion`）；宽限期内可撤销。 |
+| `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` | 否 | `12` | issue #91：审计日志保留窗口，月。retention worker 删除早于该窗口的审计行。 |
+| `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS` | 否 | `3600` | issue #91：retention worker 扫描间隔，秒（到期清除 + token 台账 + 审计修剪；全部幂等）。`0` 关闭进程内 worker。 |
 | `FUSION_IDENTITY_REDIS_URL` | 否 | `redis://127.0.0.1:6379/0`（经 start.sh 默认开启） | 身份热缓存 + 并发租约存储的 Redis 连接。issue #71：`start.sh` 默认开启，使配额/API-key 执法平面默认生效；按部署退出须导出 set-but-empty。进程内未设置仍为 REST-only 模式。 |
 | `FUSION_IDENTITY_GRPC_PORT` | 否 | `50051`（经 start.sh 默认开启） | gRPC `IdentityService` 端口（PRD §3.1）。`>0` 且配置 Redis 时启用。issue #71：`start.sh` 默认取已登记的 `50051`；导出 `0` 显式禁用。 |
 | `FUSION_IDENTITY_LEASE_TTL` | 否 | `120` | 并发租约 TTL，秒（Redis 原子锁）。 |
@@ -143,8 +146,9 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | POST | `/refresh` | 无 | `{refresh_token}` → 新 access token |
 | POST | `/ticket` | bearer | issue #48：签发一次性 SSO ticket（`fsso_…`，TTL `FUSION_IDENTITY_SSO_TICKET_TTL` 默认 60 秒，钳制 5–600），绑定会话的 sub + 租户，用于 fusion-site → web-shell 免二次登录交接。返回 `{ticket,expires_in}`；落库仅存 sha256 哈希。 |
 | POST | `/ticket/exchange` | 无（ticket 即凭据） | issue #48：`{ticket}` → 标准 `{access_token,refresh_token,…}`。原子单次使用（重放 → 401 `invalid ticket`）；兑换时从 tenant_members 重新取角色并复核成员关系/租户状态（fail-closed）。与 login 相同的限流。 |
-| POST | `/password/forgot` | 无 | issue #54：`{email}` → 请求密码重置。**恒返回** `{sent:true}` —— 账号是否存在不由此端点泄露（防枚举）。账号存在时，一次性带过期 token（sha256 落库，TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` 默认 1 小时）以 `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/reset?token={token}` 邮件发出。有限流。 |
-| POST | `/password/reset` | 无（token 即凭据） | issue #54：`{token,new_password}` → 消费一次性 token（原子，重放/过期/未知 → 统一 400），轮换 argon2id 哈希，撤销全部 refresh token 家族（旧会话全部失效），审计 `auth.password_reset` 记入 `_system`。密码策略强制（≥10 字符，含字母 + 数字）。 |
+| POST | `/password/forgot` | 无 | issue #54：`{email}` → 请求密码重置。**恒返回** `{sent:true}` —— 账号是否存在不由此端点泄露（防枚举）。账号存在时，一次性带过期 token（sha256 落库，TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` 默认 30 分钟）以 `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/reset?token={token}` 邮件发出。issue #90：真实命中记审计（`auth.password_reset_requested`）。有限流。 |
+| POST | `/password/reset-request` | 无 | issue #90：`/password/forgot` 的一等别名 —— 行为、响应、限流、审计完全一致。客户端建议优先使用该名称。 |
+| POST | `/password/reset` | 无（token 即凭据） | issue #54：`{token,new_password}` → 消费一次性 token（原子，重放/过期/未知 → 统一 400），轮换 argon2id 哈希，撤销全部 refresh token 家族（旧会话全部失效），审计 `auth.password_reset` 记入 `_system`。issue #90：重置成功后向账号持有者发送确认邮件（"密码已修改"）——发送失败仅记日志，绝不使重置失败。密码策略强制（≥10 字符，含字母 + 数字）。 |
 | POST | `/revoke` | bearer（tenant_admin） | `{jti}` |
 
 ### 公开注册（`/api/v1/auth/register*` —— issue #39）
@@ -162,7 +166,19 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 ### 密码找回（`/api/v1/auth/password/*` —— issue #54）
 
-为丢失密码的用户提供自助重置（此时不存在可用的 bearer token）。两个端点均豁免租户中间件且有限流。安全姿态：请求端点响应统一（无论账号是否存在均返回 `{sent:true}` —— 防枚举）；重置 token 为 `secrets.token_urlsafe(32)`，仅存 sha256，单次使用（在 UPDATE 内原子消费），带过期（TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` 默认 1 小时），仅经邮件传递；重置成功即轮换密码哈希并撤销全部 refresh token 家族。未知/过期/重放 token 一律返回同一 400。SMTP 未设置时的开发兜底与验证邮件一样输出重置链接日志。
+为丢失密码的用户提供自助重置（此时不存在可用的 bearer token）。两个端点均豁免租户中间件且有限流。安全姿态：请求端点响应统一（无论账号是否存在均返回 `{sent:true}` —— 防枚举）；重置 token 为 `secrets.token_urlsafe(32)`，仅存 sha256，单次使用（在 UPDATE 内原子消费），带过期（TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` 默认 30 分钟，issue #90），仅经邮件传递；重置成功即轮换密码哈希并撤销全部 refresh token 家族，随后发送确认邮件（issue #90 —— 发送失败不使重置失败）。未知/过期/重放 token 一律返回同一 400。SMTP 未设置时的开发兜底与验证邮件一样输出重置链接日志。
+
+### 账号生命周期（`/api/v1/auth/account/*` —— issue #91）
+
+自助账号删除（GDPR 风格，宽限期 + 可撤销）与 JSON 数据导出。该平面按用户而非租户划分 —— 豁免租户中间件，仅 bearer 认证，删除额外要求密码二次确认（被盗 bearer 换来的是一个可察觉的宽限窗口，而不是直接清库）。
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| POST | `/account/delete` | bearer + 密码二次确认 | `{password}` → 安排在 `now + FUSION_IDENTITY_DELETE_GRACE_SECONDS`（默认 7 天）执行清除（幂等 —— 永远以第一次的截止时间为准）。立即撤销全部会话（access jti + refresh 家族）；users 行保留至截止时间，窗口期内登录/bearer/refresh/gRPC 全部拒绝（`account is scheduled for deletion`）。审计 `account.delete_requested`。 |
+| DELETE | `/account/delete` | bearer | 撤销待执行的删除（无则 404）。下次登录恢复正常。审计 `account.delete_cancelled`。 |
+| GET | `/account/export` | bearer | `{profile, memberships, audit}` —— 个人资料字段、租户成员关系（租户 + 角色）、本人审计轨迹（最新在前，≤500 条）。密码哈希、会话密钥、其他租户数据永不外泄。 |
+
+**清除语义**：到期后由进程内 retention worker（`RetentionWorker`，tick 为 `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS`）在单个事务内清除账号 —— 成员关系、api-key（用户引用置 NULL 留墓碑）、邀请（`created_by` 置 NULL）、refresh/issued/revoked jti、MFA 因子、加入申请、SSO ticket 全部删除；审计行墓碑化（`user_id` 置 NULL），哈希链保持连续；`users` 行删除。并向 `_system` 写入墓碑审计事件 `account.purged`。同一次扫描还会修剪过期/已撤销的 token 台账，以及早于 `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` 的审计行（全部幂等 —— 某次扫描崩溃可自愈）。
 
 ### 租户加入策略（`join_policy` —— issue #40）
 
