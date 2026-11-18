@@ -111,3 +111,28 @@ async def send_password_reset_email(settings: Any, to_email: str, token: str, us
         ttl_minutes=max(1, settings.password_reset_ttl_seconds // 60),
     )
     return await send_email(settings, to_email, "Reset your Fusion password", body)
+
+
+_RESET_DONE_BODY = """Hi {username},
+
+Your Fusion account password was just changed via the self-service reset
+flow. If this was you, no action is needed.
+
+If you did NOT make this change, your account may be compromised:
+reset your password again immediately from
+{base}/auth/reset and contact your tenant administrator.
+
+All existing sessions were signed out when the password changed.
+"""
+
+
+async def send_password_reset_success_email(settings: Any, to_email: str, username: str) -> str:
+    # Issue #90: security notification after a successful self-service
+    # reset — the account holder learns their password was changed even if
+    # someone else performed the reset.
+    return await send_email(
+        settings,
+        to_email,
+        "Your Fusion password was changed",
+        _RESET_DONE_BODY.format(username=username, base=_public_base(settings)),
+    )

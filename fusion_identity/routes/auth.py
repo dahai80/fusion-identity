@@ -16,7 +16,11 @@ from fusion_identity.deps import (
     require_bearer,
     require_service_token,
 )
-from fusion_identity.email_sender import EmailDeliveryError, send_password_reset_email
+from fusion_identity.email_sender import (
+    EmailDeliveryError,
+    send_password_reset_email,
+    send_password_reset_success_email,
+)
 from fusion_identity.jwt_utils import JwtError
 from fusion_identity.kdf import run_kdf
 from fusion_identity.models import (
@@ -285,19 +289,20 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-@router.post("/password/forgot")
-async def forgot_password(
+async def _password_reset_request(
     request: Request,
     body: PasswordForgotRequest,
     store=Depends(get_store),
     settings=Depends(get_settings),
 ) -> dict:
-    # Issue #54: request a password reset. Default response is ALWAYS
+    # Issue #54 + #90: request a password reset. Default response is ALWAYS
     # {"sent": true} — account existence never leaves this endpoint (no
     # enumeration). With settings.password_forgot_reveal_missing enabled
     # (issue #58), unknown emails return 404 and SMTP delivery failures
     # return 502 instead of a fake "sent" confirmation.
-    # Rate-limited per email pseudo key.
+    # Rate-limited per email pseudo key (issue #90: this is the only
+    # abuse gate — no captcha service exists and none may be added, per
+    # the issue's no-new-dependencies constraint).
     await check_login_rate(request, "_pw_forgot", body.email)
     email = body.email.strip()
     user = await store.get_user_by_email(email)
@@ -327,9 +332,44 @@ async def forgot_password(
             # Delivery failure must not leak account existence via the
             # response — the user can simply request again.
             logger.warning("forgot_password: delivery failed user=%s", user["user_id"])
+        try:
+            await store.append_audit(
+                tenant_id="_system",
+                user_id=user["user_id"],
+                jti=None,
+                role="public",
+                action="auth.password_reset_requested",
+                resource=None,
+                detail={"via": "self_service"},
+            )
+        except Exception:
+            logger.exception("forgot_password: audit append failed user=%s", user["user_id"])
     else:
         logger.error("forgot_password: failed to arm reset token user=%s", user["user_id"])
     return {"sent": True}
+
+
+@router.post("/password/forgot")
+async def forgot_password(
+    request: Request,
+    body: PasswordForgotRequest,
+    store=Depends(get_store),
+    settings=Depends(get_settings),
+) -> dict:
+    return await _password_reset_request(request, body, store, settings)
+
+
+@router.post("/password/reset-request")
+async def reset_request_password(
+    request: Request,
+    body: PasswordForgotRequest,
+    store=Depends(get_store),
+    settings=Depends(get_settings),
+) -> dict:
+    # Issue #90: commercial naming alias of /password/forgot — identical
+    # handler, identical enum-free contract. Both names stay live so the
+    # auth-portal and the security review spec use the same flow.
+    return await _password_reset_request(request, body, store, settings)
 
 
 @router.post("/password/reset")
@@ -337,6 +377,7 @@ async def reset_password(
     request: Request,
     body: PasswordResetConfirmRequest,
     store=Depends(get_store),
+    settings=Depends(get_settings),
 ) -> dict:
     # Issue #54: consume a single-use reset token and set the new password.
     # Tenant-middleware-exempt (the token is the secret); uniform 400 for
@@ -357,6 +398,14 @@ async def reset_password(
         must_change_password=False,
     )
     revoked = await store.revoke_user_sessions(user_id)
+    # Issue #90: notify the account holder that their password changed —
+    # delivery hiccups must never fail the reset itself.
+    user = await store.get_user(user_id)
+    if user is not None and user.get("email"):
+        try:
+            await send_password_reset_success_email(settings, user["email"], user["username"])
+        except EmailDeliveryError:
+            logger.warning("reset_password: success notification failed user=%s", user_id)
     try:
         await store.append_audit(
             tenant_id="_system",

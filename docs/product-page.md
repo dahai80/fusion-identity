@@ -7,7 +7,7 @@ doc_type: product-page
 title: { zh: "fusion-identity 产品页", en: "fusion-identity product page" }
 audience: engineer
 status: draft
-version: 0.2.35
+version: 0.2.36
 updated: 2026-11-17
 owner: "@dahai"
 source_of_truth:

@@ -436,6 +436,83 @@ class PgStore:
             logger.warning("consume_password_reset_token: no matching unexpired token")
         return val
 
+    async def request_account_deletion(self, user_id: str, purge_at: float) -> dict[str, Any]:
+        # Issue #91: schedule purge. Idempotent — ON CONFLICT keeps the FIRST
+        # deadline so re-requests cannot move the window.
+        row = await self.fetchrow(
+            "INSERT INTO account_deletions (user_id, purge_at) VALUES ($1, $2) "
+            "ON CONFLICT (user_id) DO UPDATE SET status='pending' RETURNING user_id, "
+            "requested_at, purge_at, status",
+            user_id,
+            _ts_from_epoch(purge_at),
+        )
+        logger.info("request_account_deletion: user=%s purge_at=%s", user_id, purge_at)
+        out = dict(row)
+        out["requested_at"] = out["requested_at"].timestamp()
+        out["purge_at"] = out["purge_at"].timestamp()
+        return out
+
+    async def cancel_account_deletion(self, user_id: str) -> bool:
+        val = await self.execute(
+            "DELETE FROM account_deletions WHERE user_id=$1 AND status='pending'", user_id
+        )
+        return val == "DELETE 1"
+
+    async def pending_account_deletion(self, user_id: str) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            "SELECT user_id, requested_at, purge_at, status FROM account_deletions "
+            "WHERE user_id=$1 AND status='pending' AND purge_at > now()",
+            user_id,
+        )
+        if row is None:
+            return None
+        # InMemory contract returns epoch floats — normalize TIMESTAMPTZ here
+        # so callers compare like with like (#39/#40 class of bug).
+        out = dict(row)
+        out["requested_at"] = out["requested_at"].timestamp()
+        out["purge_at"] = out["purge_at"].timestamp()
+        return out
+
+    async def due_account_deletions(self, now: float) -> list[str]:
+        rows = await self.fetch(
+            "SELECT user_id FROM account_deletions WHERE status='pending' AND purge_at <= $1",
+            _ts_from_epoch(now),
+        )
+        return [r["user_id"] for r in rows]
+
+    async def purge_account(self, user_id: str) -> None:
+        # Issue #91: the whole PII purge is ONE transaction. FK map:
+        #   cleared (nullable refs preserved as tombstones) — audit_log.user_id
+        #     (no FK, chain untouched), tenant_members.added_by,
+        #     tenant_invites.created_by, api_keys.user_id;
+        #   deleted — tenant_members, refresh_tokens, issued_jtis (principal
+        #     label), revoked_jtis (principal label), user_mfa,
+        #     join_requests + sso_tickets (CASCADE would also cover them;
+        #     explicit deletes keep the order obvious);
+        #   dropped — account_deletions row, users row.
+        # Identity holds no user-scoped commerce rows (prepaid_orders and
+        # balance_ledger are tenant-scoped).
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("UPDATE audit_log SET user_id=NULL WHERE user_id=$1", user_id)
+            await conn.execute("UPDATE tenant_members SET added_by=NULL WHERE added_by=$1", user_id)
+            await conn.execute(
+                "UPDATE tenant_invites SET created_by=NULL WHERE created_by=$1", user_id
+            )
+            await conn.execute("UPDATE api_keys SET user_id=NULL WHERE user_id=$1", user_id)
+            for stmt in (
+                "DELETE FROM tenant_members WHERE user_id=$1",
+                "DELETE FROM refresh_tokens WHERE user_id=$1",
+                "DELETE FROM issued_jtis WHERE user_id=$1",
+                "DELETE FROM revoked_jtis WHERE user_id=$1",
+                "DELETE FROM user_mfa WHERE user_id=$1",
+                "DELETE FROM join_requests WHERE user_id=$1",
+                "DELETE FROM sso_tickets WHERE user_id=$1",
+                "DELETE FROM account_deletions WHERE user_id=$1",
+                "DELETE FROM users WHERE user_id=$1",
+            ):
+                await conn.execute(stmt, user_id)
+        logger.info("purge_account: user=%s purged", user_id)
+
     async def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         return await self.fetchrow("SELECT * FROM users WHERE username=$1", username)
 
@@ -1654,6 +1731,49 @@ class PgStore:
             user_id,
         )
 
+    async def audit_for_user(self, user_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        # Issue #91: the user's own audit trail for the data export.
+        rows = await self.fetch(
+            "SELECT ts, action, detail FROM audit_log WHERE user_id=$1 ORDER BY id DESC LIMIT $2",
+            user_id,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
+    async def prune_expired_tokens(self, now: float) -> int:
+        # Issue #91: retention sweep for token ledgers — dead refresh rows,
+        # expired revoked-jti and issued-jti records.
+        count = 0
+        count += _deleted_rows(
+            await self.execute(
+                "DELETE FROM refresh_tokens WHERE status='revoked' OR expires_at <= $1",
+                _ts_from_epoch(now),
+            )
+        )
+        count += _deleted_rows(
+            await self.execute(
+                "DELETE FROM revoked_jtis WHERE expires_at <= $1", _ts_from_epoch(now)
+            )
+        )
+        count += _deleted_rows(
+            await self.execute(
+                "DELETE FROM issued_jtis WHERE expires_at <= $1", _ts_from_epoch(now)
+            )
+        )
+        if count:
+            logger.info("prune_expired_tokens: pruned=%d", count)
+        return count
+
+    async def prune_audit(self, before_ts: float) -> int:
+        # Issue #91: audit retention window — the per-tenant chain stays
+        # internally consistent within the retained window (head pruning is
+        # the documented retention policy).
+        val = await self.execute("DELETE FROM audit_log WHERE ts < $1", _ts_from_epoch(before_ts))
+        count = _deleted_rows(val)
+        if count:
+            logger.info("prune_audit: removed=%d", count)
+        return count
+
     async def revoke_user_issued_jtis(
         self,
         user_id: str,
@@ -1953,6 +2073,15 @@ def _ts_from_epoch(epoch: float) -> Any:
     from datetime import datetime
 
     return datetime.fromtimestamp(epoch, tz=UTC)
+
+
+def _deleted_rows(status: str) -> int:
+    # asyncpg execute() returns a PostgreSQL command tag ("DELETE 12") —
+    # parse the affected-row count out of it.
+    try:
+        return int(str(status).rsplit(" ", 1)[-1])
+    except ValueError:
+        return 0
 
 
 def _decode_app_secret(row: dict[str, Any], strip_hash: bool = False) -> dict[str, Any]:

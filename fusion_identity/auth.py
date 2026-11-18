@@ -240,6 +240,10 @@ class AuthService:
         if user_status in (None, "disabled", "locked"):
             logger.warning("_authorize: user=%s status=%s — deny", claims["sub"], user_status)
             raise _unauthorized("account disabled")
+        # Issue #91: pending self-service deletion denies the enforcement
+        # plane too.
+        if await self._store.pending_account_deletion(claims["sub"]) is not None:
+            raise _unauthorized("account is scheduled for deletion")
         role = await self._store.get_member_role(claims["tid"], claims["sub"])
         if role is None:
             logger.warning(
@@ -296,6 +300,11 @@ class AuthService:
         if user_status in ("disabled", "locked"):
             logger.warning("login: user=%s status=%s", user["user_id"], user_status)
             raise _unauthorized("account disabled")
+        # Issue #91: a pending self-service deletion disables the account for
+        # the whole grace window (still reversible via the cancel endpoint).
+        if await self._store.pending_account_deletion(user["user_id"]) is not None:
+            logger.warning("login: user=%s pending deletion", user["user_id"])
+            raise _unauthorized("account is scheduled for deletion")
         # Issue #39: email verification gate — checked after credentials so the
         # error state is unambiguous for the UI ("check your inbox"), but
         # before token issuance. 403 (not 401) so clients can distinguish
@@ -810,6 +819,9 @@ class AuthService:
         user_status = await self._store.get_user_status(claims["sub"])
         if user_status in (None, "disabled", "locked"):
             raise _unauthorized("account disabled")
+        # Issue #91: pending self-service deletion blocks refresh too.
+        if await self._store.pending_account_deletion(claims["sub"]) is not None:
+            raise _unauthorized("account is scheduled for deletion")
         role = await self._store.get_member_role(claims["tid"], claims["sub"])
         if role is None:
             raise _unauthorized("membership revoked")
@@ -1077,6 +1089,10 @@ class AuthService:
         user_status = await self._store.get_user_status(claims["sub"])
         if user_status in (None, "disabled", "locked"):
             raise _unauthorized("account disabled")
+        # Issue #91: pending self-service deletion — the bearer plane dies
+        # with the login plane for the whole grace window.
+        if await self._store.pending_account_deletion(claims["sub"]) is not None:
+            raise _unauthorized("account is scheduled for deletion")
         role = await self._store.get_member_role(claims["tid"], claims["sub"])
         if role is None:
             raise _unauthorized("membership revoked")

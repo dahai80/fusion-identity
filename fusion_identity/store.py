@@ -316,6 +316,8 @@ class InMemoryStore:
         # rest) for acceptance suites — no human login, no captcha.
         self._service_accounts: dict[str, dict[str, Any]] = {}
         self._sa_cred_index: dict[str, str] = {}
+        # Issue #91: self-service account deletion grace window.
+        self._account_deletions: dict[str, dict[str, Any]] = {}
         # Issue #12 (E5): per-tenant custom roles + runtime menu matrix.
         self._custom_roles: dict[tuple[str, str], dict[str, Any]] = {}
         self._menu_matrix: dict[tuple[str, str], list[str]] = {}
@@ -594,6 +596,77 @@ class InMemoryStore:
             logger.info("consume_password_reset_token: consumed user=%s", u["user_id"])
             return u["user_id"]
         return None
+
+    async def request_account_deletion(self, user_id: str, purge_at: float) -> dict[str, Any]:
+        # Issue #91: schedule the account for purge. Idempotent — a repeat
+        # request keeps the original deadline so an attacker cannot extend
+        # or shorten the window by re-requesting.
+        existing = self._account_deletions.get(user_id)
+        if existing is not None:
+            return dict(existing)
+        row = {
+            "user_id": user_id,
+            "requested_at": _now(),
+            "purge_at": purge_at,
+            "status": "pending",
+        }
+        self._account_deletions[user_id] = row
+        logger.info("request_account_deletion: user=%s purge_at=%s", user_id, purge_at)
+        return dict(row)
+
+    async def cancel_account_deletion(self, user_id: str) -> bool:
+        # Issue #91: grace-window cancel — removes the pending schedule and
+        # restores full account access.
+        row = self._account_deletions.pop(user_id, None)
+        if row is None:
+            return False
+        logger.info("cancel_account_deletion: user=%s", user_id)
+        return True
+
+    async def pending_account_deletion(self, user_id: str) -> dict[str, Any] | None:
+        row = self._account_deletions.get(user_id)
+        if row is None or row["purge_at"] <= _now():
+            return None
+        return dict(row)
+
+    async def due_account_deletions(self, now: float) -> list[str]:
+        return [
+            uid
+            for uid, row in self._account_deletions.items()
+            if row["status"] == "pending" and row["purge_at"] <= now
+        ]
+
+    async def purge_account(self, user_id: str) -> None:
+        # Issue #91: single-logical-transaction PII purge. Identity has no
+        # user-scoped commerce rows (prepaid_orders/balance_ledger are
+        # tenant-scoped), so the PII surface is the users row plus its
+        # session/credential children; audit_log keeps a non-PII tombstone
+        # (user_id cleared, chain hashes untouched).
+        self._users.pop(user_id, None)
+        for key in [k for k in self._members if k[1] == user_id]:
+            self._members.pop(key, None)
+        for m in self._members.values():
+            if m.get("added_by") == user_id:
+                m["added_by"] = None
+        for k in self._api_keys.values():
+            if k.get("user_id") == user_id:
+                k["user_id"] = None
+        for inv in self._invites.values():
+            if inv.get("created_by") == user_id:
+                inv["created_by"] = None
+        self._refresh_tokens = {
+            j: r for j, r in self._refresh_tokens.items() if r.get("user_id") != user_id
+        }
+        self._revoked_jtis = {
+            j: r for j, r in self._revoked_jtis.items() if r.get("user_id") != user_id
+        }
+        self._issued_jtis = {j: t for j, t in self._issued_jtis.items() if t[1] != user_id}
+        self._mfa = {k: v for k, v in self._mfa.items() if k[1] != user_id}
+        for row in self._audit:
+            if row.get("user_id") == user_id:
+                row["user_id"] = None
+        self._account_deletions.pop(user_id, None)
+        logger.info("purge_account: user=%s purged", user_id)
 
     async def add_member(
         self, tenant_id: str, user_id: str, role: str, added_by: str | None = None
@@ -1725,6 +1798,49 @@ class InMemoryStore:
                 count += 1
         logger.info("revoke_user_sessions: user=%s revoked=%d refresh tokens", user_id, count)
         return count
+
+    async def audit_for_user(self, user_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        # Issue #91: the user's own audit trail for the data export — newest
+        # first, no chain internals.
+        rows = [a for a in self._audit if a.get("user_id") == user_id]
+        rows.sort(key=lambda a: a.get("ts") or 0, reverse=True)
+        return [
+            {"ts": a.get("ts"), "action": a.get("action"), "detail": a.get("detail")}
+            for a in rows[:limit]
+        ]
+
+    async def prune_expired_tokens(self, now: float) -> int:
+        # Issue #91: retention sweep — drop refresh tokens that can never be
+        # used again (expired or already revoked) and expired jti ledgers.
+        stale = [
+            j
+            for j, r in self._refresh_tokens.items()
+            if r["status"] == "revoked" or r["expires_at"] <= now
+        ]
+        for j in stale:
+            self._refresh_tokens.pop(j, None)
+        revoked = [j for j, r in self._revoked_jtis.items() if r.get("expires_at", 0) <= now]
+        for j in revoked:
+            self._revoked_jtis.pop(j, None)
+        issued = [j for j, rec in self._issued_jtis.items() if rec[2] <= now]
+        for j in issued:
+            self._issued_jtis.pop(j, None)
+        count = len(stale) + len(revoked) + len(issued)
+        if count:
+            logger.info("prune_expired_tokens: pruned=%d", count)
+        return count
+
+    async def prune_audit(self, before_ts: float) -> int:
+        # Issue #91: audit retention — drop entries older than the configured
+        # window. The chain hash is append-only per tenant tail; pruning the
+        # head is a documented, accepted property (retention window is the
+        # policy, the chain still proves internal consistency within it).
+        keep = [a for a in self._audit if (a.get("ts") or 0) >= before_ts]
+        removed = len(self._audit) - len(keep)
+        if removed:
+            self._audit = keep
+            logger.info("prune_audit: removed=%d", removed)
+        return removed
 
     async def revoke_user_issued_jtis(
         self,
