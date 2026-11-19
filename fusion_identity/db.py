@@ -436,6 +436,15 @@ class PgStore:
             logger.warning("consume_password_reset_token: no matching unexpired token")
         return val
 
+    async def clear_password_reset_token(self, user_id: str) -> bool:
+        # Issue #98: mirrors InMemoryStore.clear_password_reset_token.
+        val = await self.fetchval(
+            "UPDATE users SET password_reset_token_hash=NULL, password_reset_expires=NULL "
+            "WHERE user_id=$1 RETURNING user_id",
+            user_id,
+        )
+        return val is not None
+
     async def request_account_deletion(self, user_id: str, purge_at: float) -> dict[str, Any]:
         # Issue #91: schedule purge. Idempotent — ON CONFLICT keeps the FIRST
         # deadline so re-requests cannot move the window.

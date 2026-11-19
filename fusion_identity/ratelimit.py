@@ -92,6 +92,67 @@ class LoginRateLimiter:
         return len(stale)
 
 
+class ResetBackoff:
+    # Issue #98: per-account + per-IP cooldown with exponential backoff for
+    # the password-reset request plane. Keyed on the REQUESTED email and the
+    # client IP BEFORE any account lookup — throttling is identical for
+    # existing and non-existing accounts, so it leaks nothing. Each request
+    # inside the quiet period doubles the delay; a spike threshold logs a
+    # WARNING so operators can see hammering in the journal.
+    SPIKE_THRESHOLD = 3
+    MAX_KEYS = 8192
+    QUIET_RESET_FACTOR = 4
+
+    def __init__(self, base_seconds: float, cap_seconds: float) -> None:
+        self.base = float(base_seconds)
+        self.cap = float(cap_seconds)
+        self._hits: dict[str, tuple[float, int]] = {}
+
+    def hit(self, key: str, now: float | None = None) -> float:
+        # Returns 0.0 when allowed; otherwise the seconds the caller must
+        # wait (a strictly growing sequence under hammering).
+        if self.base <= 0 or self.cap <= 0:
+            return 0.0
+        now = time.time() if now is None else now
+        if len(self._hits) >= self.MAX_KEYS and key not in self._hits:
+            self._sweep(now)
+        last, count = self._hits.get(key, (0.0, 0))
+        if now - last > self.base * self.QUIET_RESET_FACTOR:
+            count = 0
+        delay = min(self.base * (2**count), self.cap)
+        self._hits[key] = (now, count + 1)
+        if count >= self.SPIKE_THRESHOLD:
+            logger.warning(
+                "reset_backoff: spike key=%s attempts=%d next_delay=%.0fs", key, count + 1, delay
+            )
+        # Two free requests (burst tolerance) so a double-submit or a human
+        # retrying after a typo is never throttled; the third rapid request
+        # starts the exponential ladder.
+        if count < 2:
+            return 0.0
+        logger.info("reset_backoff: throttle key=%s retry_after=%.0fs", key, delay)
+        return delay
+
+    def _sweep(self, now: float) -> None:
+        stale = [k for k, (last, _) in self._hits.items() if now - last > self.cap * 2]
+        for k in stale:
+            self._hits.pop(k, None)
+        if stale:
+            logger.info("reset_backoff: swept %s stale keys", len(stale))
+
+
+def get_reset_backoff(request: Request) -> ResetBackoff:
+    backoff: ResetBackoff | None = getattr(request.app.state, "reset_backoff", None)
+    if backoff is None:
+        settings = getattr(request.app.state, "settings", None)
+        backoff = ResetBackoff(
+            base_seconds=getattr(settings, "reset_backoff_base_seconds", 2),
+            cap_seconds=getattr(settings, "reset_backoff_cap_seconds", 300),
+        )
+        request.app.state.reset_backoff = backoff
+    return backoff
+
+
 def get_login_limiter(request: Request) -> LoginRateLimiter:
     limiter: LoginRateLimiter | None = getattr(request.app.state, "login_limiter", None)
     if limiter is None:

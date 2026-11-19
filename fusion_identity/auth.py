@@ -989,6 +989,13 @@ class AuthService:
             password_algo=algo,
             must_change_password=False,
         )
+        # Issue #98: any password change invalidates an outstanding reset
+        # token — a reset link emailed before the rotation must not keep
+        # working afterwards.
+        try:
+            await self._store.clear_password_reset_token(user_id)
+        except Exception:
+            logger.exception("change_password: clear reset token failed user=%s", user_id)
         # L10: password change invalidates all existing sessions — revoke every
         # refresh token issued to this user so no old credential survives the
         # rotation. The current caller's access token expires on its own TTL.

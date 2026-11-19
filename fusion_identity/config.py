@@ -151,6 +151,12 @@ class Settings:
     # and SMTP delivery failures return explicit errors instead of a
     # fake "sent" confirmation.
     password_forgot_reveal_missing: bool = False
+    # Issue #98: reset-request abuse control beyond the fixed rate-limit —
+    # per-account + per-IP cooldown with exponential backoff (seconds).
+    # Base doubles on every request inside the cooldown window; cap bounds
+    # the delay. 0 disables the backoff plane.
+    reset_backoff_base_seconds: int = 2
+    reset_backoff_cap_seconds: int = 300
     registration_default_tenant: str = "community"
     # Issue #39/#40: SMTP plane for verification emails. When smtp_host is
     # empty the verification token is logged (WARNING) instead of emailed —
@@ -370,6 +376,8 @@ def load_settings() -> Settings:
         .strip()
         .lower()
         in ("1", "true", "yes"),
+        reset_backoff_base_seconds=_int_env("FUSION_IDENTITY_RESET_BACKOFF_BASE", 2),
+        reset_backoff_cap_seconds=_int_env("FUSION_IDENTITY_RESET_BACKOFF_CAP", 300),
         registration_default_tenant=os.environ.get(
             "FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT", "community"
         ),

@@ -29,7 +29,11 @@ async def pg_reset():
     store = PgStore(PG_URL)
     await store.connect()
     await store.ensure_schema()
-    s = dataclasses.replace(_settings(), email_verification_required=False)
+    # reset_backoff off: this suite re-arms tokens by rapid re-request
+    # (case-insensitivity check) — the issue #98 abuse gate would 429 it.
+    s = dataclasses.replace(
+        _settings(), email_verification_required=False, reset_backoff_base_seconds=0
+    )
     app = build_app(s, store=store, run_bootstrap=False)
     probe = PgStore(PG_URL)
     await probe.connect()
@@ -60,7 +64,7 @@ def _register(c, username):
     return uid
 
 
-async def test_pg_password_reset_roundtrip(pg_reset):
+async def test_pg_password_reset_roundtrip(pg_reset, monkeypatch):
     # Issue #54 on real Postgres: TIMESTAMPTZ columns, atomic consume UPDATE.
     c = pg_reset
     uid = _register(c, "pgpwreset1")
@@ -72,7 +76,9 @@ async def test_pg_password_reset_roundtrip(pg_reset):
 
     import fusion_identity.email_sender as es
 
-    es.send_email = fake_send
+    # monkeypatch (not raw assignment) — a raw module attribute swap leaks
+    # into every later test in the session (bit test_dev_fallback_logs_verify_link).
+    monkeypatch.setattr(es, "send_email", fake_send)
     r = c.post("/api/v1/auth/password/forgot", json={"email": "pgpwreset1@x.io"})
     assert r.status_code == 200 and r.json() == {"sent": True}
     r = c.post("/api/v1/auth/password/forgot", json={"email": "pgpwreset1@x.io"})

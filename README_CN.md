@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.38
+version: 0.2.39
 updated: 2026-11-18
 owner: "@dahai"
 source_of_truth:
@@ -113,6 +113,8 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | 否 | `86400` | 邮箱验证 token 有效期，秒。 |
 | `FUSION_IDENTITY_SSO_TICKET_TTL` | 否 | `60` | issue #48：一次性 SSO ticket 有效期，秒（钳制 5–600）。 |
 | `FUSION_IDENTITY_PASSWORD_RESET_TTL` | 否 | `1800`（30 分钟） | issue #54/#90：密码重置 token 有效期，秒。该 token 是可重置账号密码的 bearer 凭据 —— 收紧至 ≤30 分钟。 |
+| `FUSION_IDENTITY_RESET_BACKOFF_BASE` | 否 | `2` | issue #98：重置请求滥用控制的基准冷却，秒。同账号/IP 的重复请求按指数翻倍（2 次免费后 4s、8s、…）；`0` 关闭该退避面。 |
+| `FUSION_IDENTITY_RESET_BACKOFF_CAP` | 否 | `300` | issue #98：重置请求退避延迟上限，秒。429 携带 `Retry-After`；尖峰输出 WARNING 日志。 |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | 否 | `community` | 个人注册自动加入的租户。缺失时在首次个人注册时自动创建（绑定 free 计划模板）。 |
 | `FUSION_IDENTITY_SMTP_HOST` | 否 | —（打日志） | SMTP 中继主机。未设置时验证 token 以 WARNING 日志输出（开发兜底，已文档化）而非发信；验证仍阻断登录。 |
 | `FUSION_IDENTITY_SMTP_PORT` | 否 | `587` | SMTP 中继端口。 |
@@ -167,6 +169,8 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 ### 密码找回（`/api/v1/auth/password/*` —— issue #54）
 
 为丢失密码的用户提供自助重置（此时不存在可用的 bearer token）。两个端点均豁免租户中间件且有限流。安全姿态：请求端点响应统一（无论账号是否存在均返回 `{sent:true}` —— 防枚举）；重置 token 为 `secrets.token_urlsafe(32)`，仅存 sha256，单次使用（在 UPDATE 内原子消费），带过期（TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` 默认 30 分钟，issue #90），仅经邮件传递；重置成功即轮换密码哈希并撤销全部 refresh token 家族，随后发送确认邮件（issue #90 —— 发送失败不使重置失败）。未知/过期/重放 token 一律返回同一 400。SMTP 未设置时的开发兜底与验证邮件一样输出重置链接日志。
+
+issue #98 加固：重置邮件改为 fire-and-forget 任务投递，命中路径与未命中路径响应同样快（消除账号存在性的时序侧信道）；任何路径的密码修改都会使未消费的重置 token 立即失效（`clear_password_reset_token`）；并新增指数退避滥用闸门（`FUSION_IDENTITY_RESET_BACKOFF_BASE`/`_CAP`），在任何账号查询之前按"被请求账号 + 客户端 IP"双键限流 —— 2 次免费后 429 延迟翻倍并携带 `Retry-After`，尖峰输出 WARNING，同时封堵轮换 IP 对同一地址的邮件轰炸。
 
 ### 账号生命周期（`/api/v1/auth/account/*` —— issue #91）
 

@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.38
+version: 0.2.39
 updated: 2026-11-18
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.39
+
+### Issue #98 — password-reset hardening: enumeration, token, abuse controls
+- **Timing oracle closed**: reset-email delivery moved to a fire-and-forget asyncio task (`_spawn_reset_email`, hard-referenced task set) — the hit path no longer waits on a slow SMTP round-trip, so existing and non-existing accounts answer with indistinguishable latency. The explicit-reveal operator mode (`FUSION_IDENTITY_PASSWORD_FORGOT_REVEAL_MISSING`) keeps synchronous delivery because its 502 is an intentional existence signal.
+- **Exponential backoff abuse gate** (`ResetBackoff` in `ratelimit.py`): per-requested-account + per-IP cooldown keyed BEFORE any account lookup (throttling is identical for existing and non-existing accounts — no enumeration via the abuse gate), burst tolerance of 2 requests, then doubling delay capped at `FUSION_IDENTITY_RESET_BACKOFF_CAP` (default 300s); 429 carries `Retry-After`. Spike WARNING logged from the 4th rapid attempt; `FUSION_IDENTITY_RESET_BACKOFF_BASE` (default 2s, 0 disables). Doubles as the per-target mail-bombing gate — rotating IPs cannot re-arm the same address.
+- **Token lifecycle**: password change via ANY path (`change_password`) now clears an outstanding reset token — new store method `clear_password_reset_token` on both backends (NULL both columns, idempotent, False on unknown user). Single-use atomic consume, 256-bit `token_urlsafe` token, sha256 at rest, TTL ≤ 30 min were already in place (#90) and are regression-covered.
+- Tests: 9 offline (`tests/test_reset_hardening_issue98.py` — uniform response, sub-5s hit path under a 30s pending delivery, progressive Retry-After growth + spike log, per-account gate across rotating IPs, opt-out, single-use/expiry, change-password invalidation) + 1 PG integration (`tests/test_reset_pg_issue98.py`). Legacy reset tests updated to await the async delivery. Fixed a pre-existing test-pollution bug: `test_password_reset_integration.py` raw-assigned `email_sender.send_email` without restore.
 
 ## 0.2.38
 
