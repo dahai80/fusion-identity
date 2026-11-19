@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 运维手册", en: "fusion-identity operations runbook" }
 audience: engineer
 status: draft
-version: 0.2.41
+version: 0.2.42
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -26,7 +26,7 @@ fusion-identity is the **sole JWT issuer** and tenant registry. Outage = all Fus
 - REST on `11470`, gRPC `IdentityService` on `50051` (only when `FUSION_IDENTITY_REDIS_URL` set).
 - **Fail-closed**: missing required env, invalid/expired token, missing membership, missing tenant_id → 401 or refuse to start. No default-tenant degradation.
 - Two backends: `InMemoryStore` (dev/test default) or `PgStore` (production — inject via `FUSION_IDENTITY_USE_PGSTORE=1` + `FUSION_IDENTITY_DATABASE_URL`). Production MUST use PgStore.
-- Postgres DB `fusion_identity` (issue #26: single canonical DB; legacy `fusion_tenant` archived to /Users/dahai/db-archive/ and dropped), schema in `deploy/sql/schema.sql`.
+- Postgres DB `fusion_identity` (issue #26: single canonical DB; legacy `fusion_tenant` archived to /Users/dahai/db-archive/ and dropped), schema in `deploy/sql/schema.sql` (GENERATED from migrations, issue #105 — do not hand-edit).
 
 ## Health endpoints
 

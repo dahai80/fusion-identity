@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 工程指南", en: "fusion-identity engineering guide" }
 audience: engineer
 status: draft
-version: 0.2.41
+version: 0.2.42
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -66,7 +66,7 @@ Entry point: `fusion-identity` console script → `fusion_identity.app:main` →
 ```bash
 pytest tests/ -v                       # offline, InMemoryStore (default excludes `integration`)
 pytest tests/test_auth.py::test_login -v   # single test
-pytest tests/ -m integration -v        # needs live Postgres fusion_identity (apply deploy/sql/schema.sql first)
+pytest tests/ -m integration -v        # needs live Postgres fusion_identity (apply deploy/sql/schema.sql — GENERATED from migrations, issue #105)
 ruff check . && ruff format --check .  # line-length 100, rules: E F W I UP B SIM; B008 ignored in routes/ and deps.py
 ```
 
@@ -84,7 +84,7 @@ Tests use Starlette `TestClient` against `build_app(store=InMemoryStore(), run_b
 
 Routers included: `auth`, `account`, `tenants`, `members`, `api_keys`, `quotas`, `audit`, `usage`, `metrics`, `jwks`, `idps`, `oidc`, `scim`, `mfa`, `admin`, `registration`, `join`. Tenant middleware installed from `fusion_core.tenant` with `TENANT_EXEMPT` paths (health/docs/login/verify/refresh/register/register-tenant/verify-email/password/reset-request/account-delete/account-export — exact-match only). Startup order: connect store → ensure_schema → build Redis → init cache+concurrency scripts → bootstrap → start gRPC (only if `grpc_port>0` AND concurrency present) → retention worker (issue #91, when `retention_sweep_seconds>0`) → stall watchdog (issue #64, when `stall_watchdog_seconds>0`). Shutdown: watchdog.stop → webhook/retention worker stops → grpc.stop → redis.aclose → store.close. Issue #91: a `RetentionWorker` (`fusion_identity/retention.py`, WebhookWorker-style asyncio task) sweeps every `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS` (default 3600): due account purges (grace `FUSION_IDENTITY_DELETE_GRACE_SECONDS` default 7d) + tombstone audit `account.purged`, expired token-ledger pruning, audit pruning at `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` (default 12). All steps idempotent. Issue #64: a loop-independent `StallWatchdog` (`fusion_identity/watchdog.py`, `threading.Timer` outside asyncio) probes `/health` every `FUSION_IDENTITY_STALL_WATCHDOG` seconds (default 30, `0` = off; dataclass default 0 keeps tests off) and logs CRITICAL once on stall (TCP accepts, HTTP never answers) + WARNING on recovery — detection only, recovery is `fusion-sv restart fusion-identity`. All argon2 KDF calls (login incl. the L17 dummy verify, change/reset password, `create_user` in both stores) are wrapped in `asyncio.to_thread` so a 64MB-memory-cost hash cannot stall the loop. `start.sh` persists required env to `~/.fusion-identity/env` (0600, sourced before the fail-closed checks on every invocation) so clean-shell restart works.
 
-Note: `build_app` defaults to `InMemoryStore` — production must inject a `PgStore`. The DDL in `deploy/sql/schema.sql` is applied by operator/CI; `PgStore.ensure_schema` only warns. Issue #94: the migration runner (`migrations.py`) GRANTs `SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public` to the app role (`FUSION_IDENTITY_APP_ROLE`, default `fusion_identity_app`) + `ALTER DEFAULT PRIVILEGES` on every startup, then runs a fail-closed privilege probe (tightened by issue #96 to all four privileges) — a table the app role lacks SELECT/INSERT/UPDATE/DELETE on aborts startup with a RuntimeError listing each `table:privilege` pair (migration 0024 shipped without its grant and 500'd the whole login plane on prod). Operator backstop: `deploy/sql/ensure-grants.sql`. The gRPC/cache/concurrency plane is **disabled** unless `FUSION_IDENTITY_REDIS_URL` is set.
+Note: `build_app` defaults to `InMemoryStore` — production must inject a `PgStore`. The DDL in `deploy/sql/schema.sql` is applied by operator/CI; `PgStore.ensure_schema` only warns. Issue #105: `schema.sql` is GENERATED (pg_dump of a migrations-only build + re-appended roles/plan_templates seed block) — `migrations/` is the single source of truth for DDL; never hand-edit schema.sql, regenerate after adding a migration (drift-guard: `tests/test_schema_drift_issue105.py`). Issue #94: the migration runner (`migrations.py`) GRANTs `SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public` to the app role (`FUSION_IDENTITY_APP_ROLE`, default `fusion_identity_app`) + `ALTER DEFAULT PRIVILEGES` on every startup, then runs a fail-closed privilege probe (tightened by issue #96 to all four privileges) — a table the app role lacks SELECT/INSERT/UPDATE/DELETE on aborts startup with a RuntimeError listing each `table:privilege` pair (migration 0024 shipped without its grant and 500'd the whole login plane on prod). Operator backstop: `deploy/sql/ensure-grants.sql`. The gRPC/cache/concurrency plane is **disabled** unless `FUSION_IDENTITY_REDIS_URL` is set.
 
 ### Store layer (`store.py`, `db.py`)
 
@@ -172,7 +172,7 @@ Issue #71: `start.sh` defaults `FUSION_IDENTITY_REDIS_URL=redis://127.0.0.1:6379
 
 ## Database
 
-Postgres DB `fusion_identity` — single canonical DB (issue #26, DB-2; legacy `fusion_tenant` retired). Schema in `deploy/sql/schema.sql` (PRD Appendix A.1, independent of cowork RLS DB); table inventory there is authoritative (29 tables — incl. platform-scope `app_secrets` from issue #28 and `app_credentials` from issue #34; issue #39 adds email-verification columns on `users` via migration `0017`; issue #40 adds `tenants.join_policy` + `tenant_invites` + `join_requests` via migration `0018`; issue #91 adds `account_deletions` via migration `0024`). Apply with `psql` before first run. `PgStore.ensure_schema` only warns — DDL is operator/CI responsibility.
+Postgres DB `fusion_identity` — single canonical DB (issue #26, DB-2; legacy `fusion_tenant` retired). Schema in `deploy/sql/schema.sql` (PRD Appendix A.1, independent of cowork RLS DB); migrations in `migrations/` (0001→0025) are the single source of truth for DDL — `schema.sql` is generated from them (issue #105, 33 tables incl. platform-scope `app_secrets` from issue #28, `app_credentials` from issue #34, `sso_tickets` #48, `service_accounts` #76, `prepaid_orders`+`balance_ledger` #74, `account_deletions` #91, `users.data_reflow_enabled` #99/#101 migration 0025). Apply with `psql` before first run. `PgStore.ensure_schema` only warns — DDL is operator/CI responsibility.
 
 ## Conventions
 

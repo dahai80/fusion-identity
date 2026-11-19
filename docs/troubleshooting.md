@@ -7,7 +7,7 @@ doc_type: troubleshooting
 title: { zh: "fusion-identity 故障排查", en: "fusion-identity troubleshooting" }
 audience: engineer
 status: draft
-version: 0.2.41
+version: 0.2.42
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -82,7 +82,7 @@ source_of_truth:
 
 - RLS 未生效:确认服务以低权限角色 `fusion_identity_app` 连接(superuser/BYPASSRLS 绕过 RLS);migration `0007` 创建的角色默认密码必须轮换。
 - 迁移失败/孤儿记录:`migration_orphans` 表记录;`PgStore` 启动时幂等重放 `migrations/`,检查该表定位。
-- 集成测试失败:需真实 Postgres(`deploy/sql/schema.sql`)+ Redis;RLS 用例还要 `FUSION_IDENTITY_APP_ROLE_URL` 指向轮换过密码的低权限角色。
+- 集成测试失败:需真实 Postgres(`deploy/sql/schema.sql`,由 migrations 生成,issue #105)+ Redis;RLS 用例还要 `FUSION_IDENTITY_APP_ROLE_URL` 指向轮换过密码的低权限角色。
 
 ## 指标与观测 / Metrics
 

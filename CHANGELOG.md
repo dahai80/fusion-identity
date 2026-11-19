@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.41
+version: 0.2.42
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.42
+
+### Issue #105 — `deploy/sql/schema.sql` regenerated from migrations; drift-guard tests
+- **Root cause**: `schema.sql` was hand-maintained and had drifted from the migration chain — missing the `audit_seq_seq` sequence, the `service_accounts` / `prepaid_orders` / `balance_ledger` tables (issues #28/#74), the `users_username_uniq` UNIQUE index (#83), the 0007 RLS policies, and the `roles` / `plan_templates` seed rows. A fresh DB from the documented operator flow failed 22 integration tests.
+- **Fix**: `schema.sql` is now GENERATED — a `pg_dump --schema-only --no-owner --no-privileges` of a migrations-only build (0001→0025), plus a re-appended SEED DATA block mirroring migrations 0001 (`roles`) and 0010 (`plan_templates`) that `--schema-only` drops. Header declares the file generated, points at the regeneration recipe, and says DO NOT hand-edit. `migrations/` stays the single source of truth for DDL.
+- **Drift guard**: new `tests/test_schema_drift_issue105.py` (5 offline tests) — generated-header presence, the exact objects from the drift report, seed rows vs migration 0010, CREATE TABLE set vs migrations, RLS-policy set vs migrations. A future migration without regenerating `schema.sql` fails CI offline.
+- **Acceptance**: fresh DB built from the regenerated `schema.sql` + pre-marked `schema_migrations` passes the full integration suite (66 tests, verified on Postgres 16).
 
 ## 0.2.41
 

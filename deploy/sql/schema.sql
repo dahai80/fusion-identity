@@ -1,347 +1,1776 @@
 -- fusion_identity schema — tenant-identity service (multi-tenant-prd-0901 Appendix A.1)
--- Verbatim from PRD §A.1, extended per multi-tenant-0902.md §5. Independent of cowork RLS business DB.
--- Issue #26 (DB-2): fusion_identity is the single canonical database. The
--- legacy fusion_tenant name is retired; the CREATE is guarded so re-running
--- against an existing install does not fail.
+-- Issue #26 (DB-2): fusion_identity is the single canonical database. The legacy
+-- fusion_tenant name is retired; the CREATE is guarded so re-running against an
+-- existing install does not fail.
+--
+-- Issue #105: this file is GENERATED from migrations/0001..0025 (pg_dump of a
+-- migrations-only build) — DO NOT hand-edit. migrations/ is the single source
+-- of truth for DDL; regenerate after adding a migration:
+--   fresh PG -> run_migrations() -> pg_dump -s --no-owner --no-privileges
+-- then re-append the SEED DATA block at the end (pg_dump --schema-only skips
+-- data; roles + plan_templates seeds are mirrored from migrations 0001/0010).
+-- Verified: a fresh DB built from this file + pre-marked schema_migrations
+-- passes the full integration suite (tests/ -m integration).
 SELECT 'CREATE DATABASE fusion_identity'
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'fusion_identity')\gexec
 
 \c fusion_identity
 
--- tenants
-CREATE TABLE tenants (
-    tenant_id    TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'active',
-    plan         TEXT NOT NULL DEFAULT 'team',
-    join_policy  TEXT NOT NULL DEFAULT 'invite',  -- issue #40: invite|proof|approval|open
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    disabled_at  TIMESTAMPTZ,
-    deleted_at   TIMESTAMPTZ,
-    CONSTRAINT tenants_status_chk CHECK (status IN ('active','disabled','deleted'))
-);
-CREATE INDEX tenants_status_idx ON tenants(status) WHERE status <> 'deleted';
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
 
--- users (platform-level, may belong to multiple tenants)
--- password_hash = legacy scrypt fixed-salt (migration), password_hash_v = argon2id per-user salt
-CREATE TABLE users (
-    user_id              TEXT PRIMARY KEY,
-    username             TEXT NOT NULL UNIQUE,
-    email                TEXT UNIQUE,
-    display_name         TEXT,
-    password_hash        TEXT NOT NULL DEFAULT '',
-    password_hash_v      TEXT NOT NULL DEFAULT '',
-    salt                 TEXT NOT NULL DEFAULT '',
-    password_algo        TEXT NOT NULL DEFAULT 'scrypt',
-    status               TEXT NOT NULL DEFAULT 'active',
-    failed_attempts      SMALLINT NOT NULL DEFAULT 0,
-    locked_until         TIMESTAMPTZ,
-    must_change_password BOOLEAN NOT NULL DEFAULT FALSE,
-    last_login_at        TIMESTAMPTZ,
-    -- Issue #39: email verification (public registration). Default TRUE so
-    -- users created through privileged paths are never blocked; public signups
-    -- set it explicitly. Verify token stored hashed, single use, expiring.
-    email_verified       BOOLEAN NOT NULL DEFAULT TRUE,
-    email_verify_token_hash TEXT,
-    email_verify_expires TIMESTAMPTZ,
-    -- Issue #54: password recovery. Reset token stored hashed (sha256),
-    -- single use, expiring; successful reset clears both columns.
-    password_reset_token_hash TEXT,
-    password_reset_expires TIMESTAMPTZ,
-    -- Issue #99/#101 (flywheel Loop A): per-user data-reflow opt-out.
-    -- TRUE = desensitized reflow allowed; FALSE = counters only.
-    data_reflow_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT users_algo_chk  CHECK (password_algo IN ('argon2id','scrypt','legacy')),
-    CONSTRAINT users_status_chk CHECK (status IN ('active','disabled','locked'))
-);
-CREATE INDEX users_username_idx ON users(username);
+--
+-- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
+--
 
--- tenant_members (user <-> tenant <-> role)
-CREATE TABLE tenant_members (
-    tenant_id  TEXT NOT NULL REFERENCES tenants(tenant_id),
-    user_id    TEXT NOT NULL REFERENCES users(user_id),
-    role       TEXT NOT NULL,
-    added_by   TEXT REFERENCES users(user_id),
-    added_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    joined_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, user_id)
-);
-CREATE INDEX tenant_members_user_idx ON tenant_members(user_id);
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
--- api_keys (gateway maps tenant_id, §7.1)
-CREATE TABLE api_keys (
-    key_id      TEXT PRIMARY KEY,
-    tenant_id   TEXT NOT NULL REFERENCES tenants(tenant_id),
-    user_id     TEXT REFERENCES users(user_id),
-    key_hash    TEXT NOT NULL,
-    prefix      TEXT NOT NULL,
-    scopes      JSONB NOT NULL DEFAULT '[]',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    revoked_at  TIMESTAMPTZ
-);
-CREATE INDEX api_keys_tenant_idx ON api_keys(tenant_id);
-CREATE INDEX api_keys_hash_idx ON api_keys(key_hash);
 
--- roles (v1 fixed four roles, stored for audit/extensibility)
-CREATE TABLE roles (
-    role         TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    permissions  JSONB NOT NULL
+--
+-- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: -
+--
+
+COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: account_deletions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.account_deletions (
+    user_id text NOT NULL,
+    requested_at timestamp with time zone DEFAULT now() NOT NULL,
+    purge_at timestamp with time zone NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL
 );
 
--- quotas (§10.1)
-CREATE TABLE quotas (
-    tenant_id       TEXT PRIMARY KEY REFERENCES tenants(tenant_id),
-    rpm             INT NOT NULL DEFAULT 60,
-    tpm             INT NOT NULL DEFAULT 100000,
-    concurrent      INT NOT NULL DEFAULT 4,
-    storage_mb      INT NOT NULL DEFAULT 10240,
-    allowed_models  JSONB NOT NULL DEFAULT '[]',
-    allowed_modules JSONB NOT NULL DEFAULT '[]',
-    default_priority INT NOT NULL DEFAULT 0,
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+
+--
+-- Name: api_keys; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.api_keys (
+    key_id text NOT NULL,
+    tenant_id text NOT NULL,
+    user_id text,
+    key_hash text NOT NULL,
+    prefix text NOT NULL,
+    scopes jsonb DEFAULT '[]'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    revoked_at timestamp with time zone
 );
 
--- usage_ledger (§10.3, hourly bucket)
-CREATE TABLE usage_ledger (
-    id          BIGSERIAL PRIMARY KEY,
-    tenant_id   TEXT NOT NULL REFERENCES tenants(tenant_id),
-    bucket_hour TIMESTAMPTZ NOT NULL DEFAULT date_trunc('hour', now()),
-    metric      TEXT NOT NULL,
-    value       BIGINT NOT NULL,
-    source      TEXT NOT NULL DEFAULT '',
-    model       TEXT,
-    user_id     TEXT,
-    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (tenant_id, bucket_hour, metric, source)
-);
-CREATE INDEX usage_ledger_tenant_ts_idx ON usage_ledger(tenant_id, bucket_hour);
+ALTER TABLE ONLY public.api_keys FORCE ROW LEVEL SECURITY;
 
--- tenant_usage_daily (dashboard rollup, §4.11)
-CREATE TABLE tenant_usage_daily (
-    tenant_id  TEXT NOT NULL REFERENCES tenants(tenant_id),
-    bucket_day DATE NOT NULL,
-    metric     TEXT NOT NULL,
-    source     TEXT NOT NULL DEFAULT '',
-    value      BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (tenant_id, bucket_day, metric, source)
+
+--
+-- Name: app_credentials; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.app_credentials (
+    app_id text NOT NULL,
+    name text NOT NULL,
+    secret_enc text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    fetch_count bigint DEFAULT 0 NOT NULL,
+    last_fetched_at timestamp with time zone
 );
 
--- refresh_tokens (§4.6, rotation + family reuse detection)
-CREATE TABLE refresh_tokens (
-    jti         TEXT PRIMARY KEY,
-    family_id   TEXT NOT NULL,
-    tenant_id   TEXT NOT NULL REFERENCES tenants(tenant_id),
-    user_id     TEXT NOT NULL REFERENCES users(user_id),
-    status      TEXT NOT NULL DEFAULT 'active',
-    issued_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at  TIMESTAMPTZ NOT NULL,
-    replaced_by TEXT REFERENCES refresh_tokens(jti),
-    CONSTRAINT rt_status_chk CHECK (status IN ('active','rotated','revoked'))
-);
-CREATE INDEX rt_family_idx      ON refresh_tokens(family_id);
-CREATE INDEX rt_tenant_user_idx ON refresh_tokens(tenant_id, user_id);
-CREATE INDEX rt_expires_idx     ON refresh_tokens(expires_at) WHERE status <> 'revoked';
 
--- revoked_jtis (§5.5, jti persistence survives restart)
--- user_id is a PRINCIPAL label, not a users FK — synthetic session subs
--- (issue #9) have no users row (0015 dropped the FK that 500'd revocation).
-CREATE TABLE revoked_jtis (
-    jti        TEXT PRIMARY KEY,
-    tenant_id  TEXT NOT NULL REFERENCES tenants(tenant_id),
-    user_id    TEXT,
-    revoked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    reason     TEXT,
-    expires_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX rj_expires_idx ON revoked_jtis(expires_at);
+--
+-- Name: app_secrets; Type: TABLE; Schema: public; Owner: -
+--
 
--- issued_jtis (F4: /revoke ownership check) — records the tenant/user each
--- access-token jti was issued to, so revocation can bind a jti to its tenant
--- before revoking. Rows expire with the access-token TTL and are swept.
--- user_id is a PRINCIPAL label, not a users FK: session tokens (issue #9) use
--- synthetic subs with no users row (0014 dropped the FK that 500'd them).
-CREATE TABLE issued_jtis (
-    jti        TEXT PRIMARY KEY,
-    tenant_id  TEXT NOT NULL REFERENCES tenants(tenant_id),
-    user_id    TEXT NOT NULL,
-    issued_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX ij_expires_idx ON issued_jtis(expires_at);
-
--- audit_log (§11.4, 7d hot + archive) — full-field chain hash + global seq
-CREATE TABLE audit_log (
-    id         BIGSERIAL PRIMARY KEY,
-    seq        BIGINT NOT NULL UNIQUE,
-    tenant_id  TEXT NOT NULL,
-    user_id    TEXT,
-    jti        TEXT,
-    role       TEXT,
-    action     TEXT NOT NULL,
-    resource   TEXT,
-    detail     JSONB,
-    chain_hash TEXT NOT NULL,
-    prev_hash  TEXT NOT NULL DEFAULT '',
-    ts         TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX audit_log_tenant_ts_idx ON audit_log(tenant_id, ts DESC);
-CREATE INDEX audit_log_seq_idx       ON audit_log(seq);
--- 0011: business-app audit events (issue #18) — detail JSONB filter support
-CREATE INDEX audit_log_detail_gin    ON audit_log USING GIN (detail jsonb_path_ops);
-
--- migration_orphans (§9.3, fail-visible)
-CREATE TABLE migration_orphans (
-    id           BIGSERIAL PRIMARY KEY,
-    source_table TEXT NOT NULL,
-    source_pk    TEXT NOT NULL,
-    reason       TEXT NOT NULL,
-    detected_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE public.app_secrets (
+    secret_id text NOT NULL,
+    app_id text NOT NULL,
+    version integer NOT NULL,
+    secret_hash text NOT NULL,
+    prefix text NOT NULL,
+    status text NOT NULL,
+    grace_until timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
--- seed: four roles
-INSERT INTO roles VALUES
- ('tenant_admin','Tenant Admin','{"tenants":["read","write"],"users":["read","write"],"quotas":["read","write"],"audit":["read"]}'::jsonb),
- ('operator','Operator','{"models":["read","infer"],"tasks":["read","write"]}'::jsonb),
- ('member','Member','{"models":["infer"],"tasks":["write"]}'::jsonb),
- ('viewer','Viewer','{"models":["read"],"tasks":["read"]}'::jsonb);
 
--- identity_providers (§5.9, G20 OIDC/SCIM federation)
-CREATE TABLE identity_providers (
-    idp_id            TEXT        PRIMARY KEY,
-    tenant_id         TEXT        NOT NULL REFERENCES tenants(tenant_id),
-    type              TEXT        NOT NULL,
-    issuer_url        TEXT,
-    client_id         TEXT,
-    client_secret_enc TEXT,
-    scopes            TEXT,
-    auto_provision    BOOLEAN     NOT NULL DEFAULT FALSE,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX identity_providers_tenant_idx ON identity_providers(tenant_id);
+--
+-- Name: audit_seq_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
 
--- user_mfa (§5.10, G21 TOTP)
-CREATE TABLE user_mfa (
-    user_id     TEXT        NOT NULL REFERENCES users(user_id),
-    method      TEXT        NOT NULL,
-    secret_enc  TEXT        NOT NULL,
-    enrolled_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    enabled     BOOLEAN     NOT NULL DEFAULT TRUE,
-    PRIMARY KEY (user_id, method)
-);
+CREATE SEQUENCE public.audit_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
 
--- lease_log (§5.2, N2 concurrency audit — Redis authoritative, this is ledger)
-CREATE TABLE lease_log (
-    id         BIGSERIAL PRIMARY KEY,
-    tenant_id  TEXT        NOT NULL,
-    lease_id   TEXT        NOT NULL,
-    action     TEXT        NOT NULL,
-    reason     TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT lease_action_chk CHECK (action IN ('acquire','release','expire'))
-);
-CREATE INDEX lease_log_tenant_idx ON lease_log(tenant_id, created_at DESC);
-CREATE INDEX lease_log_lease_idx  ON lease_log(lease_id);
 
--- departments (issue #10 — enterprise admin contract: department permission profiles)
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE TABLE departments (
-    dept_id        UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id      TEXT        NOT NULL REFERENCES tenants(tenant_id),
-    name           TEXT        NOT NULL,
-    parent_id      UUID        REFERENCES departments(dept_id),
-    tool_allowlist JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX departments_tenant_idx ON departments(tenant_id);
-ALTER TABLE departments ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON departments
-USING (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system')
-WITH CHECK (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system');
--- Issue #12 (Migration E5): RBAC contract generalization — per-tenant custom
--- roles with write classes + runtime-editable role <-> menu permission matrix.
-CREATE TABLE custom_roles (
-    role_id       TEXT        NOT NULL,
-    tenant_id     TEXT        NOT NULL REFERENCES tenants(tenant_id),
-    display_name  TEXT        NOT NULL,
-    write_classes JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, role_id)
+--
+-- Name: audit_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.audit_log (
+    id bigint NOT NULL,
+    seq bigint DEFAULT nextval('public.audit_seq_seq'::regclass) NOT NULL,
+    tenant_id text NOT NULL,
+    user_id text,
+    jti text,
+    role text,
+    action text NOT NULL,
+    resource text,
+    detail jsonb,
+    chain_hash text NOT NULL,
+    prev_hash text DEFAULT ''::text NOT NULL,
+    ts timestamp with time zone DEFAULT now() NOT NULL
 );
 
-CREATE TABLE role_menu_matrix (
-    tenant_id  TEXT        NOT NULL REFERENCES tenants(tenant_id),
-    role_id    TEXT        NOT NULL,
-    menus      JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, role_id)
+ALTER TABLE ONLY public.audit_log FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: audit_log_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.audit_log_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: audit_log_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.audit_log_id_seq OWNED BY public.audit_log.id;
+
+
+--
+-- Name: balance_ledger; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.balance_ledger (
+    id bigint NOT NULL,
+    tenant_id text NOT NULL,
+    delta bigint NOT NULL,
+    reason text NOT NULL,
+    ref_id text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-CREATE TABLE known_menus (
-    tenant_id  TEXT        NOT NULL REFERENCES tenants(tenant_id),
-    menu       TEXT        NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, menu)
+
+--
+-- Name: balance_ledger_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.balance_ledger_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: balance_ledger_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.balance_ledger_id_seq OWNED BY public.balance_ledger.id;
+
+
+--
+-- Name: custom_roles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.custom_roles (
+    role_id text NOT NULL,
+    tenant_id text NOT NULL,
+    display_name text NOT NULL,
+    write_classes jsonb DEFAULT '[]'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-ALTER TABLE custom_roles ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON custom_roles
-USING (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system')
-WITH CHECK (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system');
 
-ALTER TABLE role_menu_matrix ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON role_menu_matrix
-USING (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system')
-WITH CHECK (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system');
+--
+-- Name: departments; Type: TABLE; Schema: public; Owner: -
+--
 
-ALTER TABLE known_menus ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON known_menus
-USING (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system')
-WITH CHECK (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system');
--- Issue #14: tenant provisioning automation — plan quota templates (M-C),
--- provisioning idempotency keys (M-A), lifecycle event outbox (M-B).
--- `tpm` is the DAILY token limit (legacy field name, kept for compatibility).
-
-CREATE TABLE plan_templates (
-    plan       TEXT        NOT NULL PRIMARY KEY,
-    quota      JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE public.departments (
+    dept_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id text NOT NULL,
+    name text NOT NULL,
+    parent_id uuid,
+    tool_allowlist jsonb DEFAULT '[]'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-CREATE TABLE idempotency_keys (
-    idem_key   TEXT        NOT NULL PRIMARY KEY,
-    endpoint   TEXT        NOT NULL,
-    response   JSONB       NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+
+--
+-- Name: event_outbox; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.event_outbox (
+    event_id text NOT NULL,
+    seq bigint NOT NULL,
+    event_type text NOT NULL,
+    tenant_id text NOT NULL,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
-CREATE TABLE event_outbox (
-    event_id   TEXT        NOT NULL PRIMARY KEY,
-    seq        BIGSERIAL   NOT NULL UNIQUE,
-    event_type TEXT        NOT NULL,
-    tenant_id  TEXT        NOT NULL REFERENCES tenants(tenant_id),
-    payload    JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    status     TEXT        NOT NULL DEFAULT 'pending',
-    attempts   INT         NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_event_outbox_status_seq ON event_outbox(status, seq);
 
--- Seed the built-in plan templates so PgStore sees the same defaults as
--- InMemoryStore's PLAN_TEMPLATES.
-INSERT INTO plan_templates(plan, quota) VALUES
+--
+-- Name: event_outbox_seq_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.event_outbox_seq_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: event_outbox_seq_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.event_outbox_seq_seq OWNED BY public.event_outbox.seq;
+
+
+--
+-- Name: idempotency_keys; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.idempotency_keys (
+    idem_key text NOT NULL,
+    endpoint text NOT NULL,
+    response jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: identity_providers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.identity_providers (
+    idp_id text NOT NULL,
+    tenant_id text NOT NULL,
+    type text NOT NULL,
+    issuer_url text,
+    client_id text,
+    client_secret_enc text,
+    scopes text,
+    auto_provision boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.identity_providers FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: issued_jtis; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.issued_jtis (
+    jti text NOT NULL,
+    tenant_id text NOT NULL,
+    user_id text NOT NULL,
+    issued_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.issued_jtis FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: join_requests; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.join_requests (
+    request_id text NOT NULL,
+    tenant_id text NOT NULL,
+    user_id text NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    decided_by text,
+    decided_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT join_requests_status_chk CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'cancelled'::text])))
+);
+
+
+--
+-- Name: known_menus; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.known_menus (
+    tenant_id text NOT NULL,
+    menu text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: lease_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.lease_log (
+    id bigint NOT NULL,
+    tenant_id text NOT NULL,
+    lease_id text NOT NULL,
+    action text NOT NULL,
+    reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT lease_action_chk CHECK ((action = ANY (ARRAY['acquire'::text, 'release'::text, 'expire'::text])))
+);
+
+ALTER TABLE ONLY public.lease_log FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: lease_log_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.lease_log_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: lease_log_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.lease_log_id_seq OWNED BY public.lease_log.id;
+
+
+--
+-- Name: migration_orphans; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.migration_orphans (
+    id bigint NOT NULL,
+    source_table text NOT NULL,
+    source_pk text NOT NULL,
+    reason text NOT NULL,
+    detected_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: migration_orphans_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.migration_orphans_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: migration_orphans_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.migration_orphans_id_seq OWNED BY public.migration_orphans.id;
+
+
+--
+-- Name: plan_templates; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.plan_templates (
+    plan text NOT NULL,
+    quota jsonb DEFAULT '{}'::jsonb NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: prepaid_orders; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.prepaid_orders (
+    order_id text NOT NULL,
+    tenant_id text NOT NULL,
+    tokens bigint NOT NULL,
+    promo_tokens bigint DEFAULT 0 NOT NULL,
+    status text DEFAULT 'created'::text NOT NULL,
+    provider text NOT NULL,
+    provider_ref text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    paid_at timestamp with time zone,
+    CONSTRAINT prepaid_orders_promo_tokens_check CHECK ((promo_tokens >= 0)),
+    CONSTRAINT prepaid_orders_status_check CHECK ((status = ANY (ARRAY['created'::text, 'paid'::text, 'cancelled'::text]))),
+    CONSTRAINT prepaid_orders_tokens_check CHECK ((tokens > 0))
+);
+
+
+--
+-- Name: quotas; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.quotas (
+    tenant_id text NOT NULL,
+    rpm integer DEFAULT 60 NOT NULL,
+    tpm integer DEFAULT 100000 NOT NULL,
+    concurrent integer DEFAULT 4 NOT NULL,
+    storage_mb integer DEFAULT 10240 NOT NULL,
+    allowed_models jsonb DEFAULT '[]'::jsonb NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    default_priority integer DEFAULT 0 NOT NULL,
+    allowed_modules jsonb DEFAULT '[]'::jsonb NOT NULL
+);
+
+ALTER TABLE ONLY public.quotas FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: refresh_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.refresh_tokens (
+    jti text NOT NULL,
+    family_id text NOT NULL,
+    tenant_id text NOT NULL,
+    user_id text NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    issued_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    replaced_by text,
+    CONSTRAINT rt_status_chk CHECK ((status = ANY (ARRAY['active'::text, 'rotated'::text, 'revoked'::text])))
+);
+
+ALTER TABLE ONLY public.refresh_tokens FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: revoked_jtis; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.revoked_jtis (
+    jti text NOT NULL,
+    tenant_id text NOT NULL,
+    user_id text,
+    revoked_at timestamp with time zone DEFAULT now() NOT NULL,
+    reason text,
+    expires_at timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY public.revoked_jtis FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: role_menu_matrix; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.role_menu_matrix (
+    tenant_id text NOT NULL,
+    role_id text NOT NULL,
+    menus jsonb DEFAULT '[]'::jsonb NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: roles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.roles (
+    role text NOT NULL,
+    display_name text NOT NULL,
+    permissions jsonb NOT NULL
+);
+
+
+--
+-- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.schema_migrations (
+    version text NOT NULL,
+    name text NOT NULL,
+    applied_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: service_accounts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.service_accounts (
+    account_id text NOT NULL,
+    tenant_id text NOT NULL,
+    name text NOT NULL,
+    scopes jsonb DEFAULT '[]'::jsonb NOT NULL,
+    cred_hash text NOT NULL,
+    prefix text NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    created_by text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    revoked_at timestamp with time zone,
+    last_used_at timestamp with time zone,
+    CONSTRAINT service_accounts_status_check CHECK ((status = ANY (ARRAY['active'::text, 'revoked'::text])))
+);
+
+
+--
+-- Name: sso_tickets; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.sso_tickets (
+    ticket_hash text NOT NULL,
+    user_id text NOT NULL,
+    tenant_id text NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    used_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: tenant_invites; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tenant_invites (
+    invite_id text NOT NULL,
+    tenant_id text NOT NULL,
+    token_hash text NOT NULL,
+    role text DEFAULT 'member'::text NOT NULL,
+    email text,
+    created_by text,
+    expires_at timestamp with time zone NOT NULL,
+    used_at timestamp with time zone,
+    used_by text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: tenant_members; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tenant_members (
+    tenant_id text NOT NULL,
+    user_id text NOT NULL,
+    role text NOT NULL,
+    added_by text,
+    added_at timestamp with time zone DEFAULT now() NOT NULL,
+    joined_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.tenant_members FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: tenant_usage_daily; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tenant_usage_daily (
+    tenant_id text NOT NULL,
+    bucket_day date NOT NULL,
+    metric text NOT NULL,
+    source text DEFAULT ''::text NOT NULL,
+    value bigint DEFAULT 0 NOT NULL
+);
+
+ALTER TABLE ONLY public.tenant_usage_daily FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: tenants; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.tenants (
+    tenant_id text NOT NULL,
+    display_name text NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    plan text DEFAULT 'team'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    disabled_at timestamp with time zone,
+    deleted_at timestamp with time zone,
+    join_policy text DEFAULT 'invite'::text NOT NULL,
+    CONSTRAINT tenants_status_chk CHECK ((status = ANY (ARRAY['active'::text, 'disabled'::text, 'deleted'::text])))
+);
+
+ALTER TABLE ONLY public.tenants FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: usage_ledger; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.usage_ledger (
+    id bigint NOT NULL,
+    tenant_id text NOT NULL,
+    bucket_hour timestamp with time zone DEFAULT date_trunc('hour'::text, now()) NOT NULL,
+    metric text NOT NULL,
+    value bigint NOT NULL,
+    source text DEFAULT ''::text NOT NULL,
+    model text,
+    user_id text,
+    ts timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.usage_ledger FORCE ROW LEVEL SECURITY;
+
+
+--
+-- Name: usage_ledger_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.usage_ledger_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: usage_ledger_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.usage_ledger_id_seq OWNED BY public.usage_ledger.id;
+
+
+--
+-- Name: user_mfa; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_mfa (
+    user_id text NOT NULL,
+    method text NOT NULL,
+    secret_enc text NOT NULL,
+    enrolled_at timestamp with time zone DEFAULT now() NOT NULL,
+    enabled boolean DEFAULT true NOT NULL
+);
+
+
+--
+-- Name: users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.users (
+    user_id text NOT NULL,
+    username text NOT NULL,
+    email text,
+    password_hash text DEFAULT ''::text NOT NULL,
+    password_hash_v text DEFAULT ''::text NOT NULL,
+    salt text DEFAULT ''::text NOT NULL,
+    password_algo text DEFAULT 'scrypt'::text NOT NULL,
+    status text DEFAULT 'active'::text NOT NULL,
+    failed_attempts smallint DEFAULT 0 NOT NULL,
+    locked_until timestamp with time zone,
+    must_change_password boolean DEFAULT false NOT NULL,
+    last_login_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    display_name text,
+    email_verified boolean DEFAULT true NOT NULL,
+    email_verify_token_hash text,
+    email_verify_expires timestamp with time zone,
+    password_reset_token_hash text,
+    password_reset_expires timestamp with time zone,
+    data_reflow_enabled boolean DEFAULT true NOT NULL,
+    CONSTRAINT users_algo_chk CHECK ((password_algo = ANY (ARRAY['argon2id'::text, 'scrypt'::text, 'legacy'::text]))),
+    CONSTRAINT users_status_chk CHECK ((status = ANY (ARRAY['active'::text, 'disabled'::text, 'locked'::text])))
+);
+
+
+--
+-- Name: audit_log id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_log ALTER COLUMN id SET DEFAULT nextval('public.audit_log_id_seq'::regclass);
+
+
+--
+-- Name: balance_ledger id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.balance_ledger ALTER COLUMN id SET DEFAULT nextval('public.balance_ledger_id_seq'::regclass);
+
+
+--
+-- Name: event_outbox seq; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_outbox ALTER COLUMN seq SET DEFAULT nextval('public.event_outbox_seq_seq'::regclass);
+
+
+--
+-- Name: lease_log id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.lease_log ALTER COLUMN id SET DEFAULT nextval('public.lease_log_id_seq'::regclass);
+
+
+--
+-- Name: migration_orphans id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.migration_orphans ALTER COLUMN id SET DEFAULT nextval('public.migration_orphans_id_seq'::regclass);
+
+
+--
+-- Name: usage_ledger id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usage_ledger ALTER COLUMN id SET DEFAULT nextval('public.usage_ledger_id_seq'::regclass);
+
+
+--
+-- Name: account_deletions account_deletions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.account_deletions
+    ADD CONSTRAINT account_deletions_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: api_keys api_keys_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.api_keys
+    ADD CONSTRAINT api_keys_pkey PRIMARY KEY (key_id);
+
+
+--
+-- Name: app_credentials app_credentials_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.app_credentials
+    ADD CONSTRAINT app_credentials_pkey PRIMARY KEY (app_id, name);
+
+
+--
+-- Name: app_secrets app_secrets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.app_secrets
+    ADD CONSTRAINT app_secrets_pkey PRIMARY KEY (secret_id);
+
+
+--
+-- Name: audit_log audit_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_log
+    ADD CONSTRAINT audit_log_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: audit_log audit_log_seq_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.audit_log
+    ADD CONSTRAINT audit_log_seq_key UNIQUE (seq);
+
+
+--
+-- Name: balance_ledger balance_ledger_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.balance_ledger
+    ADD CONSTRAINT balance_ledger_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: custom_roles custom_roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.custom_roles
+    ADD CONSTRAINT custom_roles_pkey PRIMARY KEY (tenant_id, role_id);
+
+
+--
+-- Name: departments departments_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.departments
+    ADD CONSTRAINT departments_pkey PRIMARY KEY (dept_id);
+
+
+--
+-- Name: event_outbox event_outbox_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_outbox
+    ADD CONSTRAINT event_outbox_pkey PRIMARY KEY (event_id);
+
+
+--
+-- Name: event_outbox event_outbox_seq_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_outbox
+    ADD CONSTRAINT event_outbox_seq_key UNIQUE (seq);
+
+
+--
+-- Name: idempotency_keys idempotency_keys_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.idempotency_keys
+    ADD CONSTRAINT idempotency_keys_pkey PRIMARY KEY (idem_key);
+
+
+--
+-- Name: identity_providers identity_providers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identity_providers
+    ADD CONSTRAINT identity_providers_pkey PRIMARY KEY (idp_id);
+
+
+--
+-- Name: issued_jtis issued_jtis_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.issued_jtis
+    ADD CONSTRAINT issued_jtis_pkey PRIMARY KEY (jti);
+
+
+--
+-- Name: join_requests join_requests_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.join_requests
+    ADD CONSTRAINT join_requests_pkey PRIMARY KEY (request_id);
+
+
+--
+-- Name: join_requests join_requests_unique_pending; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.join_requests
+    ADD CONSTRAINT join_requests_unique_pending UNIQUE (tenant_id, user_id, status);
+
+
+--
+-- Name: known_menus known_menus_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.known_menus
+    ADD CONSTRAINT known_menus_pkey PRIMARY KEY (tenant_id, menu);
+
+
+--
+-- Name: lease_log lease_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.lease_log
+    ADD CONSTRAINT lease_log_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: migration_orphans migration_orphans_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.migration_orphans
+    ADD CONSTRAINT migration_orphans_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: plan_templates plan_templates_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.plan_templates
+    ADD CONSTRAINT plan_templates_pkey PRIMARY KEY (plan);
+
+
+--
+-- Name: prepaid_orders prepaid_orders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prepaid_orders
+    ADD CONSTRAINT prepaid_orders_pkey PRIMARY KEY (order_id);
+
+
+--
+-- Name: quotas quotas_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.quotas
+    ADD CONSTRAINT quotas_pkey PRIMARY KEY (tenant_id);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_pkey PRIMARY KEY (jti);
+
+
+--
+-- Name: revoked_jtis revoked_jtis_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.revoked_jtis
+    ADD CONSTRAINT revoked_jtis_pkey PRIMARY KEY (jti);
+
+
+--
+-- Name: role_menu_matrix role_menu_matrix_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_menu_matrix
+    ADD CONSTRAINT role_menu_matrix_pkey PRIMARY KEY (tenant_id, role_id);
+
+
+--
+-- Name: roles roles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_pkey PRIMARY KEY (role);
+
+
+--
+-- Name: schema_migrations schema_migrations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.schema_migrations
+    ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
+
+
+--
+-- Name: service_accounts service_accounts_cred_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.service_accounts
+    ADD CONSTRAINT service_accounts_cred_hash_key UNIQUE (cred_hash);
+
+
+--
+-- Name: service_accounts service_accounts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.service_accounts
+    ADD CONSTRAINT service_accounts_pkey PRIMARY KEY (account_id);
+
+
+--
+-- Name: sso_tickets sso_tickets_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sso_tickets
+    ADD CONSTRAINT sso_tickets_pkey PRIMARY KEY (ticket_hash);
+
+
+--
+-- Name: tenant_invites tenant_invites_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_invites
+    ADD CONSTRAINT tenant_invites_pkey PRIMARY KEY (invite_id);
+
+
+--
+-- Name: tenant_invites tenant_invites_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_invites
+    ADD CONSTRAINT tenant_invites_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: tenant_members tenant_members_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_members
+    ADD CONSTRAINT tenant_members_pkey PRIMARY KEY (tenant_id, user_id);
+
+
+--
+-- Name: tenant_usage_daily tenant_usage_daily_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_usage_daily
+    ADD CONSTRAINT tenant_usage_daily_pkey PRIMARY KEY (tenant_id, bucket_day, metric, source);
+
+
+--
+-- Name: tenants tenants_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenants
+    ADD CONSTRAINT tenants_pkey PRIMARY KEY (tenant_id);
+
+
+--
+-- Name: usage_ledger usage_ledger_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usage_ledger
+    ADD CONSTRAINT usage_ledger_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: usage_ledger usage_ledger_tenant_id_bucket_hour_metric_source_model_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usage_ledger
+    ADD CONSTRAINT usage_ledger_tenant_id_bucket_hour_metric_source_model_key UNIQUE (tenant_id, bucket_hour, metric, source, model);
+
+
+--
+-- Name: user_mfa user_mfa_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_mfa
+    ADD CONSTRAINT user_mfa_pkey PRIMARY KEY (user_id, method);
+
+
+--
+-- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_email_key UNIQUE (email);
+
+
+--
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: account_deletions_purge_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX account_deletions_purge_idx ON public.account_deletions USING btree (purge_at) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: api_keys_hash_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX api_keys_hash_idx ON public.api_keys USING btree (key_hash);
+
+
+--
+-- Name: api_keys_tenant_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX api_keys_tenant_idx ON public.api_keys USING btree (tenant_id);
+
+
+--
+-- Name: audit_log_detail_gin; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX audit_log_detail_gin ON public.audit_log USING gin (detail jsonb_path_ops);
+
+
+--
+-- Name: audit_log_seq_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX audit_log_seq_idx ON public.audit_log USING btree (seq);
+
+
+--
+-- Name: audit_log_tenant_ts_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX audit_log_tenant_ts_idx ON public.audit_log USING btree (tenant_id, ts DESC);
+
+
+--
+-- Name: departments_tenant_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX departments_tenant_idx ON public.departments USING btree (tenant_id);
+
+
+--
+-- Name: identity_providers_tenant_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX identity_providers_tenant_idx ON public.identity_providers USING btree (tenant_id);
+
+
+--
+-- Name: idx_balance_ledger_tenant; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_balance_ledger_tenant ON public.balance_ledger USING btree (tenant_id, id);
+
+
+--
+-- Name: idx_event_outbox_status_seq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_event_outbox_status_seq ON public.event_outbox USING btree (status, seq);
+
+
+--
+-- Name: idx_prepaid_orders_tenant; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_prepaid_orders_tenant ON public.prepaid_orders USING btree (tenant_id, created_at);
+
+
+--
+-- Name: idx_service_accounts_tenant; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_service_accounts_tenant ON public.service_accounts USING btree (tenant_id, created_at);
+
+
+--
+-- Name: ij_expires_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ij_expires_idx ON public.issued_jtis USING btree (expires_at);
+
+
+--
+-- Name: ix_app_credentials_app; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_app_credentials_app ON public.app_credentials USING btree (app_id);
+
+
+--
+-- Name: ix_app_secrets_app; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_app_secrets_app ON public.app_secrets USING btree (app_id);
+
+
+--
+-- Name: join_requests_tenant_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX join_requests_tenant_idx ON public.join_requests USING btree (tenant_id);
+
+
+--
+-- Name: lease_log_lease_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX lease_log_lease_idx ON public.lease_log USING btree (lease_id);
+
+
+--
+-- Name: lease_log_tenant_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX lease_log_tenant_idx ON public.lease_log USING btree (tenant_id, created_at DESC);
+
+
+--
+-- Name: rj_expires_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX rj_expires_idx ON public.revoked_jtis USING btree (expires_at);
+
+
+--
+-- Name: rt_expires_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX rt_expires_idx ON public.refresh_tokens USING btree (expires_at) WHERE (status <> 'revoked'::text);
+
+
+--
+-- Name: rt_family_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX rt_family_idx ON public.refresh_tokens USING btree (family_id);
+
+
+--
+-- Name: rt_tenant_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX rt_tenant_user_idx ON public.refresh_tokens USING btree (tenant_id, user_id);
+
+
+--
+-- Name: sso_tickets_tenant_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX sso_tickets_tenant_idx ON public.sso_tickets USING btree (tenant_id);
+
+
+--
+-- Name: tenant_invites_tenant_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tenant_invites_tenant_idx ON public.tenant_invites USING btree (tenant_id);
+
+
+--
+-- Name: tenant_members_user_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tenant_members_user_idx ON public.tenant_members USING btree (user_id);
+
+
+--
+-- Name: tenants_status_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX tenants_status_idx ON public.tenants USING btree (status) WHERE (status <> 'deleted'::text);
+
+
+--
+-- Name: uq_app_secrets_app_version; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_app_secrets_app_version ON public.app_secrets USING btree (app_id, version);
+
+
+--
+-- Name: usage_ledger_tenant_ts_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX usage_ledger_tenant_ts_idx ON public.usage_ledger USING btree (tenant_id, bucket_hour);
+
+
+--
+-- Name: users_username_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX users_username_idx ON public.users USING btree (username);
+
+
+--
+-- Name: users_username_uniq; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX users_username_uniq ON public.users USING btree (username);
+
+
+--
+-- Name: account_deletions account_deletions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.account_deletions
+    ADD CONSTRAINT account_deletions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: api_keys api_keys_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.api_keys
+    ADD CONSTRAINT api_keys_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: api_keys api_keys_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.api_keys
+    ADD CONSTRAINT api_keys_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id);
+
+
+--
+-- Name: balance_ledger balance_ledger_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.balance_ledger
+    ADD CONSTRAINT balance_ledger_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id) ON DELETE CASCADE;
+
+
+--
+-- Name: custom_roles custom_roles_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.custom_roles
+    ADD CONSTRAINT custom_roles_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: departments departments_parent_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.departments
+    ADD CONSTRAINT departments_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES public.departments(dept_id);
+
+
+--
+-- Name: departments departments_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.departments
+    ADD CONSTRAINT departments_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: event_outbox event_outbox_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.event_outbox
+    ADD CONSTRAINT event_outbox_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: identity_providers identity_providers_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.identity_providers
+    ADD CONSTRAINT identity_providers_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: issued_jtis issued_jtis_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.issued_jtis
+    ADD CONSTRAINT issued_jtis_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: join_requests join_requests_decided_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.join_requests
+    ADD CONSTRAINT join_requests_decided_by_fkey FOREIGN KEY (decided_by) REFERENCES public.users(user_id);
+
+
+--
+-- Name: join_requests join_requests_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.join_requests
+    ADD CONSTRAINT join_requests_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id) ON DELETE CASCADE;
+
+
+--
+-- Name: join_requests join_requests_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.join_requests
+    ADD CONSTRAINT join_requests_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: known_menus known_menus_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.known_menus
+    ADD CONSTRAINT known_menus_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: prepaid_orders prepaid_orders_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.prepaid_orders
+    ADD CONSTRAINT prepaid_orders_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id) ON DELETE CASCADE;
+
+
+--
+-- Name: quotas quotas_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.quotas
+    ADD CONSTRAINT quotas_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_replaced_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_replaced_by_fkey FOREIGN KEY (replaced_by) REFERENCES public.refresh_tokens(jti);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: refresh_tokens refresh_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.refresh_tokens
+    ADD CONSTRAINT refresh_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id);
+
+
+--
+-- Name: revoked_jtis revoked_jtis_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.revoked_jtis
+    ADD CONSTRAINT revoked_jtis_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: role_menu_matrix role_menu_matrix_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.role_menu_matrix
+    ADD CONSTRAINT role_menu_matrix_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: service_accounts service_accounts_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.service_accounts
+    ADD CONSTRAINT service_accounts_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id) ON DELETE CASCADE;
+
+
+--
+-- Name: sso_tickets sso_tickets_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sso_tickets
+    ADD CONSTRAINT sso_tickets_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id) ON DELETE CASCADE;
+
+
+--
+-- Name: sso_tickets sso_tickets_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.sso_tickets
+    ADD CONSTRAINT sso_tickets_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE;
+
+
+--
+-- Name: tenant_invites tenant_invites_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_invites
+    ADD CONSTRAINT tenant_invites_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(user_id);
+
+
+--
+-- Name: tenant_invites tenant_invites_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_invites
+    ADD CONSTRAINT tenant_invites_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id) ON DELETE CASCADE;
+
+
+--
+-- Name: tenant_invites tenant_invites_used_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_invites
+    ADD CONSTRAINT tenant_invites_used_by_fkey FOREIGN KEY (used_by) REFERENCES public.users(user_id);
+
+
+--
+-- Name: tenant_members tenant_members_added_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_members
+    ADD CONSTRAINT tenant_members_added_by_fkey FOREIGN KEY (added_by) REFERENCES public.users(user_id);
+
+
+--
+-- Name: tenant_members tenant_members_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_members
+    ADD CONSTRAINT tenant_members_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: tenant_members tenant_members_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_members
+    ADD CONSTRAINT tenant_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id);
+
+
+--
+-- Name: tenant_usage_daily tenant_usage_daily_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.tenant_usage_daily
+    ADD CONSTRAINT tenant_usage_daily_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: usage_ledger usage_ledger_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.usage_ledger
+    ADD CONSTRAINT usage_ledger_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: user_mfa user_mfa_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_mfa
+    ADD CONSTRAINT user_mfa_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(user_id);
+
+
+--
+-- Name: api_keys; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.api_keys ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: audit_log; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.audit_log ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: custom_roles; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.custom_roles ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: departments; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.departments ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: event_outbox; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.event_outbox ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: identity_providers; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.identity_providers ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: issued_jtis; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.issued_jtis ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: known_menus; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.known_menus ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: lease_log; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.lease_log ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: quotas; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.quotas ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: refresh_tokens; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.refresh_tokens ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: revoked_jtis; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.revoked_jtis ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: role_menu_matrix; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.role_menu_matrix ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: api_keys tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.api_keys USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: audit_log tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.audit_log USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: custom_roles tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.custom_roles USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: departments tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.departments USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: event_outbox tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.event_outbox USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: identity_providers tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.identity_providers USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: issued_jtis tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.issued_jtis USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: known_menus tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.known_menus USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: lease_log tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.lease_log USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: quotas tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.quotas USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: refresh_tokens tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.refresh_tokens USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: revoked_jtis tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.revoked_jtis USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: role_menu_matrix tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.role_menu_matrix USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: tenant_members tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.tenant_members USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: tenant_usage_daily tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.tenant_usage_daily USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: tenants tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.tenants USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: usage_ledger tenant_isolation; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY tenant_isolation ON public.usage_ledger USING (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text))) WITH CHECK (((tenant_id = current_setting('app.current_tenant'::text)) OR (current_setting('app.current_tenant'::text) = '_system'::text)));
+
+
+--
+-- Name: tenant_members; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.tenant_members ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: tenant_usage_daily; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.tenant_usage_daily ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: tenants; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: usage_ledger; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.usage_ledger ENABLE ROW LEVEL SECURITY;
+
+--
+-- Seed data (not emitted by pg_dump --schema-only; mirrored from
+-- migrations/0001_baseline.sql and migrations/0010_provisioning.sql so a
+-- schema.sql-only install sees the same defaults as a migrations run).
+--
+
+INSERT INTO public.roles (role, display_name, permissions) VALUES
+    ('tenant_admin', 'Tenant Admin', '{"tenants":["read","write"],"users":["read","write"],"quotas":["read","write"],"audit":["read"]}'::jsonb),
+    ('operator', 'Operator', '{"models":["read","infer"],"tasks":["read","write"]}'::jsonb),
+    ('member', 'Member', '{"models":["infer"],"tasks":["write"]}'::jsonb),
+    ('viewer', 'Viewer', '{"models":["read"],"tasks":["read"]}'::jsonb)
+ON CONFLICT (role) DO NOTHING;
+
+INSERT INTO public.plan_templates(plan, quota) VALUES
     ('free',       '{"rpm": 10, "tpm": 20000, "concurrent": 2, "storage_mb": 1024, "allowed_models": [], "allowed_modules": [], "default_priority": 0}'),
     ('starter',    '{"rpm": 30, "tpm": 50000, "concurrent": 3, "storage_mb": 5120, "allowed_models": [], "allowed_modules": [], "default_priority": 0}'),
     ('standard',   '{"rpm": 60, "tpm": 100000, "concurrent": 4, "storage_mb": 10240, "allowed_models": [], "allowed_modules": [], "default_priority": 0}'),
@@ -349,97 +1778,7 @@ INSERT INTO plan_templates(plan, quota) VALUES
     ('enterprise', '{"rpm": 1000, "tpm": 10000000, "concurrent": 64, "storage_mb": 204800, "allowed_models": [], "allowed_modules": [], "default_priority": 2}')
 ON CONFLICT (plan) DO NOTHING;
 
-ALTER TABLE event_outbox ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation ON event_outbox
-USING (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system')
-WITH CHECK (tenant_id = current_setting('app.current_tenant')
-OR current_setting('app.current_tenant') = '_system');
+--
+-- PostgreSQL database dump complete
+--
 
--- plan_templates and idempotency_keys are platform-scope tables (service-token
--- admin plane only, no tenant_id) — same trust level as schema_migrations, no
--- RLS policy. They are only reachable behind require_service_token.
-
--- Issue #28: application secrets for business apps (AGENTS.md convention #1).
--- Identity stores only the sha256 hash; raw material is returned once.
--- Platform-scope table (service-token plane, no tenant_id) — same trust level
--- as plan_templates, no RLS policy.
-CREATE TABLE IF NOT EXISTS app_secrets (
-    secret_id   TEXT PRIMARY KEY,
-    app_id      TEXT NOT NULL,
-    version     INTEGER NOT NULL,
-    secret_hash TEXT NOT NULL,
-    prefix      TEXT NOT NULL,
-    status      TEXT NOT NULL,
-    grace_until TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_app_secrets_app_version
-    ON app_secrets(app_id, version);
-CREATE INDEX IF NOT EXISTS ix_app_secrets_app ON app_secrets(app_id);
-
--- Issue #34: externally-issued SaaS credentials (ai-trysuite §8.2). Values are
--- third-party-issued and must be recoverable by the consumer, so they are
--- AES-256-GCM encrypted under the KEK — not hashed like app_secrets.
--- Platform-scope table (service-token plane, no tenant_id), no RLS policy.
-CREATE TABLE IF NOT EXISTS app_credentials (
-    app_id          TEXT        NOT NULL,
-    name            TEXT        NOT NULL,
-    secret_enc      TEXT        NOT NULL,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    fetch_count     BIGINT      NOT NULL DEFAULT 0,
-    last_fetched_at TIMESTAMPTZ,
-    PRIMARY KEY (app_id, name)
-);
-CREATE INDEX IF NOT EXISTS ix_app_credentials_app ON app_credentials(app_id);
-
--- Issue #40: join-policy plane — invite tokens + join requests (migration 0018)
-CREATE TABLE IF NOT EXISTS tenant_invites (
-    invite_id   TEXT PRIMARY KEY,
-    tenant_id   TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    token_hash  TEXT NOT NULL UNIQUE,
-    role        TEXT NOT NULL DEFAULT 'member',
-    email       TEXT,
-    created_by  TEXT REFERENCES users(user_id),
-    expires_at  TIMESTAMPTZ NOT NULL,
-    used_at     TIMESTAMPTZ,
-    used_by     TEXT REFERENCES users(user_id),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS tenant_invites_tenant_idx ON tenant_invites(tenant_id);
-
-CREATE TABLE IF NOT EXISTS join_requests (
-    request_id   TEXT PRIMARY KEY,
-    tenant_id    TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    user_id      TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    status       TEXT NOT NULL DEFAULT 'pending',
-    decided_by   TEXT REFERENCES users(user_id),
-    decided_at   TIMESTAMPTZ,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT join_requests_status_chk CHECK (status IN ('pending','approved','rejected','cancelled')),
-    CONSTRAINT join_requests_unique_pending UNIQUE (tenant_id, user_id, status)
-);
-CREATE INDEX IF NOT EXISTS join_requests_tenant_idx ON join_requests(tenant_id);
-
--- Issue #48: one-time SSO ticket exchange (migration 0019)
-CREATE TABLE IF NOT EXISTS sso_tickets (
-    ticket_hash TEXT PRIMARY KEY,
-    user_id     TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    tenant_id   TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
-    expires_at  TIMESTAMPTZ NOT NULL,
-    used_at     TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS sso_tickets_tenant_idx ON sso_tickets(tenant_id);
-
--- Issue #91: self-service account deletion grace window (migration 0024)
-CREATE TABLE IF NOT EXISTS account_deletions (
-    user_id      TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
-    requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    purge_at     TIMESTAMPTZ NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'pending'
-);
-
-CREATE INDEX IF NOT EXISTS account_deletions_purge_idx
-    ON account_deletions(purge_at) WHERE status = 'pending';
