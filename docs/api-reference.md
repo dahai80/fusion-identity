@@ -7,8 +7,8 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.39
-updated: 2026-11-18
+version: 0.2.40
+updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -51,6 +51,23 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 | GET | `/account/export` | bearer | `{profile, memberships, audit}` —— 不含密码哈希/会话密钥/他租户数据 |
 
 到期由 `RetentionWorker`(tick `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS`)单事务清除:成员/api-key 引用/邀请 `created_by`/jtis/MFA/join/SSO 删除或墓碑,审计行 `user_id` 置 NULL(链连续),users 行删除,墓碑审计 `account.purged` 入 `_system`;同轮修剪过期 token 台账与超 `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` 的审计行。
+
+## 用户设置 — `/api/v1/auth/settings`(bearer,issue #101)
+
+用户维度(豁免租户中间件);数据回流 opt-out 开关,默认 `true`。
+
+| Method | Path | Auth | 说明 / Notes |
+|---|---|---|---|
+| GET | `/settings` | bearer | `{data_reflow_enabled}`(未知用户读默认 `true`) |
+| PUT | `/settings` | bearer | `{data_reflow_enabled}` → 持久化(未知用户 404),审计 `auth.settings_updated`;`true→false` 时发 `auth.data_reflow.optout` ops 事件(仅哈希 id),清除动作在 ops 侧 |
+
+## 数据回流批量查询 — `/api/v1/admin/data-reflow/flags`(service token,issue #99)
+
+| Method | Path | Auth | 说明 / Notes |
+|---|---|---|---|
+| POST | `/data-reflow/flags` | service token | `{user_ids:[...]}`(1–500)→ `{flags:{user_id:bool}}`;缺失用户读 `true`;供 ops 管道批量核对 opt-out 状态 |
+
+设置 `FUSION_IDENTITY_OPS_DSN` 后 identity 向 `fusion_ops.ops_events` 发送脱敏事件:登录成功/失败(失败无用户 id,防账号存在性预言机)、token 签发(refresh/sso/service)、api-key token 计数、小时级租户/用户总数。载荷仅含哈希 id(`u:`/`t:` 前缀),绝无原始邮箱/用户名/JWT/密码;fail-open,ops 故障不阻塞认证。
 
 ## 注册与邮箱验证 — `/api/v1/auth/register*`
 

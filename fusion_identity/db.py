@@ -445,6 +445,43 @@ class PgStore:
         )
         return val is not None
 
+    async def data_reflow_enabled(self, user_id: str) -> bool:
+        # Issue #99/#101: mirrors InMemoryStore.data_reflow_enabled —
+        # default TRUE for unknown users and NULL-less pre-migration rows.
+        val = await self.fetchval(
+            "SELECT COALESCE(data_reflow_enabled, TRUE) FROM users WHERE user_id=$1",
+            user_id,
+        )
+        return True if val is None else bool(val)
+
+    async def set_data_reflow_enabled(self, user_id: str, enabled: bool) -> bool:
+        val = await self.fetchval(
+            "UPDATE users SET data_reflow_enabled=$2 WHERE user_id=$1 RETURNING user_id",
+            user_id,
+            bool(enabled),
+        )
+        if val is not None:
+            logger.info("set_data_reflow_enabled: user=%s enabled=%s", user_id, enabled)
+        return val is not None
+
+    async def data_reflow_flags(self, user_ids: list[str]) -> dict[str, bool]:
+        # Batch read for reflow emitters; unknown ids read as True (opted-in
+        # default), matching the single-user getter.
+        rows = await self.fetch(
+            "SELECT user_id, COALESCE(data_reflow_enabled, TRUE) AS enabled "
+            "FROM users WHERE user_id = ANY($1)",
+            list(user_ids),
+        )
+        known = {r["user_id"]: bool(r["enabled"]) for r in rows}
+        return {uid: known.get(uid, True) for uid in user_ids}
+
+    async def count_tenants(self) -> int:
+        # Active-tenant count for the hourly ops stats snapshot.
+        return await self.fetchval("SELECT COUNT(*) FROM tenants WHERE status='active'") or 0
+
+    async def count_users(self) -> int:
+        return await self.fetchval("SELECT COUNT(*) FROM users") or 0
+
     async def request_account_deletion(self, user_id: str, purge_at: float) -> dict[str, Any]:
         # Issue #91: schedule purge. Idempotent — ON CONFLICT keeps the FIRST
         # deadline so re-requests cannot move the window.

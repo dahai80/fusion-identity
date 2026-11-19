@@ -574,3 +574,20 @@ async def admin_kek_reencrypt(
         "mfa": {"total": mfa_total, "migrated": mfa_migrated, "failed": mfa_failed},
         "next_step": "drop FUSION_IDENTITY_KEK_PREV and restart to close the grace window",
     }
+
+
+class DataReflowFlagsRequest(BaseModel):
+    # Issue #99/#101: reflow emitters check this flag before storing any
+    # prompt content for a user. Batch shape keeps per-event checks to a
+    # single call. Unknown ids read as True (opted-in default).
+    user_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+@router.post("/data-reflow/flags")
+async def admin_data_reflow_flags(
+    req: DataReflowFlagsRequest,
+    store: Any = Depends(get_store),
+) -> dict:
+    flags = await store.data_reflow_flags(req.user_ids)
+    logger.info("admin data-reflow flags: %d ids queried", len(req.user_ids))
+    return {"flags": flags}

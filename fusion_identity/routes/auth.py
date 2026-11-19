@@ -41,6 +41,14 @@ from fusion_identity.models import (
     VerifyRequest,
     VerifyResponse,
 )
+from fusion_identity.ops_events import (
+    claims_from_token,
+    emit_login_failure,
+    emit_login_success,
+    emit_token_issued,
+    get_emitter,
+    sub_from_token,
+)
 from fusion_identity.ratelimit import check_login_rate, client_ip, get_reset_backoff
 from fusion_identity.store import hash_password
 
@@ -62,6 +70,15 @@ async def login(
         # P3-1: the auth_requests_total counter only recorded gRPC authorize
         # calls; HTTP logins were invisible to monitoring. Record here too.
         mc.record_auth(req.tenant_id, "http", "login_ok", 200)
+        # Issue #99: ops event (hashed ids only). user id comes from the
+        # freshly-minted token's sub claim (unverified local decode — the
+        # token was just minted by this service).
+        await emit_login_success(
+            get_emitter(request.app.state),
+            req.tenant_id or "",
+            sub_from_token(resp.access_token),
+            int((time.perf_counter() - started) * 1000),
+        )
         elapsed = time.perf_counter() - started
         # Issue #68: a 20s login is invisible in the 200 line — surface it.
         if elapsed > 2.0:
@@ -72,6 +89,11 @@ async def login(
         return resp
     except HTTPException as exc:
         mc.record_auth(req.tenant_id, "http", "login_fail", exc.status_code)
+        # Issue #99: ops event — no user id here (failure must not become an
+        # account-existence oracle via the ops database).
+        await emit_login_failure(
+            get_emitter(request.app.state), req.tenant_id or "", "login_rejected", exc.status_code
+        )
         raise
 
 
@@ -128,6 +150,14 @@ async def refresh(
     elapsed = time.perf_counter() - started
     if elapsed > 2.0:
         logger.warning("refresh: slow token issuance took %.2fs (suspect machine load)", elapsed)
+    # Issue #99: ops event (hashed ids only).
+    _claims = claims_from_token(resp.access_token)
+    await emit_token_issued(
+        get_emitter(request.app.state),
+        str(_claims.get("tid", "")),
+        str(_claims.get("sub", "")),
+        "refresh",
+    )
     return resp
 
 
@@ -275,7 +305,16 @@ async def exchange_sso_ticket(
     # Tenant-middleware-exempt (the ticket itself is the secret); rate-limited
     # like login against a pseudo tenant key.
     await check_login_rate(request, "_sso_ticket", None)
-    return await svc.exchange_sso_ticket(req.ticket)
+    resp = await svc.exchange_sso_ticket(req.ticket)
+    # Issue #99: ops event (hashed ids only).
+    _claims = claims_from_token(resp.access_token)
+    await emit_token_issued(
+        get_emitter(request.app.state),
+        str(_claims.get("tid", "")),
+        str(_claims.get("sub", "")),
+        "sso",
+    )
+    return resp
 
 
 def _spawn_reset_email(settings, email: str, token: str, username: str) -> None:

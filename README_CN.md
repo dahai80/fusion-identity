@@ -7,8 +7,8 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.39
-updated: 2026-11-18
+version: 0.2.40
+updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
   - README_CN.md
@@ -124,6 +124,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | 否 | — | issue #51：认证门户的公网 origin；验证邮件链接构造为 `{base}/auth/?verify={token}`（路由契约以 fusion-gateway `web/auth/app.js` 为准）。未设置 → 相对链接兜底 + 发送时响亮 WARNING。 |
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | 否 | `stub` | issue #74：预付费充值平面的支付后端。`stub` 即时确认（仅开发/测试——不可用于真实资金）。未知值 fail-closed（充值端点返回 503）。 |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | 否 | `20` | issue #74：租户首笔已支付充值订单的赠送代币百分比（如 20 → 1000 代币 + 200 赠送）。`0` 关闭赠送。 |
+| `FUSION_IDENTITY_OPS_DSN` | 否 | —（关闭） | issue #99：ops 数据湖（`fusion_ops`）的 asyncpg DSN。设置后 identity 通过 `fusion_core.ops.OpsEmitter` 向 `ops_events` 发送脱敏事件（用户/租户 id 仅哈希、token 计数——绝不含原始邮箱/用户名/JWT/密码）。未设置 → ops 平面完全关闭（零额外 I/O）。遥测 fail-open：ops 故障绝不阻塞认证。 |
 | `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | 否 | `900` | issue #76：服务账号会话 token 生命周期（秒，钳制 ≥60）。刻意取短——机器侧凭预置凭证换取，不持长效 bearer。 |
 | `FUSION_IDENTITY_DELETE_GRACE_SECONDS` | 否 | `604800`（7 天） | issue #91：账号删除宽限期，秒。从 `POST /api/v1/auth/account/delete` 到清除执行期间，登录/bearer/gRPC 全部拒绝该账号（`account is scheduled for deletion`）；宽限期内可撤销。 |
 | `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` | 否 | `12` | issue #91：审计日志保留窗口，月。retention worker 删除早于该窗口的审计行。 |
@@ -183,6 +184,19 @@ issue #98 加固：重置邮件改为 fire-and-forget 任务投递，命中路�
 | GET | `/account/export` | bearer | `{profile, memberships, audit}` —— 个人资料字段、租户成员关系（租户 + 角色）、本人审计轨迹（最新在前，≤500 条）。密码哈希、会话密钥、其他租户数据永不外泄。 |
 
 **清除语义**：到期后由进程内 retention worker（`RetentionWorker`，tick 为 `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS`）在单个事务内清除账号 —— 成员关系、api-key（用户引用置 NULL 留墓碑）、邀请（`created_by` 置 NULL）、refresh/issued/revoked jti、MFA 因子、加入申请、SSO ticket 全部删除；审计行墓碑化（`user_id` 置 NULL），哈希链保持连续；`users` 行删除。并向 `_system` 写入墓碑审计事件 `account.purged`。同一次扫描还会修剪过期/已撤销的 token 台账，以及早于 `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` 的审计行（全部幂等 —— 某次扫描崩溃可自愈）。
+
+### 用户设置（`/api/v1/auth/settings` —— issue #101）
+
+按用户的隐私开关面，用户级（租户中间件豁免，bearer 强制）。当前一个开关：`data_reflow_enabled`（默认 `true`）。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/settings` | bearer | `{data_reflow_enabled}` —— 当前 opt-in 状态（未知用户读 `true` 默认值）。 |
+| PUT | `/settings` | bearer | `{data_reflow_enabled}` → 持久化（未知用户 404）并审计 `auth.settings_updated`。`true→false` 转换时 identity 额外发出一条 `auth.data_reflow.optout` ops 事件（仅哈希 id），ops 侧管道据此按保留策略清除/匿名化该用户已存样本（issue #101 —— 清除动作在 fusion-ops 侧，identity 只发信号）。 |
+
+**数据回流（飞轮 Loop A，issue #99）**：设置 `FUSION_IDENTITY_OPS_DSN` 后，identity 向 ops 数据湖流式发送脱敏事件（登录成功/失败、token 签发含 refresh/SSO/服务账号类别、api-key token 计数、小时级租户/用户总数）——用户/租户 id 仅哈希（`sha256("identity:{id}")[:16]`，前缀 `u:`/`t:`），载荷中绝无原始邮箱、用户名、JWT 或密码；登录失败事件不含用户 id，ops 库无法成为账号存在性预言机。`data_reflow_enabled=false` 的用户已被完全覆盖：identity 本就不存任何 prompt 文本（prompt 采样在 ops 管道，遵循 opt-out 事件）。发送 fail-open——ops 故障仅记日志，认证永不受阻。
+
+ops 管道的服务面批量查询：`POST /api/v1/admin/data-reflow/flags` `{user_ids: [...]}`（service token，≤500 个）→ `{flags: {user_id: bool}}` —— 缺失用户读 `true`。
 
 ### 租户加入策略（`join_policy` —— issue #40）
 

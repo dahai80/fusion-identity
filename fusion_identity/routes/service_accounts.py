@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from fusion_identity.deps import get_store, require_service_token
+from fusion_identity.ops_events import claims_from_token, emit_token_issued, get_emitter
 from fusion_identity.ratelimit import check_login_rate
 from fusion_identity.store import InMemoryStore
 
@@ -114,4 +115,14 @@ async def service_account_token(
     # Tenant-middleware-exempt: the credential itself is the secret. Scoped
     # short-TTL access token only — no refresh (machines re-exchange).
     await check_login_rate(request, "_service_account", None)
-    return await request.app.state.auth_service.service_account_token(body.credential)
+    resp = await request.app.state.auth_service.service_account_token(body.credential)
+    # Issue #99: ops event (hashed ids only).
+    access = resp["access_token"] if isinstance(resp, dict) else resp.access_token
+    _claims = claims_from_token(access)
+    await emit_token_issued(
+        get_emitter(request.app.state),
+        str(_claims.get("tid", "")),
+        str(_claims.get("sub", "")),
+        "service",
+    )
+    return resp

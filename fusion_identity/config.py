@@ -157,6 +157,11 @@ class Settings:
     # the delay. 0 disables the backoff plane.
     reset_backoff_base_seconds: int = 2
     reset_backoff_cap_seconds: int = 300
+    # Issue #99 (flywheel Loop A): async ops-event emission into the
+    # fusion_ops PG database via the fusion-core OpsEmitter. Empty = the
+    # ops plane is off (emitter absent, every emission is a no-op) — the
+    # service must never fail to start or serve because telemetry is down.
+    ops_dsn: str = ""
     registration_default_tenant: str = "community"
     # Issue #39/#40: SMTP plane for verification emails. When smtp_host is
     # empty the verification token is logged (WARNING) instead of emailed —
@@ -378,6 +383,7 @@ def load_settings() -> Settings:
         in ("1", "true", "yes"),
         reset_backoff_base_seconds=_int_env("FUSION_IDENTITY_RESET_BACKOFF_BASE", 2),
         reset_backoff_cap_seconds=_int_env("FUSION_IDENTITY_RESET_BACKOFF_CAP", 300),
+        ops_dsn=os.environ.get("FUSION_IDENTITY_OPS_DSN", "").strip(),
         registration_default_tenant=os.environ.get(
             "FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT", "community"
         ),
