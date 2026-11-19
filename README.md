@@ -7,8 +7,8 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.39
-updated: 2026-11-18
+version: 0.2.40
+updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -148,6 +148,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_SMTP_STARTTLS` | no | `1` | Use STARTTLS when connecting to the relay. |
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | no | — | Issue #51: public origin of the auth portal; verification links are built as `{base}/auth/?verify={token}` (route contract owned by fusion-gateway `web/auth/app.js`). Unset → relative link fallback + loud WARNING at send time. |
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | no | `stub` | Issue #74: payment backend for the prepaid recharge plane. `stub` confirms instantly (dev/test only — never real money). Unknown values fail closed (503 on recharge endpoints). |
+| `FUSION_IDENTITY_OPS_DSN` | no | — (off) | Issue #99: asyncpg DSN of the ops data lake (`fusion_ops`). When set, identity emits desensitized ops events (hashed user/tenant ids, token counters — never raw emails/usernames/JWTs/passwords) to `ops_events` via `fusion_core.ops.OpsEmitter`. Unset → the ops plane is fully off (zero extra I/O). Telemetry is fail-open: an ops outage never blocks auth. |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | no | `20` | Issue #74: bonus-token percentage granted on a tenant's FIRST paid recharge order (e.g. 20 → 1000 tokens + 200 promo). `0` disables the promo. |
 | `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | no | `900` | Issue #76: service-account session token TTL, seconds (clamped ≥60). Short by design — machines re-exchange their pre-provisioned credential instead of holding a long-lived bearer. |
 | `FUSION_IDENTITY_DELETE_GRACE_SECONDS` | no | `604800` (7d) | Issue #91: account-deletion grace window, seconds. Between `POST /api/v1/auth/account/delete` and the purge the login/bearer/gRPC planes all refuse the account (`account is scheduled for deletion`); the window is cancelable. |
@@ -208,6 +209,19 @@ Self-service account deletion (GDPR-style, grace window + cancel) and a JSON dat
 | GET | `/account/export` | bearer | `{profile, memberships, audit}` — profile fields, tenant memberships (tenant + role), and the user's own audit trail (newest first, ≤500). Password hashes, session secrets, and other tenants' data never leave the service. |
 
 **Purge semantics**: at the deadline the in-process retention worker (`RetentionWorker`, tick `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS`) purges the account in ONE transaction — members, api-keys (user refs tombstoned to NULL), invites (`created_by` NULL), refresh/issued/revoked jtis, MFA factors, join requests, SSO tickets deleted; audit rows tombstoned (`user_id` NULL) so the hash chain stays continuous; the `users` row dropped. A tombstone `account.purged` audit event is written to `_system`. Expired/revoked token ledgers and audit rows older than `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` are pruned in the same sweep (all steps idempotent — a crashed tick self-heals).
+
+### User settings (`/api/v1/auth/settings` — issue #101)
+
+Per-user privacy surface, user-scoped (tenant-middleware-exempt, bearer enforced). Currently one flag: `data_reflow_enabled` (default `true`).
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| GET | `/settings` | bearer | `{data_reflow_enabled}` — the user's current opt-in state (unknown user reads `true`, the default). |
+| PUT | `/settings` | bearer | `{data_reflow_enabled}` → persists the flag (404 unknown user) and audits `auth.settings_updated`. On the `true→false` transition identity ALSO emits an `auth.data_reflow.optout` ops event (hashed ids only) so the ops-side pipeline can purge/anonymize any stored samples for this user per retention policy (issue #101 — the purge itself lives in fusion-ops, identity only signals). |
+
+**Data reflow (flywheel Loop A, issue #99)**: when `FUSION_IDENTITY_OPS_DSN` is set, identity streams desensitized events (login success/failure, token issuance incl. refresh/SSO/service-account kinds, api-key token counters, hourly tenant/user totals) into the ops data lake via the shared `fusion_core` `OpsEmitter` — hashed user/tenant ids only (`sha256("identity:{id}")[:16]`, prefixed `u:`/`t:`), no raw emails, usernames, JWTs, or passwords anywhere in payloads; login-failure events carry NO user id so the ops DB cannot become an account-existence oracle. Users with `data_reflow_enabled=false` are already fully covered: identity stores no prompt text at all (prompt sampling lives in the ops pipeline, which honors the opt-out event). Emission is fail-open — an ops outage logs and continues, auth is never blocked.
+
+Service-plane batch lookup for the ops pipeline: `POST /api/v1/admin/data-reflow/flags` `{user_ids: [...]}` (service token, ≤500 ids) → `{flags: {user_id: bool}}` — missing users read `true`.
 
 ### Tenant join policy (`join_policy` — issue #40)
 

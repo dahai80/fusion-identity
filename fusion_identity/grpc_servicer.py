@@ -13,6 +13,7 @@ from fusion_identity import billing
 from fusion_identity import metrics_collector as mc
 from fusion_identity.grpc import identity_pb2 as pb
 from fusion_identity.grpc import identity_pb2_grpc as pb_grpc
+from fusion_identity.ops_events import emit_apikey_usage
 
 logger = logging.getLogger(__name__)
 
@@ -92,10 +93,12 @@ def _lease_belongs(lease_id: str, tenant_id: str) -> bool:
 
 
 class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
-    def __init__(self, store: Any, cache: Any, concurrency: Any) -> None:
+    def __init__(self, store: Any, cache: Any, concurrency: Any, emitter: Any = None) -> None:
         self._store = store
         self._cache = cache
         self._concurrency = concurrency
+        # Issue #99: optional ops emitter (hashed-ids telemetry, fail-open).
+        self._emitter = emitter
 
     async def AuthorizeAndAcquire(self, request, context):
         start = time.perf_counter()
@@ -423,6 +426,17 @@ class IdentityServiceServicer(pb_grpc.IdentityServiceServicer):
                     "grpc",
                 )
             mc.set_quota_remaining(request.tenant_id, remaining)
+            # Issue #99: ops event (hashed tenant id, token counters only).
+            if total_tokens > 0:
+                try:
+                    await emit_apikey_usage(
+                        self._emitter,
+                        request.tenant_id,
+                        total_tokens,
+                        _sanitize_label(request.target_module, "unknown"),
+                    )
+                except Exception:
+                    logger.exception("grpc usage: ops emit failed")
             if remaining_balance == 0:
                 remaining_balance = await self._store.get_balance(request.tenant_id)
             logger.info(

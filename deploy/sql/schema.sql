@@ -48,6 +48,9 @@ CREATE TABLE users (
     -- single use, expiring; successful reset clears both columns.
     password_reset_token_hash TEXT,
     password_reset_expires TIMESTAMPTZ,
+    -- Issue #99/#101 (flywheel Loop A): per-user data-reflow opt-out.
+    -- TRUE = desensitized reflow allowed; FALSE = counters only.
+    data_reflow_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT users_algo_chk  CHECK (password_algo IN ('argon2id','scrypt','legacy')),
     CONSTRAINT users_status_chk CHECK (status IN ('active','disabled','locked'))

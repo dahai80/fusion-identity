@@ -7,8 +7,8 @@ doc_type: config-reference
 title: { zh: "fusion-identity 配置参考", en: "fusion-identity config reference" }
 audience: engineer
 status: draft
-version: 0.2.39
-updated: 2026-11-18
+version: 0.2.40
+updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -112,6 +112,7 @@ source_of_truth:
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | `stub` | issue #74:充值平面支付渠道;`stub` 即时确认(仅开发/测试),未知值 fail-closed(503) |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | `20` | issue #74:租户首笔已支付订单的赠送代币百分比,`0` 关闭 |
 | `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | `900` | issue #76:服务账号会话 token TTL(秒,钳制 ≥60);无 refresh,机器重新换凭 |
+| `FUSION_IDENTITY_OPS_DSN` | —(关闭) | issue #99:ops 数据湖(`fusion_ops`)的 asyncpg DSN;设置后发送脱敏 ops 事件(仅哈希 id/token 计数),未设置完全关闭;fail-open,不阻塞认证 |
 
 ## 事件 / Webhook
 

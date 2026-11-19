@@ -22,6 +22,7 @@ async def serve(app: Any, *, host: str, port: int) -> grpc.aio.Server:
             store=app.state.store,
             cache=app.state.cache,
             concurrency=app.state.concurrency,
+            emitter=getattr(app.state, "ops_emitter", None),
         ),
         server,
     )

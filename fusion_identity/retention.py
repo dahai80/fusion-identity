@@ -22,10 +22,14 @@ class RetentionWorker:
         *,
         audit_retention_months: int = 12,
         tick_seconds: float = 3600.0,
+        emitter: Any = None,
     ) -> None:
         self._store = store
         self._audit_retention_months = max(1, audit_retention_months)
         self._tick_seconds = tick_seconds
+        # Issue #99: optional OpsEmitter — the hourly sweep piggybacks an
+        # aggregate tenant/user count snapshot into fusion_ops.
+        self._emitter = emitter
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -53,6 +57,16 @@ class RetentionWorker:
         stats = {"purged": purged, "pruned_tokens": pruned_tokens, "pruned_audit": pruned_audit}
         if any(stats.values()):
             logger.info("retention sweep: %s", stats)
+        # Issue #99: hourly aggregate ops snapshot (counters only, no ids).
+        if self._emitter is not None:
+            try:
+                from fusion_identity.ops_events import emit_tenant_stats
+
+                tenants = await self._store.count_tenants()
+                users = await self._store.count_users()
+                await emit_tenant_stats(self._emitter, tenants, users)
+            except Exception:
+                logger.exception("retention: ops tenant stats emit failed")
         return stats
 
     async def _run(self) -> None:

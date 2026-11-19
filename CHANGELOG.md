@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.39
-updated: 2026-11-18
+version: 0.2.40
+updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.40
+
+### Issues #99 + #101 — ops event emission (flywheel Loop A) + per-user data-reflow opt-out
+- **Ops event plane** (issue #99): new `ops_events.py` — desensitized telemetry helpers over `fusion_core.ops.OpsEmitter`. Enabled only when `FUSION_IDENTITY_OPS_DSN` is set (default off — zero extra I/O); fail-open (an ops outage logs and continues, auth never blocked). Payload hygiene is a hard rule and is test-grepped: user/tenant ids appear ONLY as `sha256("identity:{id}")[:16]` with `u:`/`t:` prefixes; no raw emails, usernames, JWTs, or passwords in any payload; login-failure events carry NO user id so the ops DB cannot become an account-existence oracle.
+- **Emission points**: login success (with latency) / failure; token issued (`kind=refresh|sso|service`) on refresh, SSO ticket exchange, and service-account login; api-key token counters on gRPC `ReportUsage`; hourly tenant/user totals piggybacked on the retention sweep tick (`auth.tenant.stats` — counters only, no ids).
+- **Data-reflow opt-out** (issue #101): migration `0025` adds `users.data_reflow_enabled BOOLEAN NOT NULL DEFAULT TRUE` (both store backends + `deploy/sql/schema.sql`). New user-scoped settings plane `GET/PUT /api/v1/auth/settings` (tenant-middleware-exempt, bearer-gated; PUT audits `auth.settings_updated`); the `true→false` transition emits `auth.data_reflow.optout` (hashed ids) as the purge/anonymize signal — the purge itself lives in the ops pipeline (fusion-ops), identity stores no prompt text at all. Service-plane batch lookup `POST /api/v1/admin/data-reflow/flags` (`{user_ids}` ≤500 → `{flags}`) for the ops pipeline; missing users read `true`.
+- Tests: 12 offline (`tests/test_ops_reflow_issue99.py` — hashing determinism, settings roundtrip, opt-out event only on the false transition, batch flags, login success/failure emission, refresh `kind`, payload-hygiene grep for raw secrets, no-emitter no-op, broken-emitter fail-open, retention stats emit) + 3 PG integration (`tests/test_ops_pg_issue99.py` — migration 0025 column shape, flag persist + batch flags, unknown-user defaults).
 
 ## 0.2.39
 

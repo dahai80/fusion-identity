@@ -138,6 +138,8 @@ TENANT_EXEMPT = frozenset(
         # users must not need an X-Tenant-Id here).
         "/api/v1/auth/account/delete",
         "/api/v1/auth/account/export",
+        # Issue #101: user-scoped privacy surface (bearer enforced by route).
+        "/api/v1/auth/settings",
         "/scim/v2/Users",
     }
 )
@@ -238,11 +240,13 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.scim import router as scim_router
     from fusion_identity.routes.service_accounts import admin_router as sa_admin_router
     from fusion_identity.routes.service_accounts import auth_router as sa_auth_router
+    from fusion_identity.routes.settings import router as settings_router
     from fusion_identity.routes.tenants import router as tenants_router
     from fusion_identity.routes.usage import router as usage_router
 
     app.include_router(auth_router)
     app.include_router(account_router)
+    app.include_router(settings_router)
     app.include_router(health_router)
     app.include_router(tenants_router)
     app.include_router(members_router)
@@ -270,6 +274,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.state.webhook_worker = None
     app.state.retention_worker = None
     app.state.watchdog = None
+    app.state.ops_emitter = None
 
     def _verify_jwt(token: str) -> dict[str, Any] | None:
         try:
@@ -318,6 +323,21 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
                 settings.bootstrap_admin_pass,
                 settings.bootstrap_tenants,
             )
+        # Issue #99 (flywheel Loop A): async ops-event emission into the
+        # fusion_ops PG database. Best-effort telemetry — startup NEVER fails
+        # because the ops plane is down; the emitter drops and counts under
+        # backpressure instead of blocking the auth path.
+        app.state.ops_emitter = None
+        if settings.ops_dsn:
+            try:
+                from fusion_core.ops import OpsEmitter
+
+                emitter = OpsEmitter(settings.ops_dsn, source="identity")
+                await emitter.start()
+                app.state.ops_emitter = emitter
+                logger.info("build_app: ops emitter started (source=identity)")
+            except Exception as exc:
+                logger.error("build_app: ops emitter failed to start, ops events off (%s)", exc)
         if settings.grpc_port > 0 and app.state.concurrency is not None:
             try:
                 from fusion_identity.grpc_server import serve as serve_grpc
@@ -358,6 +378,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
                 app.state.store,
                 audit_retention_months=settings.audit_retention_months,
                 tick_seconds=settings.retention_sweep_seconds,
+                emitter=app.state.ops_emitter,
             )
             app.state.retention_worker.start()
             logger.info(
@@ -383,6 +404,12 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
         if app.state.watchdog is not None:
             app.state.watchdog.stop()
             app.state.watchdog = None
+        if app.state.ops_emitter is not None:
+            try:
+                await app.state.ops_emitter.stop()
+            except Exception as exc:
+                logger.warning("ops emitter stop: %s", exc)
+            app.state.ops_emitter = None
         if app.state.webhook_worker is not None:
             try:
                 await app.state.webhook_worker.stop()

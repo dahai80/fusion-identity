@@ -486,6 +486,9 @@ class InMemoryStore:
             "email_verified": email_verified,
             "email_verify_token_hash": None,
             "email_verify_expires": None,
+            # Issue #99/#101: data-reflow opt-out — default allows
+            # desensitized reflow; False = counters only for this user.
+            "data_reflow_enabled": True,
             "created_at": _now(),
         }
         logger.info("create_user: %s username=%s", user_id, username)
@@ -607,6 +610,34 @@ class InMemoryStore:
         u["password_reset_expires"] = None
         logger.info("clear_password_reset_token: user=%s", user_id)
         return True
+
+    async def data_reflow_enabled(self, user_id: str) -> bool:
+        # Issue #99/#101: per-user reflow opt-out. Default TRUE (allow) —
+        # unknown users and pre-migration rows all read as opted-in.
+        u = self._users.get(user_id)
+        if u is None:
+            return True
+        return bool(u.get("data_reflow_enabled", True))
+
+    async def set_data_reflow_enabled(self, user_id: str, enabled: bool) -> bool:
+        u = self._users.get(user_id)
+        if u is None:
+            return False
+        u["data_reflow_enabled"] = bool(enabled)
+        logger.info("set_data_reflow_enabled: user=%s enabled=%s", user_id, enabled)
+        return True
+
+    async def data_reflow_flags(self, user_ids: list[str]) -> dict[str, bool]:
+        # Batch read for reflow emitters (services check the flag before
+        # storing any prompt content for a user).
+        return {uid: await self.data_reflow_enabled(uid) for uid in user_ids}
+
+    async def count_tenants(self) -> int:
+        # Active-tenant count for the hourly ops stats snapshot.
+        return sum(1 for t in self._tenants.values() if t.get("status", "active") == "active")
+
+    async def count_users(self) -> int:
+        return len(self._users)
 
     async def request_account_deletion(self, user_id: str, purge_at: float) -> dict[str, Any]:
         # Issue #91: schedule the account for purge. Idempotent — a repeat
