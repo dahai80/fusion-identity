@@ -44,11 +44,17 @@ def _signup(client: TestClient, username: str, email: str) -> None:
 
 
 def _forgot(client: TestClient, email: str, monkeypatch=None) -> str | None:
+    # Issue #98: delivery is fire-and-forget — wait on an event after the
+    # POST instead of reading the capture immediately.
+    import threading
+
     captured: dict[str, str] = {}
+    delivered = threading.Event()
 
     async def fake_send(settings, to_email, subject, body):
         captured["body"] = body
         captured["subject"] = subject
+        delivered.set()
         return "sent"
 
     if monkeypatch is not None:
@@ -58,6 +64,7 @@ def _forgot(client: TestClient, email: str, monkeypatch=None) -> str | None:
     assert r.json() == {"sent": True}
     if monkeypatch is None:
         return None
+    assert delivered.wait(timeout=10), "async reset email never delivered"
     body = captured.get("body", "")
     for ln in body.splitlines():
         if "/auth/?reset=" in ln:
@@ -180,12 +187,16 @@ def test_new_forgot_invalidates_old_token(client, monkeypatch):
 
 
 def test_reset_link_absolute_with_base_url(client, monkeypatch):
+    import threading
+
     s = dataclasses.replace(client.app.state.settings, public_base_url="https://fusion.example")
     client.app.state.settings = s
     captured: dict[str, str] = {}
+    delivered = threading.Event()
 
     async def fake_send(settings, to_email, subject, body):
         captured["body"] = body
+        delivered.set()
         return "sent"
 
     monkeypatch.setattr("fusion_identity.email_sender.send_email", fake_send)
@@ -194,6 +205,7 @@ def test_reset_link_absolute_with_base_url(client, monkeypatch):
     assert "body" not in captured
     _signup(client, "frank", "frank@example.com")
     client.post("/api/v1/auth/password/forgot", json={"email": "frank@example.com"})
+    assert delivered.wait(timeout=10), "async reset email never delivered"
     # Gateway auth portal SPA contract (#549): the reset pane is prefilled by
     # /auth/?reset=<token> — /auth/reset is not a served route.
     assert "https://fusion.example/auth/?reset=" in captured["body"]

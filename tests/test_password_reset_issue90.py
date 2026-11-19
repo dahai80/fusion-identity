@@ -40,44 +40,64 @@ def _signup(client: TestClient, username: str, email: str) -> None:
 
 
 def _capture_reset_email(client: TestClient, monkeypatch, email: str) -> str:
+    # Issue #98: delivery is now fire-and-forget — the response returns
+    # before the task runs, so wait on an event instead of reading the
+    # capture right after the POST.
+    import threading
+
     captured: dict[str, str] = {}
+    delivered = threading.Event()
 
     async def fake_send(settings, to_email, subject, body):
         captured["body"] = body
+        delivered.set()
         return "sent"
 
     monkeypatch.setattr("fusion_identity.email_sender.send_email", fake_send)
     r = client.post("/api/v1/auth/password/reset-request", json={"email": email})
     assert r.status_code == 200
+    assert delivered.wait(timeout=10), "async reset email never delivered"
     for ln in captured.get("body", "").splitlines():
         if "/auth/?reset=" in ln:
             return ln.split("reset=")[1].strip()
     raise AssertionError("reset link not rendered in email body")
 
 
-def test_reset_request_alias_matches_forgot(client, monkeypatch):
+def test_reset_request_alias_matches_forgot(store, monkeypatch):
     # Issue #90: /password/reset-request is a first-class alias of
-    # /password/forgot — same uniform response, same token plane.
-    _signup(client, "alice", "alice@example.com")
-    r_forgot = client.post("/api/v1/auth/password/forgot", json={"email": "ghost@example.com"})
-    r_alias = client.post(
-        "/api/v1/auth/password/reset-request", json={"email": "ghost@example.com"}
-    )
-    assert r_forgot.status_code == r_alias.status_code == 200
-    assert r_forgot.json() == r_alias.json() == {"sent": True}
+    # /password/forgot — same uniform response, same token plane. Own client
+    # with the backoff plane off: this test exercises alias identity, not
+    # the issue #98 abuse gate (3 rapid requests would legitimately 429).
+    import dataclasses as _dc
 
-    # The alias-armed token actually resets the password.
-    token = _capture_reset_email(client, monkeypatch, "alice@example.com")
-    r = client.post(
-        "/api/v1/auth/password/reset",
-        json={"token": token, "new_password": "N3wPassword!2026"},
+    from fusion_identity.app import build_app as _build
+
+    app = _build(
+        _dc.replace(_settings(), email_verification_required=False, reset_backoff_base_seconds=0),
+        store=store,
+        run_bootstrap=True,
     )
-    assert r.status_code == 200, r.text
-    r = client.post(
-        "/api/v1/auth/login", json={"username": "alice", "password": "N3wPassword!2026"}
-    )
-    assert r.status_code == 200
-    logger.info("reset-request alias verified")
+    with TestClient(app) as client:
+        _signup(client, "alice", "alice@example.com")
+        r_forgot = client.post("/api/v1/auth/password/forgot", json={"email": "ghost@example.com"})
+        r_alias = client.post(
+            "/api/v1/auth/password/reset-request", json={"email": "ghost@example.com"}
+        )
+        assert r_forgot.status_code == r_alias.status_code == 200
+        assert r_forgot.json() == r_alias.json() == {"sent": True}
+
+        # The alias-armed token actually resets the password.
+        token = _capture_reset_email(client, monkeypatch, "alice@example.com")
+        r = client.post(
+            "/api/v1/auth/password/reset",
+            json={"token": token, "new_password": "N3wPassword!2026"},
+        )
+        assert r.status_code == 200, r.text
+        r = client.post(
+            "/api/v1/auth/login", json={"username": "alice", "password": "N3wPassword!2026"}
+        )
+        assert r.status_code == 200
+        logger.info("reset-request alias verified")
 
 
 def test_reset_ttl_default_30min():

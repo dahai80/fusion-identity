@@ -597,6 +597,17 @@ class InMemoryStore:
             return u["user_id"]
         return None
 
+    async def clear_password_reset_token(self, user_id: str) -> bool:
+        # Issue #98: a password change via ANY path must invalidate an
+        # outstanding reset token, not just the reset flow itself.
+        u = self._users.get(user_id)
+        if u is None:
+            return False
+        u["password_reset_token_hash"] = None
+        u["password_reset_expires"] = None
+        logger.info("clear_password_reset_token: user=%s", user_id)
+        return True
+
     async def request_account_deletion(self, user_id: str, purge_at: float) -> dict[str, Any]:
         # Issue #91: schedule the account for purge. Idempotent — a repeat
         # request keeps the original deadline so an attacker cannot extend

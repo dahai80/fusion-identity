@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -40,7 +41,7 @@ from fusion_identity.models import (
     VerifyRequest,
     VerifyResponse,
 )
-from fusion_identity.ratelimit import check_login_rate
+from fusion_identity.ratelimit import check_login_rate, client_ip, get_reset_backoff
 from fusion_identity.store import hash_password
 
 logger = logging.getLogger(__name__)
@@ -277,6 +278,27 @@ async def exchange_sso_ticket(
     return await svc.exchange_sso_ticket(req.ticket)
 
 
+def _spawn_reset_email(settings, email: str, token: str, username: str) -> None:
+    # Issue #98: fire-and-forget delivery — the response must not wait on
+    # SMTP or the hit/miss latency difference becomes an account-existence
+    # oracle. Failures are logged and never reach the client.
+    async def _deliver() -> None:
+        try:
+            await send_password_reset_email(settings, email, token, username)
+        except EmailDeliveryError:
+            logger.warning("forgot_password: delivery failed email=%s (async)", _mask_email(email))
+        except Exception:
+            logger.exception("forgot_password: async delivery crashed email=%s", _mask_email(email))
+
+    task = asyncio.create_task(_deliver())
+    # Keep a hard reference so the task is not garbage-collected mid-send.
+    _RESET_EMAIL_TASKS.add(task)
+    task.add_done_callback(_RESET_EMAIL_TASKS.discard)
+
+
+_RESET_EMAIL_TASKS: set = set()
+
+
 def _mask_email(email: str) -> str:
     name, _, domain = email.partition("@")
     if not domain:
@@ -305,6 +327,29 @@ async def _password_reset_request(
     # the issue's no-new-dependencies constraint).
     await check_login_rate(request, "_pw_forgot", body.email)
     email = body.email.strip()
+    # Issue #98: exponential-backoff cooldown keyed on the REQUESTED email
+    # AND the client IP, checked BEFORE any account lookup — throttling is
+    # byte-identical for existing and non-existing accounts (no enumeration)
+    # and doubles as the per-target mail-bombing gate. 429 carries
+    # Retry-After so legitimate clients back off politely.
+    backoff = get_reset_backoff(request)
+    ip = client_ip(request)
+    wait = max(
+        backoff.hit(f"email:{email.lower()}"),
+        backoff.hit(f"ip:{ip}"),
+    )
+    if wait > 0:
+        logger.warning(
+            "forgot_password: backoff 429 email=%s ip=%s retry_after=%.0fs",
+            _mask_email(email),
+            ip,
+            wait,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="too many reset requests, retry later",
+            headers={"Retry-After": str(int(wait) + 1)},
+        )
     user = await store.get_user_by_email(email)
     if user is None:
         if settings.password_forgot_reveal_missing:
@@ -319,19 +364,23 @@ async def _password_reset_request(
         time.time() + settings.password_reset_ttl_seconds,
     )
     if ok:
-        try:
-            await send_password_reset_email(settings, email, token, user["username"])
-        except EmailDeliveryError:
-            if settings.password_forgot_reveal_missing:
+        # Issue #98: delivery runs as a fire-and-forget task in the uniform
+        # mode — a slow SMTP round-trip must not open a timing oracle on the
+        # hit path (the miss path does no I/O). The explicit-reveal mode
+        # (issue #58) keeps synchronous delivery because 502-on-failure is
+        # already an intentional existence signal for the operator.
+        if not settings.password_forgot_reveal_missing:
+            _spawn_reset_email(settings, email, token, user["username"])
+        else:
+            try:
+                await send_password_reset_email(settings, email, token, user["username"])
+            except EmailDeliveryError:
                 logger.warning(
                     "forgot_password: delivery failed user=%s (explicit 502)", user["user_id"]
                 )
                 raise HTTPException(
                     status_code=502, detail="mail delivery failed; retry shortly"
                 ) from None
-            # Delivery failure must not leak account existence via the
-            # response — the user can simply request again.
-            logger.warning("forgot_password: delivery failed user=%s", user["user_id"])
         try:
             await store.append_audit(
                 tenant_id="_system",

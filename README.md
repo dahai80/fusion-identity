@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.38
+version: 0.2.39
 updated: 2026-11-18
 owner: "@dahai"
 source_of_truth:
@@ -138,6 +138,8 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_EMAIL_VERIFY_TTL` | no | `86400` | Email verification token TTL, seconds. |
 | `FUSION_IDENTITY_SSO_TICKET_TTL` | no | `60` | Issue #48: one-time SSO ticket lifetime, seconds (clamped 5–600). |
 | `FUSION_IDENTITY_PASSWORD_RESET_TTL` | no | `1800` (30min) | Issue #54/#90: password reset token lifetime, seconds. The token is a bearer capability that resets the account password — kept ≤ 30 minutes. |
+| `FUSION_IDENTITY_RESET_BACKOFF_BASE` | no | `2` | Issue #98: base cooldown for reset-request abuse control, seconds. Repeated requests for the same account/IP double the delay (2 free requests, then 4s, 8s, …); `0` disables the backoff plane. |
+| `FUSION_IDENTITY_RESET_BACKOFF_CAP` | no | `300` | Issue #98: upper bound on the reset-request backoff delay, seconds. 429s carry `Retry-After`; spikes log a WARNING. |
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | no | `community` | Tenant personal signups auto-join. Auto-created (free plan template) on first personal signup if missing. |
 | `FUSION_IDENTITY_SMTP_HOST` | no | — (logged) | SMTP relay host. Unset → the verification token is WARNING-logged (dev fallback, documented) instead of emailed; verification still gates login. |
 | `FUSION_IDENTITY_SMTP_PORT` | no | `587` | SMTP relay port. |
@@ -192,6 +194,8 @@ Self-service signup channels (design: `architecture/fusion-site-auth-1104.md`). 
 ### Password recovery (`/api/v1/auth/password/*` — issue #54)
 
 Self-service reset for users who lost their password (no bearer token exists to change it). Both endpoints are tenant-middleware-exempt and rate-limited. Security posture: the request endpoint is uniform (`{sent:true}` regardless of account existence — no enumeration); the reset token is `secrets.token_urlsafe(32)`, stored only as sha256, single-use (consumed atomically inside the UPDATE), expiring (TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` default 30min, issue #90), travels only in the email; a successful reset rotates the password hash and revokes every refresh token family, then emails a confirmation (issue #90 — delivery failures never fail the reset). Unknown/expired/replayed tokens all return the same 400. SMTP-unset dev fallback logs the reset link like verification.
+
+Issue #98 hardening: reset-email delivery runs as a fire-and-forget task, so the hit path answers as fast as the miss path (no timing oracle on account existence); a password change through ANY path invalidates an outstanding reset token (`clear_password_reset_token`); and an exponential-backoff abuse gate (`FUSION_IDENTITY_RESET_BACKOFF_BASE`/`_CAP`) throttles per requested account AND per client IP before any account lookup — burst of 2, then doubling 429s with `Retry-After` and spike WARNINGs, which also blocks mail-bombing a target address from rotating IPs.
 
 ### Account lifecycle (`/api/v1/auth/account/*` — issue #91)
 

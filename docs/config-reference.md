@@ -7,7 +7,7 @@ doc_type: config-reference
 title: { zh: "fusion-identity 配置参考", en: "fusion-identity config reference" }
 audience: engineer
 status: draft
-version: 0.2.38
+version: 0.2.39
 updated: 2026-11-18
 owner: "@dahai"
 source_of_truth:
@@ -98,6 +98,8 @@ source_of_truth:
 | `FUSION_IDENTITY_REGISTRATION_DEFAULT_TENANT` | `community` | 个人注册自动加入的租户(缺失时自动创建 free 模板) |
 | `FUSION_IDENTITY_SSO_TICKET_TTL` | `60` | SSO ticket 生命周期(秒,钳制 5–600) |
 | `FUSION_IDENTITY_PASSWORD_RESET_TTL` | `1800` | 密码重置 token TTL(秒)——bearer 能力,≤30 分钟(issue #90) |
+| `FUSION_IDENTITY_RESET_BACKOFF_BASE` | `2` | 重置请求退避基准(秒,issue #98);同账号/IP 重复请求指数翻倍,`0` 关闭 |
+| `FUSION_IDENTITY_RESET_BACKOFF_CAP` | `300` | 重置请求退避上限(秒,issue #98);429 携带 `Retry-After`,尖峰 WARNING |
 | `FUSION_IDENTITY_DELETE_GRACE_SECONDS` | `604800` | 账号删除宽限期(秒,issue #91);窗口内登录/bearer/gRPC 全拒绝 |
 | `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` | `12` | 审计日志保留窗口(月,issue #91) |
 | `FUSION_IDENTITY_RETENTION_SWEEP_SECONDS` | `3600` | retention worker 扫描间隔(秒,issue #91);`0` 关闭 |
