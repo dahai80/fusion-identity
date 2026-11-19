@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.40
+version: 0.2.41
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -85,6 +85,8 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 
 默认**只绑 127.0.0.1**（PRD C8 —— 不对外暴露，流量经网关进入）。
 
+`/health` 为存活探测，同时报告**邮件投递模式**：`email: "smtp"`（已配置 relay）或 `"logged"`（开发回退，验证链接只进日志）（issue #103——生产环境对 `logged` 告警；`FUSION_IDENTITY_ENV=production` 且缺 SMTP 时服务直接拒绝启动）。`/ready` 为真实就绪探测，探测 store 与 Redis，依赖故障返回 `503`，编排器据此停止路由流量。
+
 ## 环境变量
 
 | 变量 | 必填 | 默认 | 说明 |
@@ -125,6 +127,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | 否 | `stub` | issue #74：预付费充值平面的支付后端。`stub` 即时确认（仅开发/测试——不可用于真实资金）。未知值 fail-closed（充值端点返回 503）。 |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | 否 | `20` | issue #74：租户首笔已支付充值订单的赠送代币百分比（如 20 → 1000 代币 + 200 赠送）。`0` 关闭赠送。 |
 | `FUSION_IDENTITY_OPS_DSN` | 否 | —（关闭） | issue #99：ops 数据湖（`fusion_ops`）的 asyncpg DSN。设置后 identity 通过 `fusion_core.ops.OpsEmitter` 向 `ops_events` 发送脱敏事件（用户/租户 id 仅哈希、token 计数——绝不含原始邮箱/用户名/JWT/密码）。未设置 → ops 平面完全关闭（零额外 I/O）。遥测 fail-open：ops 故障绝不阻塞认证。 |
+| `FUSION_IDENTITY_ENV` | 否 | —（开发模式） | issue #103：部署环境标记。设为 `production` 时，`FUSION_IDENTITY_SMTP_HOST` 缺失将在启动时 fail-closed 拒绝（生产注册绝不允许 201 而验证链接只进日志——2026-11-19 事故）。未设置或其它值保留 logged 开发回退。 |
 | `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | 否 | `900` | issue #76：服务账号会话 token 生命周期（秒，钳制 ≥60）。刻意取短——机器侧凭预置凭证换取，不持长效 bearer。 |
 | `FUSION_IDENTITY_DELETE_GRACE_SECONDS` | 否 | `604800`（7 天） | issue #91：账号删除宽限期，秒。从 `POST /api/v1/auth/account/delete` 到清除执行期间，登录/bearer/gRPC 全部拒绝该账号（`account is scheduled for deletion`）；宽限期内可撤销。 |
 | `FUSION_IDENTITY_AUDIT_RETENTION_MONTHS` | 否 | `12` | issue #91：审计日志保留窗口，月。retention worker 删除早于该窗口的审计行。 |

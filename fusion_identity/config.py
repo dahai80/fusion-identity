@@ -171,6 +171,11 @@ class Settings:
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_from: str = ""
+    # Issue #103: deployment marker. "production" turns missing-SMTP into a
+    # fail-closed startup error (a prod registration with a logged-not-sent
+    # verification email is an incident, not a fallback); anything else keeps
+    # the logged dev fallback. Empty = development.
+    env_name: str = ""
     # Issue #51: public origin of the auth portal — used to build absolute
     # verification links ({base}/auth/?verify={token}). Empty → relative
     # link fallback with a loud warning (delivery is never refused).
@@ -308,7 +313,7 @@ def load_settings() -> Settings:
             "config: FUSION_IDENTITY_WEBHOOK_URL set but FUSION_IDENTITY_WEBHOOK_SECRET unset"
         )
         raise ConfigError("FUSION_IDENTITY_WEBHOOK_SECRET is required when WEBHOOK_URL is set")
-    return Settings(
+    settings = Settings(
         host=os.environ.get("FUSION_IDENTITY_HOST", DEFAULT_HOST),
         port=_core_port(DEFAULT_PORT),
         database_url=os.environ.get("FUSION_IDENTITY_DATABASE_URL", DEFAULT_DATABASE_URL),
@@ -392,6 +397,7 @@ def load_settings() -> Settings:
         smtp_username=os.environ.get("FUSION_IDENTITY_SMTP_USERNAME", ""),
         smtp_password=os.environ.get("FUSION_IDENTITY_SMTP_PASSWORD", ""),
         smtp_from=os.environ.get("FUSION_IDENTITY_SMTP_FROM", ""),
+        env_name=os.environ.get("FUSION_IDENTITY_ENV", "").strip().lower(),
         public_base_url=os.environ.get("FUSION_IDENTITY_PUBLIC_BASE_URL", "").rstrip("/"),
         smtp_starttls=os.environ.get("FUSION_IDENTITY_SMTP_STARTTLS", "1").strip().lower()
         in ("1", "true", "yes"),
@@ -403,3 +409,16 @@ def load_settings() -> Settings:
         service_account_ttl_seconds=_int_env("FUSION_IDENTITY_SERVICE_ACCOUNT_TTL", 900),
         refresh_rate_limit=_int_env("FUSION_IDENTITY_REFRESH_RATE_LIMIT", 60),
     )
+    # Issue #103: prod must not silently run the logged-email fallback — a
+    # registration would return 201 with the verification link stuck in a log
+    # line. Fail-closed at startup (red line #1) instead of at first signup.
+    if settings.env_name == "production" and not settings.smtp_host:
+        _logger_src.error(
+            "config: FUSION_IDENTITY_ENV=production but FUSION_IDENTITY_SMTP_HOST "
+            "unset — email would be logged, not sent; refusing start (fail-closed)"
+        )
+        raise ConfigError(
+            "FUSION_IDENTITY_ENV=production requires FUSION_IDENTITY_SMTP_HOST "
+            "(silent logged-email fallback is forbidden in production)"
+        )
+    return settings

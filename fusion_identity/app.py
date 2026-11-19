@@ -207,8 +207,15 @@ def _package_version() -> str:
 
 def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bool = True) -> Any:
     setup_logging("fusion_identity", level=settings.log_level, json_format=settings.log_json)
-    app = create_app("fusion-identity", version=_package_version())
+    app = create_app(
+        "fusion-identity",
+        version=_package_version(),
+        # Issue #103: /health is registered by routes/health.py instead — same
+        # liveness shape plus the email delivery mode (monitoring alertable).
+        enable_health=False,
+    )
     app.state.settings = settings
+    app.state.version = _package_version()
     app.state.store = store if store is not None else _build_store(settings)
     app.state.auth_service = _build_auth_service(settings, app.state.store)
     app.state.redis = None

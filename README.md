@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.40
+version: 0.2.41
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -90,7 +90,7 @@ curl -s http://127.0.0.1:11470/ready    # readiness probe: store + redis; 503 on
 
 Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic reaches it via the gateway).
 
-`/health` is a static liveness check (process alive); `/ready` is a real readiness probe that hits the store and Redis and returns `503` when a dependency is down, so orchestrators stop routing traffic.
+`/health` is a liveness check (process alive) that also reports the **email delivery mode**: `email: "smtp"` when a relay is configured, `"logged"` when the dev fallback logs verification links instead of sending (issue #103 — alert on `logged` in production; with `FUSION_IDENTITY_ENV=production` the service additionally refuses to start without SMTP). `/ready` is a real readiness probe that hits the store and Redis and returns `503` when a dependency is down, so orchestrators stop routing traffic.
 
 ## Environment
 
@@ -149,6 +149,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_PUBLIC_BASE_URL` | no | — | Issue #51: public origin of the auth portal; verification links are built as `{base}/auth/?verify={token}` (route contract owned by fusion-gateway `web/auth/app.js`). Unset → relative link fallback + loud WARNING at send time. |
 | `FUSION_IDENTITY_PAYMENT_PROVIDER` | no | `stub` | Issue #74: payment backend for the prepaid recharge plane. `stub` confirms instantly (dev/test only — never real money). Unknown values fail closed (503 on recharge endpoints). |
 | `FUSION_IDENTITY_OPS_DSN` | no | — (off) | Issue #99: asyncpg DSN of the ops data lake (`fusion_ops`). When set, identity emits desensitized ops events (hashed user/tenant ids, token counters — never raw emails/usernames/JWTs/passwords) to `ops_events` via `fusion_core.ops.OpsEmitter`. Unset → the ops plane is fully off (zero extra I/O). Telemetry is fail-open: an ops outage never blocks auth. |
+| `FUSION_IDENTITY_ENV` | no | — (development) | Issue #103: deployment marker. `production` makes a missing `FUSION_IDENTITY_SMTP_HOST` a fail-closed startup error (a prod registration must never 201 with the verification link only in a log line — incident 2026-11-19). Unset/any other value keeps the logged dev fallback. |
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | no | `20` | Issue #74: bonus-token percentage granted on a tenant's FIRST paid recharge order (e.g. 20 → 1000 tokens + 200 promo). `0` disables the promo. |
 | `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | no | `900` | Issue #76: service-account session token TTL, seconds (clamped ≥60). Short by design — machines re-exchange their pre-provisioned credential instead of holding a long-lived bearer. |
 | `FUSION_IDENTITY_DELETE_GRACE_SECONDS` | no | `604800` (7d) | Issue #91: account-deletion grace window, seconds. Between `POST /api/v1/auth/account/delete` and the purge the login/bearer/gRPC planes all refuse the account (`account is scheduled for deletion`); the window is cancelable. |

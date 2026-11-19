@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.40
+version: 0.2.41
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,13 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.41
+
+### Issue #103 — email delivery mode made observable; prod refuses the silent logged fallback
+- **/health now reports the email mode**: identity owns its liveness probe (`routes/health.py`, `create_app(..., enable_health=False)`) and returns the fusion_core shape plus `email: "smtp" | "logged"` (helper `email_sender.email_mode`). Monitoring can alert on `logged` — the silent dev fallback that caused the 2026-11-19 prod incident (registration 201 with the verification link only in a WARNING log line, root cause: prod env had no `FUSION_IDENTITY_SMTP_*` vars).
+- **Fail-closed prod marker**: new `FUSION_IDENTITY_ENV` (default empty = development). `FUSION_IDENTITY_ENV=production` with `FUSION_IDENTITY_SMTP_HOST` unset raises `ConfigError` at startup — a prod deploy cannot silently run the logged-email fallback (red line #1). Development keeps the logged fallback untouched.
+- Tests: 6 offline (`tests/test_email_mode_issue103.py` — health shape + both modes, helper, prod-without-SMTP refuses start, prod-with-SMTP starts, dev defaults unchanged).
 
 ## 0.2.40
 

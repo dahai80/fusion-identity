@@ -13,6 +13,14 @@ class EmailDeliveryError(RuntimeError):
     pass
 
 
+def email_mode(settings: Any) -> str:
+    # Issue #103: surfaced in /health so monitoring can alert on the silent
+    # "logged" dev fallback — a prod registration must never 201 with the
+    # verification link stuck in a log line (prod additionally fails closed
+    # at startup, see config.load_settings).
+    return "smtp" if getattr(settings, "smtp_host", "") else "logged"
+
+
 _VERIFY_BODY = (
     "Welcome to Fusion, {username}.\n\n"
     "Verify your email address by visiting:\n\n"
