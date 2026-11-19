@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 工程指南", en: "fusion-identity engineering guide" }
 audience: engineer
 status: draft
-version: 0.2.40
+version: 0.2.41
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -139,6 +139,10 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` + `X-Tenant-Id: <
 - `service_accounts` (issue #76): headless machine principals for acceptance suites / CI (fusion-site#37 verdict: NO captcha backdoor). Admin plane (`routes/service_accounts.py`, service-token gated): POST/GET `/api/v1/admin/tenants/{tid}/service-accounts` + DELETE `.../{account_id}` (audited `svc.created`/`svc.revoked`). Tenant-pinned account, `fsa_` credential sha256 at rest (raw returned once), revocable (migration `0022`). Machine login: `POST /api/v1/auth/service-accounts/token` `{credential}` (TENANT_EXEMPT, rate-limited) -> `AuthService.service_account_token`: ACCESS-only token (no refresh; machines re-exchange), role `service`, account scopes, TTL `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` default 900s. The shared predicate (`_authorize` / `resolve_bearer_claims` / `/verify`) checks role=='service' BEFORE the user gates — validates the ACCOUNT (no users row, no membership), keeps the account scope, verify returns read-only shape (empty write_classes + allowed_menus). Audit role `service` distinguishes non-human sessions; revocation kills the credential AND in-flight tokens.
 
 - `settings` (`/api/v1/auth/settings`, issue #101): per-user privacy surface — GET/PUT `data_reflow_enabled` (default TRUE, migration `0025` adds the column on `users`; unknown user reads True, PUT unknown → 404). User-scoped, tenant-middleware-EXEMPT (bearer via `require_bearer`). PUT audits `auth.settings_updated`; the `true→false` transition additionally emits `auth.data_reflow.optout` (hashed ids) so the ops-side pipeline purges/anonymizes stored samples — identity never stores prompt text, so the flag needs no local data action.
+
+### Email delivery mode + env marker (issue #103)
+
+`FUSION_IDENTITY_ENV` (default empty = development): `production` + missing `FUSION_IDENTITY_SMTP_HOST` raises `ConfigError` at startup — the logged dev fallback (verification link only in a WARNING log, registration still 201) is forbidden in prod (2026-11-19 incident). `/health` is identity-owned (`routes/health.py`, `create_app(..., enable_health=False)`) and returns the fusion_core liveness shape plus `email: "smtp" | "logged"` (`email_sender.email_mode(settings)`) so monitoring can alert on the fallback. `/ready` unchanged.
 
 ### Ops events (issue #99 — flywheel Loop A)
 

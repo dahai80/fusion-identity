@@ -11,6 +11,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
 
 
+@router.get("/health", include_in_schema=False)
+async def health(request: Request) -> dict:
+    # Issue #103: identity-owned liveness probe replacing the fusion_core
+    # static one (create_app runs with enable_health=False). Same shape plus
+    # the email delivery mode so monitoring can alert on "logged" — the
+    # silent dev fallback that caused the 2026-11-19 prod registration
+    # incident (201 returned, verification link only in a WARNING log).
+    from fusion_identity.email_sender import email_mode
+
+    settings = getattr(request.app.state, "settings", None)
+    version = getattr(request.app.state, "version", None) or "unknown"
+    return {
+        "status": "ok",
+        "service": "fusion-identity",
+        "version": version,
+        "email": email_mode(settings) if settings is not None else "unknown",
+    }
+
+
 @router.get("/ready", include_in_schema=False)
 async def ready(request: Request) -> JSONResponse:
     # P1-3: /health (from fusion_core) is a static 200 that probes nothing, so a
