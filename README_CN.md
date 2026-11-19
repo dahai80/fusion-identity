@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.41
+version: 0.2.42
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -409,7 +409,7 @@ fusion-security Admin Console 是服务，只持有 service token（union-web if
 
 ## 数据库
 
-Postgres 库 `fusion_identity` —— 单一权威库（issue #26，DB 规范 DB-2：一应用一库；旧 `fusion_tenant` 默认值已废弃）。schema 见 [`deploy/sql/schema.sql`](deploy/sql/schema.sql)（附录 A.1 DDL），`PgStore` 启动时经 [`migrations/`](migrations/) 幂等应用。24 张表：`tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`migration_orphans`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`、`app_secrets`、`app_credentials`。`PgStore.ensure_schema` 仅告警（DDL 由操作员/CI 负责）。
+Postgres 库 `fusion_identity` —— 单一权威库（issue #26，DB 规范 DB-2：一应用一库；旧 `fusion_tenant` 默认值已废弃）。[`migrations/`](migrations/) 是 DDL 的唯一权威来源，`PgStore` 启动时幂等应用。[`deploy/sql/schema.sql`](deploy/sql/schema.sql) 由 migrations 构建 **生成**（issue #105：对 0001→0025 迁移后的库 `pg_dump`，并补回 `--schema-only` 不导出的 `roles`/`plan_templates` 种子数据），供带外初始化的操作员使用 —— 不要手改，新增迁移后需重新生成（`tests/test_schema_drift_issue105.py` 漂移守卫测试会拦住失步）。33 张表，含 `tenants`、`users`、`tenant_members`、`api_keys`、`roles`、`quotas`、`usage_ledger`、`tenant_usage_daily`、`refresh_tokens`、`revoked_jtis`、`issued_jtis`、`audit_log`、`identity_providers`、`user_mfa`、`lease_log`、`departments`、`custom_roles`、`role_menu_matrix`、`known_menus`、`plan_templates`、`idempotency_keys`、`event_outbox`、`app_secrets`、`app_credentials`、`sso_tickets`、`service_accounts`、`prepaid_orders`、`balance_ledger`、`account_deletions`。
 
 附带 `InMemoryStore` 供测试与引导；未注入 Postgres store 时 `build_app()` 用它。
 

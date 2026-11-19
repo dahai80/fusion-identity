@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.41
+version: 0.2.42
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -570,7 +570,7 @@ All lifecycle mutations append to a transactional event outbox (`event_outbox` t
 
 ## Database
 
-Postgres DB `fusion_identity` — the single canonical database (issue #26, DB conventions DB-2: one app, one database; the legacy `fusion_tenant` default is retired). Schema in [`deploy/sql/schema.sql`](deploy/sql/schema.sql) (Appendix A.1 DDL) applied via idempotent migrations in [`migrations/`](migrations/) on `PgStore` startup. 24 tables: `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `migration_orphans`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`, `app_secrets`, `app_credentials`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
+Postgres DB `fusion_identity` — the single canonical database (issue #26, DB conventions DB-2: one app, one database; the legacy `fusion_tenant` default is retired). The idempotent migrations in [`migrations/`](migrations/) are the single source of truth for DDL and run on `PgStore` startup. [`deploy/sql/schema.sql`](deploy/sql/schema.sql) is GENERATED from a migrations-only build (issue #105: `pg_dump` of 0001→0025 plus the re-appended `roles`/`plan_templates` seed block) for operators who bootstrap the DB out-of-band — do not hand-edit it; regenerate after adding a migration (drift-guard tests in `tests/test_schema_drift_issue105.py` fail CI if it drifts). 33 tables incl. `tenants`, `users`, `tenant_members`, `api_keys`, `roles`, `quotas`, `usage_ledger`, `tenant_usage_daily`, `refresh_tokens`, `revoked_jtis`, `issued_jtis`, `audit_log`, `identity_providers`, `user_mfa`, `lease_log`, `departments`, `custom_roles`, `role_menu_matrix`, `known_menus`, `plan_templates`, `idempotency_keys`, `event_outbox`, `app_secrets`, `app_credentials`, `sso_tickets`, `service_accounts`, `prepaid_orders`, `balance_ledger`, `account_deletions`. `users` stores argon2id hashes with per-user salts; `refresh_tokens` tracks rotation families (reuse → family revoke); `audit_log` is hash-chained with an atomic sequence; `lease_log` is the concurrency lease ledger (Redis is authoritative); `event_outbox` is the lifecycle event log (issue #14).
 
 An `InMemoryStore` ships for tests and bootstrap; `build_app()` uses it when `FUSION_IDENTITY_USE_PGSTORE` is unset. Production sets that env and injects a `PgStore`, which runs idempotent migrations from [`migrations/`](migrations/) on startup (`ensure_schema`).
 

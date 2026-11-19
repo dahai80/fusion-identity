@@ -7,7 +7,7 @@ doc_type: config-reference
 title: { zh: "fusion-identity 配置参考", en: "fusion-identity config reference" }
 audience: engineer
 status: draft
-version: 0.2.41
+version: 0.2.42
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
