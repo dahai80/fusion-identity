@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.42
+version: 0.2.43
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.43
+
+### Issue #107 — JWT keyring persisted at startup; kid stable across restarts
+- **Root cause**: `FUSION_IDENTITY_JWT_KEYRING_PATH` was only consumed on `rotate()` / `prune()` — a freshly generated RS256 key was never written, so the file stayed absent and EVERY restart rolled a new keypair (new kid), invalidating all outstanding tokens and breaking gateway/commerce JWKS caches until refetch. Prod logs confirmed the kid changed exactly at each restart (no live rotation had occurred).
+- **Fix** (`jwks.py`): the keyring is persisted IMMEDIATELY after initial RS256 generation (and still on rotation/prune). Restart recovers the persisted keypair — `kid` unchanged. Initial persist failure now REFUSES the start (fail-closed, consistent with red line #1: an unpersisted key is guaranteed token invalidation on the next restart). Persist file written 0600 via atomic tmp+rename. HS256 unchanged.
+- **Rotation story (documented)**: rotation retires the current kid with a 24h verification grace window (published in `/.well-known/jwks.json` until pruned); the full current+retired history survives restarts via the persist file.
+- Tests: 6 offline (`tests/test_jwks_persist_issue107.py` — immediate persist + 0600 perms, same kid across restart, rotation survives restart with old kid verifiable, persist failure refuses start, HS256 never persists, corrupt file falls back to fresh with WARNING).
 
 ## 0.2.42
 

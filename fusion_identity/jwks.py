@@ -119,9 +119,12 @@ class KeyRing:
     def hs256(cls, key: str) -> KeyRing:
         return cls(algorithm="HS256", hs_key=key)
 
-    def _persist(self) -> None:
+    def _persist(self, *, required: bool = False) -> None:
         # P0-1: atomically write current + retired keys so a restart recovers
         # the full rotation history. tmp file + rename = crash-safe.
+        # Issue #107: required=True (initial startup persist) — a failure must
+        # refuse the start (fail-closed), not silently run with an unpersisted
+        # key whose loss on restart invalidates every outstanding token.
         if not self.persist_path or self.algorithm != "RS256":
             return
         if not self.rsa_current:
@@ -132,15 +135,27 @@ class KeyRing:
             "retired": [_rsa_key_to_dict(rk) for rk in self.rsa_retired],
         }
         directory = os.path.dirname(os.path.abspath(self.persist_path)) or "."
-        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".keyring_", suffix=".tmp")
+        tmp = ""
         try:
+            fd, tmp = tempfile.mkstemp(dir=directory, prefix=".keyring_", suffix=".tmp")
             with os.fdopen(fd, "w") as fh:
                 json.dump(payload, fh)
+            os.chmod(tmp, 0o600)
             os.replace(tmp, self.persist_path)
             logger.info("KeyRing: persisted rotation state to %s", self.persist_path)
         except Exception as exc:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
+            if required:
+                logger.error(
+                    "KeyRing: initial persist to %s failed (%s) — refusing start "
+                    "(unpersisted RS256 key would be lost on restart)",
+                    self.persist_path,
+                    exc,
+                )
+                raise RuntimeError(
+                    f"JWT keyring persist failed for {self.persist_path!r}: {exc}"
+                ) from exc
             logger.error("KeyRing: persist failed (%s) — rotation NOT durable", exc)
 
     @classmethod
@@ -222,6 +237,11 @@ class KeyRing:
         if public_keys_pem:
             ring._load_extra_public_keys(public_keys_pem)
         logger.info("KeyRing: rs256 initialized kid=%s", kid)
+        if persist_path:
+            # Issue #107: persist the freshly generated/loaded-in key IMMEDIATELY,
+            # not just on rotation — otherwise a restart before the first rotation
+            # rolls a brand-new keypair (new kid) and invalidates every token.
+            ring._persist(required=True)
         return ring
 
     def _load_extra_public_keys(self, public_keys_pem: str) -> None:
