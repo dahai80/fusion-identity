@@ -7,7 +7,7 @@ doc_type: config-reference
 title: { zh: "fusion-identity 配置参考", en: "fusion-identity config reference" }
 audience: engineer
 status: draft
-version: 0.2.42
+version: 0.2.43
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -34,6 +34,7 @@ source_of_truth:
 |---|---|---|
 | `FUSION_IDENTITY_JWT_ALGORITHM` | `HS256` | `HS256` 或 `RS256` |
 | `FUSION_IDENTITY_JWT_PRIVATE_KEY_PEM` | — | RS256 私钥 PEM;未设置则启动时生成 |
+| `FUSION_IDENTITY_JWT_KEYRING_PATH` | — | RS256 密钥环持久化文件,启动即写、轮换即写(issue #107);重启后同一 keypair(kid 不变),写入失败拒绝启动,文件权限 0600 |
 | `FUSION_IDENTITY_JWT_ISSUER` | `fusion-identity` | `iss` claim |
 | `FUSION_IDENTITY_JWT_AUDIENCE` | `fusion-cluster` | `aud` claim |
 | `FUSION_IDENTITY_JWT_TTL` | `28800` | access token TTL(秒,8h) |

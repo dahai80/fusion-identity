@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 运维手册", en: "fusion-identity operations runbook" }
 audience: engineer
 status: draft
-version: 0.2.42
+version: 0.2.43
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -225,7 +225,7 @@ Dual-window so downstream callers rotate without a hard cutover.
 
 HS256: change `FUSION_IDENTITY_JWT_KEY` and restart. All previously issued tokens become unverifiable (no grace window for HS256). For zero-downtime, rotate during a low-traffic window and accept forced re-login, OR migrate to RS256 (JWKS + `kid` with 24h retired-key grace — see `/.well-known/jwks.json`).
 
-RS256: keys rotate via the keyring (`FUSION_IDENTITY_JWT_KEYRING_PATH`); retired keys verify for 24h. No restart needed for verification; new tokens sign with the active kid.
+RS256: keys rotate via the keyring (`FUSION_IDENTITY_JWT_KEYRING_PATH`); retired keys verify for 24h. No restart needed for verification; new tokens sign with the active kid. The keyring file is written at startup (issue #107) and on every rotation — a restart serves the SAME kid; verify after restart that `kid` in `/.well-known/jwks.json` is unchanged and the file is 0600.
 
 ## HA prerequisites (infrastructure, not this service)
 

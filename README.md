@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.42
+version: 0.2.43
 updated: 2026-11-19
 owner: "@dahai"
 source_of_truth:
@@ -101,6 +101,7 @@ Binds **127.0.0.1 only** by default (PRD C8 — no external exposure; traffic re
 | `FUSION_IDENTITY_KEK` | **yes** | — | Key-encryption key for IdP `client_secret` + TOTP secrets (AES-256-GCM, HKDF-SHA256 derived). Must be set explicitly and must differ from `FUSION_IDENTITY_JWT_KEY` (key isolation). |
 | `FUSION_IDENTITY_JWT_ALGORITHM` | no | `HS256` | JWT signing algorithm — `HS256` or `RS256`. |
 | `FUSION_IDENTITY_JWT_PRIVATE_KEY_PEM` | no | — | RS256 private key PEM (generated at startup if unset). |
+| `FUSION_IDENTITY_JWT_KEYRING_PATH` | no | — | RS256 keyring persistence file — written IMMEDIATELY at startup and on every rotation (issue #107); a restart recovers the same keypair (kid stable). Write failure at startup refuses the start (fail-closed). File is 0600. |
 | `FUSION_IDENTITY_HOST` | no | `127.0.0.1` | Bind address. |
 | `FUSION_IDENTITY_PORT` | no | `11470` | Listen port. Resolved via `fusion_core.config.service_port` (single-point resolution, config-conventions §2 — issue #20). |
 | `FUSION_REGISTRY` | no | `~/fusion/architecture/port-registry.yaml` | Port registry path for the register-then-start self-check (issue #23). A missing file warns and continues (standalone deploy outside the workspace). |
