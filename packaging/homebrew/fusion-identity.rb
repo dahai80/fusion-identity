@@ -10,7 +10,7 @@
 class FusionIdentity < Formula
     desc "Fusion tenant-identity service — JWT issuer + tenant registry"
     homepage "https://github.com/dahai80/fusion-identity"
-    version "0.2.42"
+    version "0.2.43"
     license "MIT"
 
     base_url = "https://github.com/dahai80/fusion-identity/releases/download/v#{version}"
@@ -18,21 +18,21 @@ class FusionIdentity < Formula
     on_macos do
         on_arm do
             url "#{base_url}/fusion-identity-venv-#{version}-darwin-arm64.tar.gz"
-            sha256 "dd4051ca7c7f136d82c5c7972b37d055a56db98e595992eea4e772c128872f39"
+            sha256 "b5d6c6e361ec1cad499b0262083772af0f1ae843380dce3d9f064fe367e35c91"
         end
         on_intel do
             url "#{base_url}/fusion-identity-venv-#{version}-darwin-x64.tar.gz"
-            sha256 "f9bb9009a6ad8eb1de9755c9b999348694ee59a96fec1a0aeb238554e9d13648"
+            sha256 "de774f89f489200b5f858b8c520defa3c7dbd84778ec0a4ce50725b2045f925c"
         end
     end
     on_linux do
         on_arm do
             url "#{base_url}/fusion-identity-venv-#{version}-linux-arm64.tar.gz"
-            sha256 "b24c0f922588747dc4bde87d04c937ba9772d5674f42bd4b3d358d1aea631979"
+            sha256 "8687251c3b9b514769899a46b6f6c9cccfbe939e096a49da7d01548f8fb2d3ac"
         end
         on_intel do
             url "#{base_url}/fusion-identity-venv-#{version}-linux-x64.tar.gz"
-            sha256 "42efe24bbbf0ca7280af0f0cf82bc2961f27d9b21a70d6b3a3db8448d928971f"
+            sha256 "2af1b4b5ab7909fb8cd4116b349a79255299e275ea8565daa051a9258dabc4e3"
         end
     end
 
