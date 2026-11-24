@@ -39,6 +39,13 @@ class SsoTicketExchangeRequest(BaseModel):
     ticket: str = Field(min_length=1)
 
 
+class SsoTicketServiceRequest(BaseModel):
+    # Issue #111: service-token ticket minting for a named user
+    # (gateway#715 local-password session bridge).
+    user_id: str = Field(min_length=1)
+    tenant_id: str = Field(min_length=1)
+
+
 class PasswordForgotRequest(BaseModel):
     # Issue #54: self-service password recovery. The response is uniform
     # regardless of account existence — no enumeration.

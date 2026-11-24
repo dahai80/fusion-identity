@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.46
+version: 0.2.47
 updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
@@ -152,6 +152,7 @@ curl -s http://127.0.0.1:11470/health   # {"status":"ok","service":"fusion-ident
 | POST | `/refresh` | 无 | `{refresh_token}` → 新 access token |
 | POST | `/ticket` | bearer | issue #48：签发一次性 SSO ticket（`fsso_…`，TTL `FUSION_IDENTITY_SSO_TICKET_TTL` 默认 60 秒，钳制 5–600），绑定会话的 sub + 租户，用于 fusion-site → web-shell 免二次登录交接。返回 `{ticket,expires_in}`；落库仅存 sha256 哈希。 |
 | POST | `/ticket/exchange` | 无（ticket 即凭据） | issue #48：`{ticket}` → 标准 `{access_token,refresh_token,…}`。原子单次使用（重放 → 401 `invalid ticket`）；兑换时从 tenant_members 重新取角色并复核成员关系/租户状态（fail-closed）。与 login 相同的限流。 |
+| POST | `/ticket/service` | service token | issue #111：`{user_id, tenant_id}` → 为指定用户签发一次性 `fsso_` ticket（gateway#715 本地密码会话桥接）。service token 门禁 + 限流；按兑换同一谓词 fail-closed（用户启用、租户启用、成员关系存在，否则 404）；审计 `auth.ticket_issued.service`。复用 #48 ticket 存储，零新依赖。 |
 | POST | `/password/forgot` | 无 | issue #54：`{email}` → 请求密码重置。**恒返回** `{sent:true}` —— 账号是否存在不由此端点泄露（防枚举）。账号存在时，一次性带过期 token（sha256 落库，TTL `FUSION_IDENTITY_PASSWORD_RESET_TTL` 默认 30 分钟）以 `{FUSION_IDENTITY_PUBLIC_BASE_URL}/auth/reset?token={token}` 邮件发出。issue #90：真实命中记审计（`auth.password_reset_requested`）。有限流。 |
 | POST | `/password/reset-request` | 无 | issue #90：`/password/forgot` 的一等别名 —— 行为、响应、限流、审计完全一致。客户端建议优先使用该名称。 |
 | POST | `/password/reset` | 无（token 即凭据） | issue #54：`{token,new_password}` → 消费一次性 token（原子，重放/过期/未知 → 统一 400），轮换 argon2id 哈希，撤销全部 refresh token 家族（旧会话全部失效），审计 `auth.password_reset` 记入 `_system`。issue #90：重置成功后向账号持有者发送确认邮件（"密码已修改"）——发送失败仅记日志，绝不使重置失败。密码策略强制（≥10 字符，含字母 + 数字）。 |

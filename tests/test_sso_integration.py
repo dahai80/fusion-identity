@@ -112,3 +112,34 @@ async def test_pg_sso_ticket_roundtrip(pg_sso):
     row = await c._probe.fetchrow("SELECT used_at FROM sso_tickets WHERE user_id=$1", uid)
     assert row is not None and row["used_at"] is not None
     logger.info("pg sso roundtrip ok uid=%s", uid)
+
+
+async def test_pg_service_ticket_mint_roundtrip(pg_sso):
+    # Issue #111: service-token minting for a named user against PgStore.
+    c = pg_sso
+    _register(c, "pgsso2")  # founding signup → community tenant_admin (#63)
+    uid = _register(c, "pgsso3")  # second registrant → plain member
+    r = c.post(
+        "/api/v1/auth/ticket/service",
+        headers={"Authorization": f"Bearer {TEST_SERVICE_TOKEN}"},
+        json={"user_id": uid, "tenant_id": "community"},
+    )
+    assert r.status_code == 200, r.text
+    ticket = r.json()["ticket"]
+    row = await c._probe.fetchrow("SELECT used_at FROM sso_tickets WHERE user_id=$1", uid)
+    assert row is not None and row["used_at"] is None
+    ex = c.post("/api/v1/auth/ticket/exchange", json={"ticket": ticket})
+    assert ex.status_code == 200, ex.text
+    v = c.post("/api/v1/auth/verify", json={"token": ex.json()["access_token"]}, headers=_SVC)
+    assert v.status_code == 200, v.text
+    assert v.json()["tid"] == "community"
+    # replay rejected on PG
+    replay = c.post("/api/v1/auth/ticket/exchange", json={"ticket": ticket})
+    assert replay.status_code == 401
+    # audit landed as the impersonation-class action
+    n = await c._probe.fetchval(
+        "SELECT count(*) FROM audit_log WHERE user_id=$1 AND action='auth.ticket_issued.service'",
+        uid,
+    )
+    assert n == 1, n
+    logger.info("pg service ticket roundtrip ok uid=%s", uid)

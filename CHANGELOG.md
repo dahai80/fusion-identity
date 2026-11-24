@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.46
+version: 0.2.47
 updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,15 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.47
+
+### Issue #111 — service-token SSO ticket minting for named users
+- **What**: `POST /api/v1/auth/ticket/service` (service-token gated, tenant-middleware-exempt, rate-limited) mints a one-time `fsso_` ticket bound to `{user_id, tenant_id}` — reusable of the #48 single-use ticket store and exchange, no new dependencies, no migration.
+- **Why**: closes the gateway#715 local-password gap — a shell session issued by the gateway's own user store has no identity principal, and no existing primitive could mint a user bearer for one (service accounts are `role=service`, `/auth/ticket` requires a bearer, the gateway never holds the password). The gateway now translates any shell session whose sub/tenant maps to a real member into a real user bearer via the #48 exchange.
+- **Fail-closed**: same predicate as `exchange_sso_ticket` — user active (not disabled/locked), tenant active, membership present. Unknown user / inactive tenant / non-member → uniform 404 (service plane is operator-facing, no enumeration concern).
+- **Audit**: distinct impersonation-class action `auth.ticket_issued.service` with role `service` (non-human actor, same convention as messaging sender_role) — grep-able separately from self-minted `auth.ticket_issued`. Raw ticket never lands in the audit trail.
+- **Tests**: `tests/test_service_ticket_issue111.py` (7 offline: roundtrip + exchange → real member bearer, service-token required — plain bearer 401 too, unknown user / non-member / disabled user / suspended tenant 404, single-use replay 401, audit action) + `test_pg_service_ticket_mint_roundtrip` (PG: hash-at-rest row, exchange, replay 401, audit row).
 
 ## 0.2.46
 
