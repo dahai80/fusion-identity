@@ -7,8 +7,8 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.43
-updated: 2026-11-19
+version: 0.2.44
+updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -190,3 +190,15 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 | `ReportUsage` | 记 token 用量(日配额计数)+ 释放租约 + 追加 usage ledger;issue #74:扣除越过日配额的溢出部分(`balance_ledger` reason `consumption`),响应含 `remaining_balance` |
 
 客户端 SDK 在 `fusion_identity/client/`(`IdentityClient`、`lease_guard` 异步上下文管理器,`KV_PREFIX = "fusion:identity:"`)。
+
+## 站内消息 — `/api/messaging`(bearer,issue #109)
+
+租户级会话线程(运营↔客服工单流)。用户维度:shell 不发 `X-Tenant-Id`,租户取自 bearer `tid` claim(ASGI 上下文中间件注入,无有效 token → 401 fail-closed)。`tenant_admin`/`operator` 为运营方(租户全部线程 + 状态 chip);其余仅自己的线程。status 原样存储(客户端降级未知值为 `open`)。表:`conversations` / `messages`(BIGSERIAL id,`?after=` 数值过滤)/ `conversation_reads`(迁移 `0026`)。
+
+| Method | Path | Auth | 说明 / Notes |
+|---|---|---|---|
+| GET | `/conversations` | bearer | `{conversations:[{id,scope,ref,subject,status,linked_issue_id,updated_at,unread}]}`;unread = id > 已读标记且 sender ≠ 调用方 |
+| POST | `/conversations` | bearer | 201 `{scope="factory_order",ref,subject}` → 开线程(`conv-…`);审计 `messaging.conversation_opened` |
+| GET | `/conversations/{id}/messages?after=` | bearer | `{messages:[{id,conversation_id,sender,sender_role,content,ts}]}`;`after` 非数值按 0;推进已读标记;仅运营或创建者(否则 403) |
+| POST | `/conversations/{id}/messages` | bearer | 201 `{content}`;`sender_role` 映射:admin/operator→`operator`,service→`system`,其余→`customer` |
+| PATCH | `/conversations/{id}` | bearer(仅运营) | `{status?, linked_issue_id?}`(status 原样存储 ≤64 字符);审计 `messaging.conversation_updated` |

@@ -7,8 +7,8 @@ doc_type: guide
 title: { zh: "fusion-identity 说明(中文)", en: "fusion-identity overview (Chinese)" }
 audience: engineer
 status: draft
-version: 0.2.43
-updated: 2026-11-19
+version: 0.2.44
+updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
   - README_CN.md
@@ -200,6 +200,18 @@ issue #98 加固：重置邮件改为 fire-and-forget 任务投递，命中路�
 **数据回流（飞轮 Loop A，issue #99）**：设置 `FUSION_IDENTITY_OPS_DSN` 后，identity 向 ops 数据湖流式发送脱敏事件（登录成功/失败、token 签发含 refresh/SSO/服务账号类别、api-key token 计数、小时级租户/用户总数）——用户/租户 id 仅哈希（`sha256("identity:{id}")[:16]`，前缀 `u:`/`t:`），载荷中绝无原始邮箱、用户名、JWT 或密码；登录失败事件不含用户 id，ops 库无法成为账号存在性预言机。`data_reflow_enabled=false` 的用户已被完全覆盖：identity 本就不存任何 prompt 文本（prompt 采样在 ops 管道，遵循 opt-out 事件）。发送 fail-open——ops 故障仅记日志，认证永不受阻。
 
 ops 管道的服务面批量查询：`POST /api/v1/admin/data-reflow/flags` `{user_ids: [...]}`（service token，≤500 个）→ `{flags: {user_id: bool}}` —— 缺失用户读 `true`。
+
+### 站内消息（`/api/messaging` —— issue #109）
+
+租户级会话线程，支撑运营↔客服工单流（工厂订单场景，解除 fusion-web-shell#186 阻塞）。与账号平面一样按用户维度：shell 不发 `X-Tenant-Id` —— 租户取自 bearer token 的 `tid` claim（ASGI 上下文中间件注入；无有效 token 则不注入，租户中间件 401，fail-closed）。角色 `tenant_admin`/`operator` 为运营方（可见租户内全部线程、可设状态 chip）；其余为客服侧（仅自己开的线程）。状态 chip 原样存储 —— 客户端把未知值降级为 `open`。线上契约由 shell 解析器冻结（`fusion-web-shell` `apps/shell/src/lib/messaging.ts`）：snake_case 字段、epoch 浮点时间戳。表：`conversations` / `messages`（BIGSERIAL id —— `?after=` 为数值 id 过滤）/ `conversation_reads`（迁移 `0026_messaging.sql`）。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/conversations` | bearer | `{conversations:[{id,scope,ref,subject,status,linked_issue_id,updated_at,unread}]}` —— 运营：租户全部线程；成员：仅自己的线程。`unread` = id 大于调用方已读标记且 sender ≠ 调用方的消息数。 |
+| POST | `/conversations` | bearer | 201 `{scope="factory_order",ref,subject}` → 开线程（`conv-…` id）；审计 `messaging.conversation_opened`。 |
+| GET | `/conversations/{id}/messages?after=` | bearer | `{messages:[{id,conversation_id,sender,sender_role,content,ts}]}` —— `after` 为服务端消息 id（非数值按 0 处理）。同时把调用方已读标记推进到最新消息（unread 清零）。仅运营或线程创建者（否则 403）。 |
+| POST | `/conversations/{id}/messages` | bearer | 201 `{content}` → 回复。`sender` = 用户名；`sender_role` 按 token 角色映射：`tenant_admin`/`operator`→`operator`，`service`→`system`，其余→`customer`。 |
+| PATCH | `/conversations/{id}` | bearer（仅运营，否则 403） | `{status?, linked_issue_id?}` —— status 原样存储（≤64 字符）；`linked_issue_id` 关联镜像 GitHub issue。审计 `messaging.conversation_updated`。 |
 
 ### 租户加入策略（`join_policy` —— issue #40）
 

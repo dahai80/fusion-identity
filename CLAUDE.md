@@ -7,8 +7,8 @@ doc_type: guide
 title: { zh: "fusion-identity 工程指南", en: "fusion-identity engineering guide" }
 audience: engineer
 status: draft
-version: 0.2.43
-updated: 2026-11-19
+version: 0.2.44
+updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
   - CLAUDE.md
@@ -143,6 +143,8 @@ All tenant-scoped routes require `Authorization: Bearer <jwt>` + `X-Tenant-Id: <
 - `service_accounts` (issue #76): headless machine principals for acceptance suites / CI (fusion-site#37 verdict: NO captcha backdoor). Admin plane (`routes/service_accounts.py`, service-token gated): POST/GET `/api/v1/admin/tenants/{tid}/service-accounts` + DELETE `.../{account_id}` (audited `svc.created`/`svc.revoked`). Tenant-pinned account, `fsa_` credential sha256 at rest (raw returned once), revocable (migration `0022`). Machine login: `POST /api/v1/auth/service-accounts/token` `{credential}` (TENANT_EXEMPT, rate-limited) -> `AuthService.service_account_token`: ACCESS-only token (no refresh; machines re-exchange), role `service`, account scopes, TTL `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` default 900s. The shared predicate (`_authorize` / `resolve_bearer_claims` / `/verify`) checks role=='service' BEFORE the user gates — validates the ACCOUNT (no users row, no membership), keeps the account scope, verify returns read-only shape (empty write_classes + allowed_menus). Audit role `service` distinguishes non-human sessions; revocation kills the credential AND in-flight tokens.
 
 - `settings` (`/api/v1/auth/settings`, issue #101): per-user privacy surface — GET/PUT `data_reflow_enabled` (default TRUE, migration `0025` adds the column on `users`; unknown user reads True, PUT unknown → 404). User-scoped, tenant-middleware-EXEMPT (bearer via `require_bearer`). PUT audits `auth.settings_updated`; the `true→false` transition additionally emits `auth.data_reflow.optout` (hashed ids) so the ops-side pipeline purges/anonymizes stored samples — identity never stores prompt text, so the flag needs no local data action.
+
+- `messaging` (`/api/messaging`, issue #109): tenant-scoped conversation threads for the operator↔customer ticket flow (unblocks fusion-web-shell#186). Server owner per architecture ruling 2026-11-24. Wire contract FROZEN by the shell parsers (`fusion-web-shell` `apps/shell/src/lib/messaging.ts`): snake_case fields, epoch-float timestamps, hyphenated statuses stored VERBATIM (client degrades unknown → `open`); contract changes must change parsers + router in the same PR. User-scoped tenant resolution: shell sends NO `X-Tenant-Id` — `_OidcContextMiddleware` (extended, `MESSAGING_PREFIX = "/api/messaging/"`) injects `x-tenant-id` from an unverified local decode of the bearer (full verification still happens downstream in the tenant middleware + `require_bearer`; no valid token → no injection → 401 fail-closed). Roles `tenant_admin`/`operator` = operators (all tenant threads, PATCH status/linked_issue_id); others customer-side (own threads only, 403 cross-user). `sender_role` map: admin/operator→`operator`, `service`→`system`, else `customer`; `sender` = username (`store.get_user` fallback sub). Unread = messages id > read marker AND sender ≠ viewer (tables `conversations`/`messages` BIGSERIAL → `?after=` numeric filter /`conversation_reads`, migration `0026_messaging.sql`). Audits `messaging.conversation_opened`/`messaging.conversation_updated`. Gateway note: fusion-gateway needs a `prefix: /api/messaging` route to identity — upstream issue, not this repo.
 
 ### Email delivery mode + env marker (issue #103)
 

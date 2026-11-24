@@ -3,7 +3,7 @@
 -- fusion_tenant name is retired; the CREATE is guarded so re-running against an
 -- existing install does not fail.
 --
--- Issue #105: this file is GENERATED from migrations/0001..0025 (pg_dump of a
+-- Issue #105: this file is GENERATED from migrations/0001..0026 (pg_dump of a
 -- migrations-only build) — DO NOT hand-edit. migrations/ is the single source
 -- of truth for DDL; regenerate after adding a migration:
 --   fresh PG -> run_migrations() -> pg_dump -s --no-owner --no-privileges
@@ -11,6 +11,7 @@
 -- data; roles + plan_templates seeds are mirrored from migrations 0001/0010).
 -- Verified: a fresh DB built from this file + pre-marked schema_migrations
 -- passes the full integration suite (tests/ -m integration).
+
 SELECT 'CREATE DATABASE fusion_identity'
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'fusion_identity')\gexec
 
@@ -193,6 +194,35 @@ ALTER SEQUENCE public.balance_ledger_id_seq OWNED BY public.balance_ledger.id;
 
 
 --
+-- Name: conversation_reads; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.conversation_reads (
+    conversation_id text NOT NULL,
+    user_id text NOT NULL,
+    last_read_id bigint DEFAULT 0 NOT NULL
+);
+
+
+--
+-- Name: conversations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.conversations (
+    id text NOT NULL,
+    tenant_id text NOT NULL,
+    scope text DEFAULT 'factory_order'::text NOT NULL,
+    ref text DEFAULT ''::text NOT NULL,
+    subject text DEFAULT ''::text NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    linked_issue_id text DEFAULT ''::text NOT NULL,
+    created_by text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: custom_roles; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -364,6 +394,41 @@ CREATE SEQUENCE public.lease_log_id_seq
 --
 
 ALTER SEQUENCE public.lease_log_id_seq OWNED BY public.lease_log.id;
+
+
+--
+-- Name: messages; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.messages (
+    id bigint NOT NULL,
+    conversation_id text NOT NULL,
+    tenant_id text NOT NULL,
+    sender text NOT NULL,
+    sender_role text NOT NULL,
+    content text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT messages_sender_role_check CHECK ((sender_role = ANY (ARRAY['customer'::text, 'operator'::text, 'system'::text])))
+);
+
+
+--
+-- Name: messages_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.messages_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: messages_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.messages_id_seq OWNED BY public.messages.id;
 
 
 --
@@ -729,6 +794,13 @@ ALTER TABLE ONLY public.lease_log ALTER COLUMN id SET DEFAULT nextval('public.le
 
 
 --
+-- Name: messages id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.messages ALTER COLUMN id SET DEFAULT nextval('public.messages_id_seq'::regclass);
+
+
+--
 -- Name: migration_orphans id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -796,6 +868,22 @@ ALTER TABLE ONLY public.audit_log
 
 ALTER TABLE ONLY public.balance_ledger
     ADD CONSTRAINT balance_ledger_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: conversation_reads conversation_reads_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversation_reads
+    ADD CONSTRAINT conversation_reads_pkey PRIMARY KEY (conversation_id, user_id);
+
+
+--
+-- Name: conversations conversations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_pkey PRIMARY KEY (id);
 
 
 --
@@ -884,6 +972,14 @@ ALTER TABLE ONLY public.known_menus
 
 ALTER TABLE ONLY public.lease_log
     ADD CONSTRAINT lease_log_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: messages messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_pkey PRIMARY KEY (id);
 
 
 --
@@ -1126,10 +1222,31 @@ CREATE INDEX idx_balance_ledger_tenant ON public.balance_ledger USING btree (ten
 
 
 --
+-- Name: idx_conversations_tenant_ref; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_conversations_tenant_ref ON public.conversations USING btree (tenant_id, scope, ref);
+
+
+--
+-- Name: idx_conversations_tenant_updated; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_conversations_tenant_updated ON public.conversations USING btree (tenant_id, updated_at DESC);
+
+
+--
 -- Name: idx_event_outbox_status_seq; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_event_outbox_status_seq ON public.event_outbox USING btree (status, seq);
+
+
+--
+-- Name: idx_messages_conv_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_messages_conv_id ON public.messages USING btree (conversation_id, id);
 
 
 --
@@ -1305,6 +1422,22 @@ ALTER TABLE ONLY public.balance_ledger
 
 
 --
+-- Name: conversation_reads conversation_reads_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversation_reads
+    ADD CONSTRAINT conversation_reads_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: conversations conversations_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversations
+    ADD CONSTRAINT conversations_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
 -- Name: custom_roles custom_roles_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1382,6 +1515,22 @@ ALTER TABLE ONLY public.join_requests
 
 ALTER TABLE ONLY public.known_menus
     ADD CONSTRAINT known_menus_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
+
+
+--
+-- Name: messages messages_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: messages messages_tenant_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(tenant_id);
 
 
 --
@@ -1756,6 +1905,8 @@ ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE public.usage_ledger ENABLE ROW LEVEL SECURITY;
+
+--
 
 --
 -- Seed data (not emitted by pg_dump --schema-only; mirrored from

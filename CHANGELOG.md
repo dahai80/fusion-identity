@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.43
-updated: 2026-11-19
+version: 0.2.44
+updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -16,6 +16,16 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.44
+
+### Issue #109 — Messaging service: `/api/messaging` conversation threads
+- **What**: tenant-scoped operator↔customer ticket threads (factory-order scope), server owner per architecture ruling 2026-11-24 — unblocks fusion-web-shell#186.
+- **Wire contract** (frozen by the shell parsers `apps/shell/src/lib/messaging.ts`): GET/POST `/conversations`, GET/POST `/conversations/{id}/messages?after=`, PATCH `/conversations/{id}` (operator only). Snake_case fields, epoch-float timestamps, hyphenated status chips stored VERBATIM (`open|triaged|in-progress|fixed|awaiting-customer|closed`; client degrades unknown → `open`).
+- **Auth model**: user-scoped tenant resolution — the shell sends NO `X-Tenant-Id`; `_OidcContextMiddleware` extended to inject `x-tenant-id` from the bearer's `tid` claim for `/api/messaging/` paths (unverified local decode for context only; tenant middleware + `require_bearer` still fully verify; no valid token → no injection → 401 fail-closed). Roles `tenant_admin`/`operator` see all tenant threads and set the status chip; other roles see only threads they opened (cross-user access 403). `sender_role`: admin/operator→`operator`, `service`→`system`, else `customer`.
+- **Storage** (migration `0026_messaging.sql`): `conversations` (TEXT id, tenant FK, scope/ref/subject/status/linked_issue_id), `messages` (BIGSERIAL — `?after=` is a numeric id filter, tenant FK, sender_role CHECK), `conversation_reads` (per-user read markers, GREATEST semantics). `deploy/sql/schema.sql` regenerated from migrations (issue #105 process; 36 tables). Unread = messages id > read marker AND sender ≠ viewer.
+- **Known upstream gap**: fusion-gateway has no `prefix: /api/messaging` route to identity yet — config-only change in the gateway repo (issue filed upstream); direct `:11470` calls work today.
+- Tests: 8 offline (`tests/test_messaging_issue109.py` — role visibility, unread clearing, after-filter + non-numeric degrade, cross-user 403, operator-only PATCH verbatim status, middleware fail-closed, InMemory store roundtrip) + 1 integration (`tests/test_messaging_integration.py` — PgStore roundtrip incl. TIMESTAMPTZ epoch normalize, dynamic WHERE, GREATEST read markers).
 
 ## 0.2.43
 

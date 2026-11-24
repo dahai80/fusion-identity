@@ -325,6 +325,12 @@ class InMemoryStore:
         # P1-2: per-tenant tail chain_hash so append_audit is O(1), not an O(n)
         # reverse scan every append (which made the whole audit append O(n²)).
         self._audit_tail_hash: dict[str, str] = {}
+        # Issue #109: tenant-scoped messaging threads (conversations/messages/
+        # per-user read markers; _msg_seq mirrors the PG BIGSERIAL on messages).
+        self._conversations: dict[str, dict[str, Any]] = {}
+        self._messages: dict[str, list[dict[str, Any]]] = {}
+        self._reads: dict[tuple[str, str], int] = {}
+        self._msg_seq = 0
         # Issue #14: provisioning plane — plan templates, idempotency keys,
         # lifecycle event outbox.
         self._plan_templates: dict[str, dict[str, Any]] = {
@@ -2133,6 +2139,125 @@ class InMemoryStore:
         del self._mfa[key]
         logger.info("delete_mfa: user=%s method=%s", user_id, method)
         return True
+
+    async def create_conversation(
+        self, tenant_id: str, conv_id: str, scope: str, ref: str, subject: str, created_by: str
+    ) -> dict[str, Any]:
+        # Issue #109: tenant-scoped messaging threads (factory ticket flow).
+        now = _now()
+        conv = {
+            "id": conv_id,
+            "tenant_id": tenant_id,
+            "scope": scope,
+            "ref": ref,
+            "subject": subject,
+            "status": "open",
+            "linked_issue_id": "",
+            "created_by": created_by,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._conversations[conv_id] = conv
+        self._messages[conv_id] = []
+        self._msg_seq = getattr(self, "_msg_seq", 0) + 1
+        logger.info(
+            "create_conversation: tenant=%s conv=%s scope=%s ref=%s", tenant_id, conv_id, scope, ref
+        )
+        return dict(conv)
+
+    async def get_conversation(self, tenant_id: str, conversation_id: str) -> dict[str, Any] | None:
+        c = self._conversations.get(conversation_id)
+        if c is None or c["tenant_id"] != tenant_id:
+            return None
+        return dict(c)
+
+    async def list_conversations(
+        self,
+        tenant_id: str,
+        created_by: str | None = None,
+        viewer_id: str = "",
+        viewer_username: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        # viewer_id drives the read markers; viewer_username excludes the
+        # caller's own messages from the unread count.
+        rows = [c for c in self._conversations.values() if c["tenant_id"] == tenant_id]
+        if created_by is not None:
+            rows = [c for c in rows if c["created_by"] == created_by]
+        rows.sort(key=lambda c: c["updated_at"], reverse=True)
+        out = []
+        for c in rows[:limit]:
+            item = dict(c)
+            last_read = self._reads.get((c["id"], viewer_id), 0)
+            msgs = self._messages.get(c["id"], [])
+            item["unread"] = sum(
+                1 for m in msgs if m["id"] > last_read and m["sender"] != viewer_username
+            )
+            out.append(item)
+        return out
+
+    async def append_message(
+        self, tenant_id: str, conversation_id: str, sender: str, sender_role: str, content: str
+    ) -> dict[str, Any] | None:
+        conv = self._conversations.get(conversation_id)
+        if conv is None or conv["tenant_id"] != tenant_id:
+            return None
+        self._msg_seq += 1
+        msg = {
+            "id": self._msg_seq,
+            "conversation_id": conversation_id,
+            "tenant_id": tenant_id,
+            "sender": sender,
+            "sender_role": sender_role,
+            "content": content,
+            "created_at": _now(),
+        }
+        self._messages.setdefault(conversation_id, []).append(msg)
+        conv["updated_at"] = msg["created_at"]
+        return dict(msg)
+
+    async def list_messages(
+        self, tenant_id: str, conversation_id: str, after_id: int = 0, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        conv = self._conversations.get(conversation_id)
+        if conv is None or conv["tenant_id"] != tenant_id:
+            return []
+        rows = [m for m in self._messages.get(conversation_id, []) if m["id"] > after_id]
+        return [dict(m) for m in rows[:limit]]
+
+    async def set_conversation(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        status: str | None = None,
+        linked_issue_id: str | None = None,
+    ) -> bool:
+        conv = self._conversations.get(conversation_id)
+        if conv is None or conv["tenant_id"] != tenant_id:
+            return False
+        if status is not None:
+            conv["status"] = status
+        if linked_issue_id is not None:
+            conv["linked_issue_id"] = linked_issue_id
+        conv["updated_at"] = _now()
+        logger.info(
+            "set_conversation: tenant=%s conv=%s status=%s issue=%s",
+            tenant_id,
+            conversation_id,
+            status,
+            linked_issue_id,
+        )
+        return True
+
+    async def mark_conversation_read(
+        self, tenant_id: str, conversation_id: str, user_id: str, last_read_id: int
+    ) -> None:
+        conv = self._conversations.get(conversation_id)
+        if conv is None or conv["tenant_id"] != tenant_id:
+            return
+        key = (conversation_id, user_id)
+        if last_read_id > self._reads.get(key, 0):
+            self._reads[key] = last_read_id
 
 
 def _now() -> float:
