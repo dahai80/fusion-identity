@@ -39,6 +39,9 @@ async def _build_redis(settings: Settings) -> Any:
 
 PREFIX_EXEMPT = ("/api/v1/auth/oidc/",)
 SCIM_PREFIX = "/scim/v2/"
+# Issue #109: messaging is user-scoped like the account plane — the shell
+# sends NO X-Tenant-Id, tenant comes from the bearer token's tid claim.
+MESSAGING_PREFIX = "/api/messaging/"
 
 
 def _query_param(scope, name: str) -> str | None:
@@ -50,6 +53,25 @@ def _query_param(scope, name: str) -> str | None:
     params = parse_qs(qs.decode("latin-1"))
     vals = params.get(name)
     return vals[0] if vals else None
+
+
+def _bearer_claims(headers: list[tuple[bytes, bytes]]) -> dict[str, Any] | None:
+    # Unverified local decode for context injection ONLY — the tenant
+    # middleware still fully verifies the JWT afterwards; routes enforce
+    # require_bearer. A missing/invalid token injects nothing, so the tenant
+    # middleware 401s (fail-closed, red line #1).
+    for k, v in headers:
+        if k == b"authorization":
+            scheme, _, token = v.decode("latin-1").partition(" ")
+            if scheme.lower() != "bearer" or not token:
+                return None
+            try:
+                from fusion_core.tenant.jwt_utils import decode_jwt_claims
+
+                return decode_jwt_claims(token)
+            except Exception:
+                return None
+    return None
 
 
 class _OidcContextMiddleware:
@@ -67,6 +89,14 @@ class _OidcContextMiddleware:
                     changed = True
             elif path.startswith(SCIM_PREFIX) and not any(k == b"x-tenant-id" for k, _ in headers):
                 tid = _query_param(scope, "tenantId")
+                if tid:
+                    headers.append((b"x-tenant-id", tid.encode("latin-1")))
+                    changed = True
+            elif path.startswith(MESSAGING_PREFIX) and not any(
+                k == b"x-tenant-id" for k, _ in headers
+            ):
+                claims = _bearer_claims(headers)
+                tid = str(claims.get("tid") or "") if claims else ""
                 if tid:
                     headers.append((b"x-tenant-id", tid.encode("latin-1")))
                     changed = True
@@ -236,6 +266,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     from fusion_identity.routes.join import router as join_router
     from fusion_identity.routes.jwks import router as jwks_router
     from fusion_identity.routes.members import router as members_router
+    from fusion_identity.routes.messaging import router as messaging_router
     from fusion_identity.routes.metrics import router as metrics_router
     from fusion_identity.routes.mfa import router as mfa_router
     from fusion_identity.routes.oidc import router as oidc_router
@@ -278,6 +309,7 @@ def build_app(settings: Settings, *, store: Any | None = None, run_bootstrap: bo
     app.include_router(provisioning_router)
     app.include_router(registration_router)
     app.include_router(join_router)
+    app.include_router(messaging_router)
     app.state.webhook_worker = None
     app.state.retention_worker = None
     app.state.watchdog = None

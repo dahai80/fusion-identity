@@ -2104,6 +2104,153 @@ class PgStore:
         )
         logger.debug("log_lease: tenant=%s lease=%s action=%s", tenant_id, lease_id, action)
 
+    async def create_conversation(
+        self, tenant_id: str, conv_id: str, scope: str, ref: str, subject: str, created_by: str
+    ) -> dict[str, Any]:
+        # Issue #109: tenant-scoped messaging threads (factory ticket flow).
+        row = await self.fetchrow(
+            "INSERT INTO conversations(id, tenant_id, scope, ref, subject, created_by) "
+            "VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
+            conv_id,
+            tenant_id,
+            scope,
+            ref,
+            subject,
+            created_by,
+        )
+        logger.info(
+            "create_conversation: tenant=%s conv=%s scope=%s ref=%s", tenant_id, conv_id, scope, ref
+        )
+        return _norm_conv(row)
+
+    async def get_conversation(self, tenant_id: str, conversation_id: str) -> dict[str, Any] | None:
+        row = await self.fetchrow(
+            "SELECT * FROM conversations WHERE id=$1 AND tenant_id=$2", conversation_id, tenant_id
+        )
+        return _norm_conv(row) if row else None
+
+    async def list_conversations(
+        self,
+        tenant_id: str,
+        created_by: str | None = None,
+        viewer_id: str = "",
+        viewer_username: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        # viewer_id drives the read markers; viewer_username excludes the
+        # caller's own messages from the unread count.
+        base = (
+            "SELECT c.*, COALESCE(r.last_read_id, 0) AS last_read_id, "
+            "(SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id "
+            " AND m.id > COALESCE(r.last_read_id, 0) AND m.sender <> $2) AS unread "
+            "FROM conversations c "
+            "LEFT JOIN conversation_reads r ON r.conversation_id = c.id AND r.user_id = $3 "
+            "WHERE c.tenant_id = $1"
+        )
+        if created_by is not None:
+            rows = await self.fetch(
+                base + " AND c.created_by = $4 ORDER BY c.updated_at DESC LIMIT $5",
+                tenant_id,
+                viewer_username,
+                viewer_id,
+                created_by,
+                limit,
+            )
+        else:
+            rows = await self.fetch(
+                base + " ORDER BY c.updated_at DESC LIMIT $4",
+                tenant_id,
+                viewer_username,
+                viewer_id,
+                limit,
+            )
+        return [_norm_conv(r) for r in rows]
+
+    async def append_message(
+        self, tenant_id: str, conversation_id: str, sender: str, sender_role: str, content: str
+    ) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            await self._set_guc(conn)
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "INSERT INTO messages(conversation_id, tenant_id, sender, sender_role, "
+                    "content) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+                    conversation_id,
+                    tenant_id,
+                    sender,
+                    sender_role,
+                    content,
+                )
+                if row is None:
+                    return None
+                await conn.execute(
+                    "UPDATE conversations SET updated_at = now() WHERE id=$1 AND tenant_id=$2",
+                    conversation_id,
+                    tenant_id,
+                )
+        return _norm_msg(row)
+
+    async def list_messages(
+        self, tenant_id: str, conversation_id: str, after_id: int = 0, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        rows = await self.fetch(
+            "SELECT * FROM messages WHERE conversation_id=$1 AND tenant_id=$2 AND id > $3 "
+            "ORDER BY id LIMIT $4",
+            conversation_id,
+            tenant_id,
+            after_id,
+            limit,
+        )
+        return [_norm_msg(r) for r in rows]
+
+    async def set_conversation(
+        self,
+        tenant_id: str,
+        conversation_id: str,
+        status: str | None = None,
+        linked_issue_id: str | None = None,
+    ) -> bool:
+        sets: list[str] = []
+        args: list[Any] = [conversation_id, tenant_id]
+        n = 3
+        if status is not None:
+            sets.append(f"status = ${n}")
+            args.append(status)
+            n += 1
+        if linked_issue_id is not None:
+            sets.append(f"linked_issue_id = ${n}")
+            args.append(linked_issue_id)
+            n += 1
+        if not sets:
+            return False
+        sets.append("updated_at = now()")
+        val = await self.fetchval(
+            f"UPDATE conversations SET {', '.join(sets)} WHERE id=$1 AND tenant_id=$2 RETURNING id",
+            *args,
+        )
+        if val is not None:
+            logger.info(
+                "set_conversation: tenant=%s conv=%s status=%s issue=%s",
+                tenant_id,
+                conversation_id,
+                status,
+                linked_issue_id,
+            )
+        return val is not None
+
+    async def mark_conversation_read(
+        self, tenant_id: str, conversation_id: str, user_id: str, last_read_id: int
+    ) -> None:
+        await self.execute(
+            "INSERT INTO conversation_reads(conversation_id, user_id, last_read_id) "
+            "VALUES ($1,$2,$3) ON CONFLICT (conversation_id, user_id) "
+            "DO UPDATE SET last_read_id = "
+            "GREATEST(conversation_reads.last_read_id, EXCLUDED.last_read_id)",
+            conversation_id,
+            user_id,
+            last_read_id,
+        )
+
     async def list_lease_log(self, tenant_id: str, limit: int = 100) -> list[dict[str, Any]]:
         rows = await self.fetch(
             "SELECT * FROM lease_log WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT $2",
@@ -2194,6 +2341,28 @@ def _decode_event(row: dict[str, Any]) -> dict[str, Any]:
     r["payload"] = _decode_jsonb(r.get("payload"))
     r["created_at"] = _iso(r.get("created_at"))
     r["updated_at"] = _iso(r.get("updated_at"))
+    return r
+
+
+def _epoch(value: Any) -> float:
+    # #39/#40 class: PgStore TIMESTAMPTZ datetimes must normalize to epoch
+    # floats to match the InMemory contract.
+    if hasattr(value, "timestamp"):
+        return value.timestamp()
+    return float(value or 0.0)
+
+
+def _norm_conv(row: dict[str, Any]) -> dict[str, Any]:
+    r = dict(row)
+    r["created_at"] = _epoch(r.get("created_at"))
+    r["updated_at"] = _epoch(r.get("updated_at"))
+    return r
+
+
+def _norm_msg(row: dict[str, Any]) -> dict[str, Any]:
+    r = dict(row)
+    r["id"] = int(r.get("id") or 0)
+    r["created_at"] = _epoch(r.get("created_at"))
     return r
 
 

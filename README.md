@@ -7,8 +7,8 @@ doc_type: readme
 title: { zh: "fusion-identity 说明", en: "fusion-identity overview" }
 audience: engineer
 status: draft
-version: 0.2.43
-updated: 2026-11-19
+version: 0.2.44
+updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
   - README.md
@@ -224,6 +224,18 @@ Per-user privacy surface, user-scoped (tenant-middleware-exempt, bearer enforced
 **Data reflow (flywheel Loop A, issue #99)**: when `FUSION_IDENTITY_OPS_DSN` is set, identity streams desensitized events (login success/failure, token issuance incl. refresh/SSO/service-account kinds, api-key token counters, hourly tenant/user totals) into the ops data lake via the shared `fusion_core` `OpsEmitter` — hashed user/tenant ids only (`sha256("identity:{id}")[:16]`, prefixed `u:`/`t:`), no raw emails, usernames, JWTs, or passwords anywhere in payloads; login-failure events carry NO user id so the ops DB cannot become an account-existence oracle. Users with `data_reflow_enabled=false` are already fully covered: identity stores no prompt text at all (prompt sampling lives in the ops pipeline, which honors the opt-out event). Emission is fail-open — an ops outage logs and continues, auth is never blocked.
 
 Service-plane batch lookup for the ops pipeline: `POST /api/v1/admin/data-reflow/flags` `{user_ids: [...]}` (service token, ≤500 ids) → `{flags: {user_id: bool}}` — missing users read `true`.
+
+### Messaging (`/api/messaging` — issue #109)
+
+Tenant-scoped conversation threads for the operator↔customer ticket flow (factory orders; unblocks fusion-web-shell#186). User-scoped like the account plane: the shell sends NO `X-Tenant-Id` — the tenant comes from the bearer token's `tid` claim via the ASGI context middleware (`_OidcContextMiddleware` extension; no valid token → no injection → tenant middleware 401, fail-closed). Roles `tenant_admin`/`operator` are operators (see every thread in their tenant, set the status chip); everyone else is customer-side (only threads they opened). Status chips are stored VERBATIM — the shell degrades unknown values to `open` client-side. Wire contract is frozen by the shell parsers (`fusion-web-shell` `apps/shell/src/lib/messaging.ts`): snake_case fields, epoch-float timestamps. Tables: `conversations` / `messages` (BIGSERIAL ids — `?after=` is a numeric id filter) / `conversation_reads` (migration `0026_messaging.sql`).
+
+| Method | Path | Auth | Notes |
+|---|---|---|---|
+| GET | `/conversations` | bearer | `{conversations:[{id,scope,ref,subject,status,linked_issue_id,updated_at,unread}]}` — operator: all tenant threads; member: own threads only. `unread` = messages with id > the caller's read marker AND sender ≠ caller. |
+| POST | `/conversations` | bearer | 201 `{scope="factory_order",ref,subject}` → opens a thread (`conv-…` id); audited `messaging.conversation_opened`. |
+| GET | `/conversations/{id}/messages?after=` | bearer | `{messages:[{id,conversation_id,sender,sender_role,content,ts}]}` — `after` = server message id (non-numeric degrades to 0). Advances the caller's read marker to the newest message (unread clears). Operator or thread creator only (403 otherwise). |
+| POST | `/conversations/{id}/messages` | bearer | 201 `{content}` → reply. `sender` = username; `sender_role` mapped from the token role: `tenant_admin`/`operator`→`operator`, `service`→`system`, else `customer`. |
+| PATCH | `/conversations/{id}` | bearer (operator only, 403 else) | `{status?, linked_issue_id?}` — status stored verbatim (≤64 chars); `linked_issue_id` links the mirrored GitHub issue. Audited `messaging.conversation_updated`. |
 
 ### Tenant join policy (`join_policy` — issue #40)
 
