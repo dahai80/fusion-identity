@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.45
+version: 0.2.46
 updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.46
+
+### Issue #112 — refresh rotation 500: `replaced_by` FK violated (rotate before insert)
+- **Root cause**: `auth.py` refresh flow ordered the writes wrong — `rotate_refresh_token(jti, nrjti)` set `refresh_tokens.replaced_by = nrjti` BEFORE the new refresh row existed, violating the `refresh_tokens_replaced_by_fkey` FK on PG (`Key (replaced_by)=(…) is not present in table "refresh_tokens"`) → 500 on EVERY rotation. InMemoryStore has no FK, so offline tests were blind (the recurring #39/#40 class).
+- **Fix** (`auth.py`): insert the new refresh row FIRST, then rotate the old one. F7 CAS semantics unchanged — `rotate_refresh_token` still fails closed when the old jti is no longer `active`; on CAS loss the whole family is revoked, INCLUDING the row just inserted (same `family_id`), so reuse detection still kills the chain.
+- **Regression test** (`tests/test_refresh_integration.py`, PG): full HTTP login → refresh → refresh chain, then replay of the first refresh token → 401 + family-wide revocation verified in the DB. Without the fix it reproduces the exact `ForeignKeyViolationError`.
+- Unblocks the gateway session→identity messaging bridge (fusion-gateway#715 / PR #716) and fusion-web-shell#186.
 
 ## 0.2.45
 

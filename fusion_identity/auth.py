@@ -840,10 +840,21 @@ class AuthService:
             algorithm=self._algorithm,
             kid=self._kid,
         )
-        # F7: CAS — rotate_refresh_token returns False if the old jti was no
-        # longer 'active' (concurrent refresh won the race). On False, treat it
-        # as reuse: revoke the whole family and refuse. Must happen BEFORE
-        # issuing the access token and inserting the new refresh record.
+        # Issue #112: the new refresh row MUST be inserted BEFORE the old one
+        # is rotated — refresh_tokens.replaced_by has an FK to refresh_tokens
+        # (jti), so rotating first violated the constraint on PG and 500'd
+        # every rotation. The F7 CAS still gates the rotation: rotate_
+        # refresh_token returns False if the old jti is no longer 'active'
+        # (concurrent refresh won the race). On False, treat it as reuse: the
+        # whole family is revoked — including the row just inserted, since it
+        # carries the same family_id — so the reuse-detection guarantee holds.
+        await self._store.insert_refresh_token(
+            nrjti,
+            new_family_id,
+            claims["tid"],
+            claims["sub"],
+            expires_at=time.time() + self._refresh_ttl,
+        )
         ok = await self._store.rotate_refresh_token(jti, nrjti)
         if not ok:
             logger.warning("refresh: CAS lost jti=%s family=%s — reuse path", jti, rt["family_id"])
@@ -873,13 +884,6 @@ class AuthService:
         )
         # F4: record ownership of the new access jti.
         await self._store.record_issued_jti(ajti, claims["tid"], claims["sub"])
-        await self._store.insert_refresh_token(
-            nrjti,
-            new_family_id,
-            claims["tid"],
-            claims["sub"],
-            expires_at=time.time() + self._refresh_ttl,
-        )
         await self._store.append_audit(
             claims["tid"],
             claims["sub"],
