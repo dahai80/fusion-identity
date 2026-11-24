@@ -3,9 +3,9 @@
 -- runner connects AS the app role it cannot grant on tables owned by
 -- postgres — this script, run as superuser/owner, is the manual fix:
 --   sudo -u postgres psql -d fusion_identity -f deploy/sql/ensure-grants.sql
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO fusion_identity_app;
+GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON ALL TABLES IN SCHEMA public TO fusion_identity_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO fusion_identity_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON TABLES TO fusion_identity_app;
 
 -- Deployment check: fail loudly listing any table the app role cannot read.
 DO $$

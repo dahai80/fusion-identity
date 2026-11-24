@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.44
+version: 0.2.45
 updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.45
+
+### Fix — migration runner grants + probes `REFERENCES` (issue #109 follow-up)
+- **Root cause (prod incident)**: migration `0026_messaging.sql` creates `conversations` with an FK to `tenants`; creating an FK requires `REFERENCES` on the referenced table. The migration runner only granted + probed the 4 DML privileges (issues #94/#96), so on prod (runner connects AS `fusion_identity_app`) startup 500'd with `permission denied for table tenants`, crash-looping the login plane.
+- **Fix** (`migrations.py`, `deploy/sql/ensure-grants.sql`): `GRANT ... REFERENCES` added to the runner grant, default privileges, the error-message hint, and the operator backstop script; the fail-closed privilege probe now checks all 5 privileges — a missing `REFERENCES` aborts startup with the same table:privilege report.
+- Operator one-time fix on existing installs: `sudo -u postgres psql -d fusion_identity -f deploy/sql/ensure-grants.sql`.
+- No schema change; no new tests (probe behavior pinned by the #94/#96 suite, all green).
 
 ## 0.2.44
 

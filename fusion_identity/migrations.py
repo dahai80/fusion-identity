@@ -52,12 +52,12 @@ APP_ROLE_ENV = "FUSION_IDENTITY_APP_ROLE"
 DEFAULT_APP_ROLE = "fusion_identity_app"
 
 _GRANT_SQL = """
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {role}
+GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON ALL TABLES IN SCHEMA public TO {role}
 """
 
 _DEFAULT_PRIVS_SQL = """
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role}
+    GRANT SELECT, INSERT, UPDATE, DELETE, REFERENCES ON TABLES TO {role}
 """
 
 
@@ -86,8 +86,8 @@ async def grant_app_role(conn: Any) -> bool:
     except Exception as exc:
         logger.error(
             "migrations: could not GRANT to %s (%s) — if the privilege probe "
-            "fails, run as the table owner: GRANT SELECT, INSERT, UPDATE, DELETE "
-            "ON ALL TABLES IN SCHEMA public TO %s",
+            "fails, run as the table owner: GRANT SELECT, INSERT, UPDATE, DELETE, "
+            "REFERENCES ON ALL TABLES IN SCHEMA public TO %s",
             role,
             exc,
             role,
@@ -95,7 +95,9 @@ async def grant_app_role(conn: Any) -> bool:
         return False
 
 
-_PROBE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
+# Issue #109: REFERENCES added — FK migrations (0026 conversations -> tenants)
+# need it; the 4-DML probe missed the class and 500'd the whole login plane.
+_PROBE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "REFERENCES")
 
 
 async def assert_app_role_privileges(conn: Any) -> None:
@@ -125,9 +127,9 @@ async def assert_app_role_privileges(conn: Any) -> None:
     if missing:
         raise RuntimeError(
             f"app role {role} lacks privileges on {len(missing)} table/privilege pair(s): "
-            f"{', '.join(missing)} — run GRANT SELECT, INSERT, UPDATE, DELETE "
-            f"ON ALL TABLES IN SCHEMA public TO {role} as the table owner "
-            f"(issues #94, #96)"
+            f"{', '.join(missing)} — run GRANT SELECT, INSERT, UPDATE, DELETE, "
+            f"REFERENCES ON ALL TABLES IN SCHEMA public TO {role} as the table owner "
+            f"(issues #94, #96, #109)"
         )
     logger.info("migrations: app role %s privilege probe passed (%d tables)", role, len(rows))
 
