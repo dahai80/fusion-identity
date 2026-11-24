@@ -37,6 +37,7 @@ from fusion_identity.models import (
     SessionVerifyRequest,
     SsoTicketExchangeRequest,
     SsoTicketIssueResponse,
+    SsoTicketServiceRequest,
     TokenResponse,
     VerifyRequest,
     VerifyResponse,
@@ -315,6 +316,27 @@ async def exchange_sso_ticket(
         "sso",
     )
     return resp
+
+
+@router.post("/ticket/service", response_model=SsoTicketIssueResponse)
+async def issue_service_ticket(
+    request: Request,
+    req: SsoTicketServiceRequest,
+    _svc_ok: None = Depends(require_service_token),
+    svc: AuthService = Depends(get_auth_service),
+) -> SsoTicketIssueResponse:
+    # Issue #111: service-token minting of a one-time SSO ticket for a NAMED
+    # user. Closes the gateway#715 local-password gap: a shell session with
+    # no identity principal is translated into a real user bearer via the
+    # #48 exchange — the gateway never holds a password or a signing key.
+    # Tenant-middleware-exempt (the service token is the gate, same as the
+    # #76 machine-login path); rate-limited like the exchange endpoint.
+    # Fail-closed predicate matches exchange_sso_ticket (user active, tenant
+    # active, membership present); audited auth.ticket_issued.service.
+    await check_login_rate(request, "_svc_ticket", None)
+    logger.info("service ticket route: issue user=%s tid=%s", req.user_id, req.tenant_id)
+    out = await svc.issue_service_ticket(req.user_id, req.tenant_id)
+    return SsoTicketIssueResponse(ticket=out["ticket"], expires_in=out["expires_in"])
 
 
 def _spawn_reset_email(settings, email: str, token: str, username: str) -> None:

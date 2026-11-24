@@ -152,6 +152,7 @@ TENANT_EXEMPT = frozenset(
         "/api/v1/auth/refresh",
         "/api/v1/auth/introspect",
         "/api/v1/auth/ticket/exchange",
+        "/api/v1/auth/ticket/service",
         "/api/v1/auth/service-accounts/token",
         "/api/v1/auth/session",
         "/api/v1/auth/session/verify",

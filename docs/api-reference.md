@@ -7,7 +7,7 @@ doc_type: api-reference
 title: { zh: "fusion-identity API 参考", en: "fusion-identity API reference" }
 audience: engineer
 status: draft
-version: 0.2.46
+version: 0.2.47
 updated: 2026-11-24
 owner: "@dahai"
 source_of_truth:
@@ -32,6 +32,7 @@ Base URL: `http://127.0.0.1:11470`(默认绑定,PRD C8)。错误响应统一为 
 | POST | `/refresh` | none | `{refresh_token}` → 轮换的新对;复用已轮换 token 吊销整个 family |
 | POST | `/ticket` | bearer | 一次性 SSO ticket(`fsso_…`,TTL 默认 60s,钳制 5–600),仅存 sha256 |
 | POST | `/ticket/exchange` | none | `{ticket}` → 标准 token 对;原子单用,重放 401,登录级限流 |
+| POST | `/ticket/service` | service token | issue #111: `{user_id,tenant_id}` → 指定用户的一次性 `fsso_` ticket;fail-closed 谓词同兑换,审计 `auth.ticket_issued.service` |
 | POST | `/logout` | bearer | `{refresh_token?}` 吊销 access jti + refresh |
 | POST | `/revoke` | bearer (tenant_admin) | `{jti}` 吊销(归属入审计) |
 | DELETE | `/sessions` | service token | `{sub,tenant_id}` 吊销该主体全部 access/session jti 与 refresh family(幂等,未知租户 404) |

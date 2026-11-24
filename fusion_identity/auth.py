@@ -500,6 +500,48 @@ class AuthService:
         )
         return {"ticket": raw, "expires_in": self._sso_ticket_ttl}
 
+    async def issue_service_ticket(self, user_id: str, tenant_id: str) -> dict[str, Any]:
+        # Issue #111: service-token ticket minting for a NAMED user. Closes
+        # the gateway#715 local-password gap: a shell session that carries no
+        # identity principal can be translated into a real user bearer via
+        # the #48 exchange, without the gateway ever holding a password or a
+        # signing key. Same single-use fsso_ machinery as issue_sso_ticket;
+        # the difference is the actor (service credential, not the user's
+        # own bearer) — so the audit action is distinct and grep-able:
+        # auth.ticket_issued.service, role "service" marks the non-human
+        # actor (same convention as messaging sender_role).
+        # Fail-closed on the same predicate as exchange_sso_ticket: user
+        # active, tenant active, membership present. Unknown user / no
+        # membership → uniform 404 (service plane is operator-facing).
+        from fastapi import HTTPException
+
+        user = await self._store.get_user(user_id)
+        if user is None or _is_locked(user) or user.get("status") in ("disabled", "locked"):
+            logger.warning("service ticket: user=%s not issuable", user_id)
+            raise HTTPException(status_code=404, detail="user not issuable")
+        tenant_status = await self._store.get_tenant_status(tenant_id)
+        if tenant_status != "active":
+            logger.warning("service ticket: tenant=%s not active (%s)", tenant_id, tenant_status)
+            raise HTTPException(status_code=404, detail="tenant not active")
+        role = await self._store.get_member_role(tenant_id, user_id)
+        if role is None:
+            logger.warning("service ticket: user=%s not a member of tenant=%s", user_id, tenant_id)
+            raise HTTPException(status_code=404, detail="user is not a member")
+        raw = "fsso_" + secrets.token_urlsafe(32)
+        ticket_hash = hashlib.sha256(raw.encode()).hexdigest()
+        expires_at = time.time() + self._sso_ticket_ttl
+        await self._store.create_sso_ticket(ticket_hash, user_id, tenant_id, expires_at)
+        await self._store.append_audit(
+            tenant_id, user_id, None, "service", "auth.ticket_issued.service", "session", {}
+        )
+        logger.info(
+            "service ticket: issued user=%s tid=%s ttl=%d",
+            user_id,
+            tenant_id,
+            self._sso_ticket_ttl,
+        )
+        return {"ticket": raw, "expires_in": self._sso_ticket_ttl}
+
     async def exchange_sso_ticket(self, ticket: str) -> TokenResponse:
         # Issue #48: exchange a one-time ticket for the standard token pair.
         # Atomic single-use consume; expired/replayed/unknown are uniform 401.
