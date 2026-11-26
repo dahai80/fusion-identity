@@ -114,7 +114,7 @@ source_of_truth:
 | `FUSION_IDENTITY_FIRST_PURCHASE_PROMO_PCT` | `20` | issue #74:租户首笔已支付订单的赠送代币百分比,`0` 关闭 |
 | `FUSION_IDENTITY_SERVICE_ACCOUNT_TTL` | `900` | issue #76:服务账号会话 token TTL(秒,钳制 ≥60);无 refresh,机器重新换凭 |
 | `FUSION_IDENTITY_OPS_DSN` | —(关闭) | issue #99:ops 数据湖(`fusion_ops`)的 asyncpg DSN;设置后发送脱敏 ops 事件(仅哈希 id/token 计数),未设置完全关闭;fail-open,不阻塞认证 |
-| `FUSION_IDENTITY_ENV` | —(开发) | issue #103:部署标记;`production` 且缺 `FUSION_IDENTITY_SMTP_HOST` 时启动 fail-closed 拒绝(logged 邮件回退禁止进生产);/health 暴露 email 模式供监控告警 |
+| `FUSION_IDENTITY_ENV` | —(开发) | issue #103:部署标记;`production` 且缺 `FUSION_IDENTITY_SMTP_HOST` 时启动 fail-closed 拒绝(logged 邮件回退禁止进生产);/health 暴露 email 模式供监控告警。issue #115:开发环境(`FUSION_IDENTITY_ENV` 为空)即使配置了 SMTP,验证/重置链接也会同时 WARNING 落日志(log-also)——开发机上被 supervisor 注入 SMTP 而收件邮箱是假地址(如 `example.com`)时,从 identity 日志复制 `verify=` 链接即可完成验证;保留测试域名(`example.com`/`example.org`/`example.net`/`test.local`)额外告警"无法收信"。生产环境保持仅发送,链接绝不落日志 |
 
 ## 事件 / Webhook
 

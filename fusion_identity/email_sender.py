@@ -21,6 +21,32 @@ def email_mode(settings: Any) -> str:
     return "smtp" if getattr(settings, "smtp_host", "") else "logged"
 
 
+# Issue #115: dev machines with supervisor-injected SMTP silently lose mail
+# addressed to non-receivable test domains — the relay accepts it, so the
+# token is gone with no operator signal.
+_UNDELIVERABLE_DOMAINS = frozenset({"example.com", "example.org", "example.net", "test.local"})
+
+
+def _dev_mode(settings: Any) -> bool:
+    # Issue #115: FUSION_IDENTITY_ENV empty = development — the only mode
+    # where the log-also fallback is allowed (prod keeps send-only).
+    return not getattr(settings, "env_name", "")
+
+
+def _link_from_body(body: str) -> str | None:
+    return next((ln for ln in body.splitlines() if "verify=" in ln or "reset=" in ln), None)
+
+
+def _warn_undeliverable_domain(to_email: str) -> None:
+    domain = to_email.rsplit("@", 1)[-1].strip().lower()
+    if domain in _UNDELIVERABLE_DOMAINS:
+        logger.warning(
+            "email_sender: recipient domain %r cannot receive mail (reserved test domain) — "
+            "the delivered message will be lost; recover the link from the log to verify",
+            domain,
+        )
+
+
 _VERIFY_BODY = (
     "Welcome to Fusion, {username}.\n\n"
     "Verify your email address by visiting:\n\n"
@@ -72,8 +98,13 @@ async def send_email(settings: Any, to_email: str, subject: str, body: str) -> s
     # configured the message is LOGGED instead (dev fallback) — verification
     # still blocks login until completed, so the operator copies the link from
     # the log. Returns "sent" | "logged" so the caller can audit honestly.
+    # Issue #115: with SMTP configured, dev (FUSION_IDENTITY_ENV empty) ALSO
+    # logs the verification/reset link at WARNING on every path — success,
+    # delivery failure, and reserved test-domain recipients — so the operator
+    # can always complete verification from the log. Prod stays send-only.
+    _warn_undeliverable_domain(to_email)
     if not settings.smtp_host:
-        link = next((ln for ln in body.splitlines() if "verify=" in ln or "reset=" in ln), body)
+        link = _link_from_body(body) or body
         logger.warning(
             "email_sender: SMTP not configured — verification message for %s logged "
             "instead of sent (dev fallback): %s",
@@ -85,9 +116,29 @@ async def send_email(settings: Any, to_email: str, subject: str, body: str) -> s
         await asyncio.to_thread(_send_sync, settings, to_email, subject, body)
     except (smtplib.SMTPException, OSError) as exc:
         logger.error("email_sender: delivery to %s failed: %s", to_email, exc)
+        _log_also(settings, to_email, body, reason="delivery failed")
         raise EmailDeliveryError(f"email delivery failed: {exc}") from exc
     logger.info("email_sender: sent subject=%r to=%s", subject, to_email)
+    _log_also(settings, to_email, body, reason="dev log-also")
     return "sent"
+
+
+def _log_also(settings: Any, to_email: str, body: str, reason: str) -> None:
+    # Issue #115: dev-only companion log line carrying the link alongside SMTP
+    # delivery. Link-bearing messages only (the reset-success notice carries
+    # no token). Prod (FUSION_IDENTITY_ENV=production) never logs links.
+    if not _dev_mode(settings):
+        return
+    link = _link_from_body(body)
+    if not link:
+        return
+    logger.warning(
+        "email_sender: %s (FUSION_IDENTITY_ENV unset) — verification link for %s "
+        "recoverable from log: %s",
+        reason,
+        to_email,
+        link,
+    )
 
 
 async def send_verification_email(settings: Any, to_email: str, token: str, username: str) -> str:
