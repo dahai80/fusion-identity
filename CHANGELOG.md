@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.47
-updated: 2026-11-24
+version: 0.2.48
+updated: 2026-11-27
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -16,6 +16,14 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.48
+
+### Issue #115 — dev log-also fallback for verification links (SMTP-configured dev machines)
+- **What**: `fusion_identity/email_sender.py` — when `FUSION_IDENTITY_ENV` is empty (development) and SMTP is configured, verification/reset links are ALSO WARNING-logged alongside SMTP delivery, on both the send-success path (`dev log-also`) and the delivery-failure path; production (`FUSION_IDENTITY_ENV=production`) stays strictly send-only, links never logged.
+- **Why**: a dev machine with supervisor-injected SMTP (e.g. `smtp.qq.com`) registering a non-receivable test address lost the verification token silently — SMTP was configured so the dev log fallback never fired, and the relay bounced on an undeliverable domain with no operator signal.
+- **Test-domain flag**: reserved undeliverable domains (`example.com`, `example.org`, `example.net`, `test.local`) get a loud "cannot receive mail" WARNING on every send in any mode — bounce-flag, not a hard reject, so registration behavior is unchanged.
+- **Tests**: `tests/test_email_log_also_issue115.py` (5 offline cases, SMTP relay stubbed — dev+SMTP logs the link, prod never does, example-domain WARNING in both modes).
 
 ## 0.2.47
 
