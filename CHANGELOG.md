@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.48
-updated: 2026-11-27
+version: 0.2.49
+updated: 2026-11-28
 owner: "@dahai"
 source_of_truth:
   - pyproject.toml
@@ -16,6 +16,13 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.49
+
+### Issue #119 — enterprise controls: SCIM deprovision revocation + data-classification ledger flag
+- **What**: (1) SCIM deprovision — `PATCH /scim/v2/Users/{id}` with `active=false` and `DELETE /scim/v2/Users/{id}` now revoke every outstanding access jti and refresh family for the user in the same request (`revoke_user_sessions_and_tokens`, reason `scim_deprovision`; the shared method gains an optional `reason` param, default `user_deletion`, backward compatible). (2) SCIM User resources carry the RFC 7644 `schemas` + `meta.resourceType` fields. (3) Tenant data-classification flag (migration `0027_data_classification.sql`) — `data_classification` ∈ {`standard` (default), `confidential`}, validated on both stores, settable via tenants PATCH + admin create/PUT, readable via `GET /api/v1/tenants/{id}/data-classification` → `{data_classification, local_only}` for the site#196 sensitivity selector / local-only model routing; changes audited into the hash chain as `tenant.data_classification_change`. (4) `deploy/sql/schema.sql` regenerated from migrations 0001..0027.
+- **Why**: factory-tier enterprise gap (Droid 2.0 competitive) — SCIM deprovision previously only disabled the account (status/membership gates), leaving outstanding jtis and refresh families live; and confidential-content tenants had no machine-readable flag to enforce local-only model routing.
+- **Tests**: `tests/test_issue119_enterprise_controls.py` (6 offline: RFC 7644 spec-fixture create roundtrip, disable → verify 401 + re-login 401 + refresh 401, DELETE revocation counts, hash-chain tamper detection after SCIM events, classification lifecycle + cross-tenant denial, tenant read + audit action) — full offline suite 519 passed, integration suite 69 passed on a fresh PG 16 + migrations-only build, live-PG drill of the PgStore classification path (create/update/invalid-refused), `ruff check` + `ruff format --check` clean.
 
 ## 0.2.48
 
