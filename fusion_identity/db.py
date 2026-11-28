@@ -1658,6 +1658,9 @@ class PgStore:
         )
         prev = "genesis"
         for a in rows:
+            # asyncpg returns jsonb as a raw string — chain was computed over
+            # the dict at write time, so verify must decode detail back to a
+            # dict or EVERY row mismatches (found live on prod, v0.2.49 drill).
             expected = _chain_hash(
                 prev,
                 _audit_fields(
@@ -1667,7 +1670,7 @@ class PgStore:
                     a["role"],
                     a["action"],
                     a["resource"],
-                    a["detail"],
+                    _decode_jsonb(a["detail"]),
                     a["ts"].timestamp(),
                 ),
             )
