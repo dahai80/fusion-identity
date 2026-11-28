@@ -44,6 +44,7 @@ class AdminTenantCreate(BaseModel):
     allowed_modules: list[str] | None = None
     allowed_models: list[str] | None = None
     join_policy: str | None = Field(default=None, max_length=16)
+    data_classification: str | None = Field(default=None, max_length=16)
 
 
 class AdminTenantUpdate(BaseModel):
@@ -54,6 +55,7 @@ class AdminTenantUpdate(BaseModel):
     display_name: str | None = Field(default=None, max_length=128)
     status: str | None = Field(default=None, max_length=16)
     join_policy: str | None = Field(default=None, max_length=16)
+    data_classification: str | None = Field(default=None, max_length=16)
 
 
 class AdminApiKeyCreate(BaseModel):
@@ -95,6 +97,7 @@ async def admin_create_tenant(
             display_name=body.display_name,
             plan=body.plan,
             join_policy=body.join_policy or "invite",
+            data_classification=body.data_classification or "standard",
         )
     except StoreConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -129,8 +132,13 @@ async def admin_update_tenant(
         tenant_fields["status"] = body.status
     if body.join_policy is not None:
         tenant_fields["join_policy"] = body.join_policy
+    if body.data_classification is not None:
+        tenant_fields["data_classification"] = body.data_classification
     if tenant_fields:
-        updated = await store.update_tenant(tenant_id, **tenant_fields)
+        try:
+            updated = await store.update_tenant(tenant_id, **tenant_fields)
+        except StoreConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if updated is not None:
             t = updated
     quota_fields = _quota_fields(body)

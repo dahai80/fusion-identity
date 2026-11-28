@@ -305,7 +305,10 @@ Tenant creation/deletion is **operator-only** (no `POST`/`DELETE` endpoint — s
 |---|---|---|
 | GET | `` | list — **self-only** (returns only the caller's `tid`) |
 | GET | `/{tenant_id}` | get one (path guard) |
-| PATCH | `/{tenant_id}` | update display_name/status/plan (path guard) |
+| GET | `/{tenant_id}/data-classification` | tenant data-classification flag + `local_only` boolean (issue #119) |
+| PATCH | `/{tenant_id}` | update display_name/status/plan/data_classification (path guard; `data_classification` ∈ `standard`\|`confidential`) |
+
+**Data classification (issue #119)** — tenant-level flag marking content as regulated: `standard` (default) or `confidential`. `confidential` means the tenant's content must never leave local infrastructure — the site#196 sensitivity selector and model routing read `GET .../data-classification` (`local_only: true`). Changes are audited into the hash chain as `tenant.data_classification_change`; the admin plane (`POST/PUT /api/v1/admin/tenants`) accepts the same field.
 
 ### Members, API keys, Quotas, Audit — all under `/api/v1/tenants/{tenant_id}/...`
 
@@ -392,10 +395,10 @@ Inbound user provisioning for downstream services / IdP connectors. Service-toke
 | GET | `/Users?tenantId=` | service token | SCIM ListResponse of tenant members |
 | POST | `/Users?tenantId=` | service token | create user + auto-add as `member`; `{userName,displayName,active}` |
 | GET | `/Users/{id}?tenantId=` | service token | get one user (must be a tenant member) |
-| PATCH | `/Users/{id}?tenantId=` | service token | RFC 7644 `Operations` array (`[{op,path,value}]`, replace/add/remove on `displayName`/`active`; `userName` read-only). Legacy flat-resource `{displayName?,active?}` also accepted. |
-| DELETE | `/Users/{id}?tenantId=` | service token | remove membership + disable user |
+| PATCH | `/Users/{id}?tenantId=` | service token | RFC 7644 `Operations` array (`[{op,path,value}]`, replace/add/remove on `displayName`/`active`; `userName` read-only). Legacy flat-resource `{displayName?,active?}` also accepted. `active=false` (deprovision) revokes all access jtis + refresh families immediately (issue #119). |
+| DELETE | `/Users/{id}?tenantId=` | service token | remove membership + disable user; revokes all access jtis + refresh families immediately (issue #119) |
 
-SCIM `/Users` GET supports `startIndex`, `count`, `filter` (`attr eq "val"` subset), and `sortBy` query params; the ListResponse includes `totalResults`, `startIndex`, and `itemsPerPage`. `/Groups` maps the four unified roles to SCIM groups:
+SCIM `/Users` GET supports `startIndex`, `count`, `filter` (`attr eq "val"` subset), and `sortBy` query params; the ListResponse includes `totalResults`, `startIndex`, and `itemsPerPage`. User resources carry the RFC 7644 `schemas` + `meta.resourceType` fields (issue #119). Deprovision (PATCH `active=false` or DELETE) revokes every outstanding access jti and refresh family for the user within the same request — a deprovisioned session fails `/verify` on its next use. `/Groups` maps the four unified roles to SCIM groups:
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|

@@ -747,7 +747,9 @@ class AuthService:
         logger.debug("verify_session_token: ok sub=%s tid=%s", claims["sub"], claims["tid"])
         return claims
 
-    async def revoke_user_sessions_and_tokens(self, sub: str, tenant_id: str) -> dict[str, int]:
+    async def revoke_user_sessions_and_tokens(
+        self, sub: str, tenant_id: str, reason: str = "user_deletion"
+    ) -> dict[str, int]:
         # Issue #29: user-deletion flow for business apps. Account deletion must
         # invalidate credentials, not just delete rows (App Store requirement):
         # every unexpired issued jti (access + session tokens) goes onto the
@@ -762,7 +764,7 @@ class AuthService:
             )
             raise HTTPException(status_code=404, detail="tenant not found")
         revoked_jtis = await self._store.revoke_user_issued_jtis(
-            sub, tenant_id=tenant_id, reason="user_deletion"
+            sub, tenant_id=tenant_id, reason=reason
         )
         revoked_refresh = await self._store.revoke_user_sessions(sub)
         await self._store.append_audit(
@@ -775,15 +777,16 @@ class AuthService:
             {
                 "revoked_access_jtis": revoked_jtis,
                 "revoked_refresh_tokens": revoked_refresh,
-                "reason": "user_deletion",
+                "reason": reason,
             },
         )
         logger.info(
-            "revoke_user_sessions_and_tokens: sub=%s tid=%s jtis=%d refresh=%d",
+            "revoke_user_sessions_and_tokens: sub=%s tid=%s jtis=%d refresh=%d reason=%s",
             sub,
             tenant_id,
             revoked_jtis,
             revoked_refresh,
+            reason,
         )
         return {
             "revoked_access_jtis": revoked_jtis,

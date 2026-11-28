@@ -8,7 +8,7 @@ from datetime import UTC
 from typing import Any
 
 from fusion_identity.kdf import run_kdf
-from fusion_identity.store import JOIN_POLICIES, StoreConflict
+from fusion_identity.store import DATA_CLASSIFICATIONS, JOIN_POLICIES, StoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -138,17 +138,21 @@ class PgStore:
         display_name: str,
         plan: str = "team",
         join_policy: str = "invite",
+        data_classification: str = "standard",
     ) -> dict[str, Any]:
         if join_policy not in JOIN_POLICIES:
             raise StoreConflict(f"unknown join_policy {join_policy!r}")
+        if data_classification not in DATA_CLASSIFICATIONS:
+            raise StoreConflict(f"unknown data_classification {data_classification!r}")
         try:
             row = await self.fetchrow(
-                "INSERT INTO tenants(tenant_id, display_name, plan, join_policy) "
-                "VALUES ($1,$2,$3,$4) RETURNING *",
+                "INSERT INTO tenants(tenant_id, display_name, plan, join_policy, "
+                "data_classification) VALUES ($1,$2,$3,$4,$5) RETURNING *",
                 tenant_id,
                 display_name,
                 plan,
                 join_policy,
+                data_classification,
             )
         except asyncpg.UniqueViolationError as exc:
             raise StoreConflict(f"tenant {tenant_id} exists") from exc
@@ -174,10 +178,13 @@ class PgStore:
         )
 
     async def update_tenant(self, tenant_id: str, **fields: Any) -> dict[str, Any] | None:
-        allowed = ("display_name", "status", "plan", "join_policy")
+        allowed = ("display_name", "status", "plan", "join_policy", "data_classification")
         jp = fields.get("join_policy")
         if jp is not None and jp not in JOIN_POLICIES:
             raise StoreConflict(f"unknown join_policy {jp!r}")
+        dc = fields.get("data_classification")
+        if dc is not None and dc not in DATA_CLASSIFICATIONS:
+            raise StoreConflict(f"unknown data_classification {dc!r}")
         # Present fields must get CONTIGUOUS placeholders ($2, $3, ...) — a
         # positional index derived from the allowed-tuple position ($5 for
         # join_policy) references a parameter that was never bound
