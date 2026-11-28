@@ -244,8 +244,11 @@ ops 管道的服务面批量查询：`POST /api/v1/admin/data-reflow/flags` `{us
 | GET | `` | 列租户 |
 | POST | `` | 创建（201） |
 | GET | `/{tenant_id}` | 取单个 |
-| PATCH | `/{tenant_id}` | 改 display_name/status/plan |
+| GET | `/{tenant_id}/data-classification` | 租户数据分级标志 + `local_only` 布尔值（issue #119） |
+| PATCH | `/{tenant_id}` | 改 display_name/status/plan/data_classification |
 | DELETE | `/{tenant_id}` | 软删除 |
+
+**数据分级（issue #119）**——租户级标志：`standard`（默认）或 `confidential`。`confidential` 表示租户内容受合规约束，只能本地处理（site#196 敏感度选择器与模型路由读取该标志）；变更写入哈希链审计。
 
 ### Members / API keys / Quotas / Audit —— 均在 `/api/v1/tenants/{tenant_id}/...` 下
 

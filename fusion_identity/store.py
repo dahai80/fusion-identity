@@ -50,6 +50,11 @@ ROLES_SEED = {
 # decision 2, fusion-site-auth-1104 §4).
 JOIN_POLICIES = frozenset({"invite", "proof", "approval", "open"})
 
+# Issue #119: tenant-level data classification. `confidential` marks the
+# tenant's content as regulated — downstream consumers (site#196 sensitivity
+# selector, model routing) must keep processing local-only.
+DATA_CLASSIFICATIONS = frozenset({"standard", "confidential"})
+
 DEFAULT_QUOTA = {
     "rpm": 60,
     "tpm": 100000,
@@ -365,11 +370,14 @@ class InMemoryStore:
         display_name: str,
         plan: str = "team",
         join_policy: str = "invite",
+        data_classification: str = "standard",
     ) -> dict[str, Any]:
         if tenant_id in self._tenants:
             raise StoreConflict(f"tenant {tenant_id} exists")
         if join_policy not in JOIN_POLICIES:
             raise StoreConflict(f"unknown join_policy {join_policy!r}")
+        if data_classification not in DATA_CLASSIFICATIONS:
+            raise StoreConflict(f"unknown data_classification {data_classification!r}")
         now = _now()
         self._tenants[tenant_id] = {
             "tenant_id": tenant_id,
@@ -377,12 +385,19 @@ class InMemoryStore:
             "status": "active",
             "plan": plan,
             "join_policy": join_policy,
+            "data_classification": data_classification,
             "created_at": now,
             "disabled_at": None,
             "deleted_at": None,
         }
         self._quotas[tenant_id] = {"tenant_id": tenant_id, "updated_at": now, **DEFAULT_QUOTA}
-        logger.info("create_tenant: %s plan=%s join_policy=%s", tenant_id, plan, join_policy)
+        logger.info(
+            "create_tenant: %s plan=%s join_policy=%s data_classification=%s",
+            tenant_id,
+            plan,
+            join_policy,
+            data_classification,
+        )
         return dict(self._tenants[tenant_id])
 
     async def set_join_policy(self, tenant_id: str, join_policy: str) -> dict[str, Any] | None:
@@ -420,7 +435,10 @@ class InMemoryStore:
         jp = fields.get("join_policy")
         if jp is not None and jp not in JOIN_POLICIES:
             raise StoreConflict(f"unknown join_policy {jp!r}")
-        for k in ("display_name", "status", "plan", "join_policy"):
+        dc = fields.get("data_classification")
+        if dc is not None and dc not in DATA_CLASSIFICATIONS:
+            raise StoreConflict(f"unknown data_classification {dc!r}")
+        for k in ("display_name", "status", "plan", "join_policy", "data_classification"):
             if k in fields and fields[k] is not None:
                 t[k] = fields[k]
         if t["status"] == "disabled" and not t["disabled_at"]:

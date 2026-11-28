@@ -39,6 +39,26 @@ async def get_tenant(
     return t
 
 
+@router.get("/{tenant_id}/data-classification")
+async def get_data_classification(
+    tenant_id: str,
+    store: InMemoryStore = Depends(get_store),
+    _claims: dict = Depends(_read),
+) -> dict[str, Any]:
+    # Issue #119: lightweight read for downstream consumers (site#196
+    # sensitivity selector, local-only model routing). `confidential` means
+    # the tenant's content must never leave local infrastructure.
+    t = await store.get_tenant(tenant_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="tenant not found")
+    classification = t.get("data_classification", "standard")
+    return {
+        "tenant_id": tenant_id,
+        "data_classification": classification,
+        "local_only": classification == "confidential",
+    }
+
+
 @router.patch("/{tenant_id}")
 async def update_tenant(
     tenant_id: str,
@@ -81,6 +101,18 @@ async def update_tenant(
             "tenant.join_policy_change",
             "tenant",
             {"join_policy": fields["join_policy"]},
+        )
+    if "data_classification" in fields:
+        # Issue #119: classification changes are compliance-relevant — audit
+        # them into the hash chain like status/join_policy changes.
+        await store.append_audit(
+            tenant_id,
+            _claims.get("sub"),
+            None,
+            _claims.get("role"),
+            "tenant.data_classification_change",
+            "tenant",
+            {"data_classification": fields["data_classification"]},
         )
     await invalidate_tenant_cache(request, tenant_id)
     return t

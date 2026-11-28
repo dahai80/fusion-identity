@@ -124,6 +124,7 @@ class TenantCreate(BaseModel):
     display_name: str = Field(min_length=1)
     plan: str = Field(default="team")
     join_policy: str = Field(default="invite")
+    data_classification: str = Field(default="standard")
 
 
 class TenantUpdate(BaseModel):
@@ -131,6 +132,7 @@ class TenantUpdate(BaseModel):
     status: str | None = None
     plan: str | None = None
     join_policy: str | None = None
+    data_classification: str | None = None
 
     @field_validator("status")
     @classmethod

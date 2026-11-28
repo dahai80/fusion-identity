@@ -3,7 +3,7 @@
 -- fusion_tenant name is retired; the CREATE is guarded so re-running against an
 -- existing install does not fail.
 --
--- Issue #105: this file is GENERATED from migrations/0001..0026 (pg_dump of a
+-- Issue #105: this file is GENERATED from migrations/0001..0027 (pg_dump of a
 -- migrations-only build) — DO NOT hand-edit. migrations/ is the single source
 -- of truth for DDL; regenerate after adding a migration:
 --   fresh PG -> run_migrations() -> pg_dump -s --no-owner --no-privileges
@@ -16,6 +16,14 @@ SELECT 'CREATE DATABASE fusion_identity'
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'fusion_identity')\gexec
 
 \c fusion_identity
+
+--
+-- PostgreSQL database dump
+--
+
+
+-- Dumped from database version 15.18 (Homebrew)
+-- Dumped by pg_dump version 15.18 (Homebrew)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
@@ -678,6 +686,7 @@ CREATE TABLE public.tenants (
     disabled_at timestamp with time zone,
     deleted_at timestamp with time zone,
     join_policy text DEFAULT 'invite'::text NOT NULL,
+    data_classification text DEFAULT 'standard'::text NOT NULL,
     CONSTRAINT tenants_status_chk CHECK ((status = ANY (ARRAY['active'::text, 'disabled'::text, 'deleted'::text])))
 );
 
@@ -1907,8 +1916,11 @@ ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.usage_ledger ENABLE ROW LEVEL SECURITY;
 
 --
-
+-- PostgreSQL database dump complete
 --
+
+
+
 -- Seed data (not emitted by pg_dump --schema-only; mirrored from
 -- migrations/0001_baseline.sql and migrations/0010_provisioning.sql so a
 -- schema.sql-only install sees the same defaults as a migrations run).

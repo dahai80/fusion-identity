@@ -45,10 +45,12 @@ async def list_users(
             continue
         resources.append(
             {
+                "schemas": [_SCIM_USER_SCHEMA],
                 "id": user["user_id"],
                 "userName": user["username"],
                 "displayName": user.get("display_name") or user["username"],
                 "active": user.get("status", "active") == "active",
+                "meta": {"resourceType": "User"},
                 "tenant_id": tenant_id,
             }
         )
@@ -121,20 +123,29 @@ async def create_user(
         tenant_id, uid, None, None, "scim.user.create", "user", {"userName": username}
     )
     return {
+        "schemas": [_SCIM_USER_SCHEMA],
         "id": uid,
         "userName": username,
         "displayName": display,
         "active": active,
+        "meta": {"resourceType": "User"},
         "tenant_id": tenant_id,
     }
 
 
+_SCIM_USER_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:User"
+
+
 def _scim_user_view(user: dict[str, Any], tenant_id: str) -> dict[str, Any]:
+    # Issue #119: RFC 7644 resource shape — every User resource carries
+    # `schemas` and `meta.resourceType` so spec-compliant IdPs can consume it.
     return {
-        "id": user["user_id"],
-        "userName": user["username"],
-        "displayName": user.get("display_name") or user["username"],
+        "schemas": [_SCIM_USER_SCHEMA],
+        "id": user.get("user_id", ""),
+        "userName": user.get("username", ""),
+        "displayName": user.get("display_name") or user.get("username", ""),
         "active": user.get("status", "active") == "active",
+        "meta": {"resourceType": "User"},
         "tenant_id": tenant_id,
     }
 
@@ -209,9 +220,31 @@ async def patch_user(
             fields["status"] = "active" if body["active"] else "disabled"
     if fields:
         user = await store.update_user(user_id, **fields)
+    # Issue #119: SCIM deprovision (active=false) must kill in-flight access
+    # jtis AND refresh families immediately, not just gate new logins.
+    revoked: dict[str, Any] = {}
+    if fields.get("status") == "disabled":
+        auth_service = getattr(request.app.state, "auth_service", None)
+        if auth_service is not None:
+            revoked = await auth_service.revoke_user_sessions_and_tokens(
+                user_id, tenant_id, reason="scim_deprovision"
+            )
+            logger.warning(
+                "scim patch_user: deprovision revoke tenant=%s user=%s access=%s refresh=%s",
+                tenant_id,
+                user_id,
+                revoked.get("revoked_access_jtis"),
+                revoked.get("revoked_refresh_tokens"),
+            )
     logger.warning("scim patch_user: tenant=%s user=%s fields=%s", tenant_id, user_id, list(fields))
     await store.append_audit(
-        tenant_id, user_id, None, None, "scim.user.patch", "user", {"fields": list(fields)}
+        tenant_id,
+        user_id,
+        None,
+        None,
+        "scim.user.patch",
+        "user",
+        {"fields": list(fields), "revoked": revoked or None},
     )
     return _scim_user_view(user or {}, tenant_id)
 
@@ -250,11 +283,32 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="user not found in tenant")
     await store.remove_member(tenant_id, user_id)
     await store.update_user(user_id, status="disabled")
-    logger.warning("scim delete_user: tenant=%s user=%s", tenant_id, user_id)
-    await store.append_audit(
-        tenant_id, user_id, None, None, "scim.user.delete", "user", {"user_id": user_id}
+    # Issue #119: deprovision revokes tokens + sessions immediately — the
+    # status/membership gates block new use, this kills outstanding jtis and
+    # refresh families outright.
+    revoked: dict[str, Any] = {}
+    auth_service = getattr(request.app.state, "auth_service", None)
+    if auth_service is not None:
+        revoked = await auth_service.revoke_user_sessions_and_tokens(
+            user_id, tenant_id, reason="scim_deprovision"
+        )
+    logger.warning(
+        "scim delete_user: tenant=%s user=%s access=%s refresh=%s",
+        tenant_id,
+        user_id,
+        revoked.get("revoked_access_jtis"),
+        revoked.get("revoked_refresh_tokens"),
     )
-    return {"deleted": True, "id": user_id}
+    await store.append_audit(
+        tenant_id,
+        user_id,
+        None,
+        None,
+        "scim.user.delete",
+        "user",
+        {"user_id": user_id, "revoked": revoked or None},
+    )
+    return {"deleted": True, "id": user_id, "revoked": revoked or None}
 
 
 _SCIM_GROUP_ROLES = ["tenant_admin", "operator", "member", "viewer"]
