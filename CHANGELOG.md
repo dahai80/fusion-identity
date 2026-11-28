@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "fusion-identity 变更日志", en: "fusion-identity changelog" }
 audience: engineer
 status: draft
-version: 0.2.49
+version: 0.2.50
 updated: 2026-11-28
 owner: "@dahai"
 source_of_truth:
@@ -16,6 +16,13 @@ source_of_truth:
 ---
 
 # Changelog
+
+## 0.2.50
+
+### Fix — PgStore.verify_audit_chain hashed string jsonb detail (every PG chain invalid)
+- **What**: `db.py verify_audit_chain` decodes `detail` via `_decode_jsonb` before hashing. Regression test `tests/test_audit_chain_pg.py` (PG integration): append → verify valid → tamper one row → verify flags `broken_at`.
+- **Root cause**: asyncpg returns `jsonb` as a raw string when no codec is registered. `append_audit` computed `chain_hash` over the decoded dict at write time; verify re-hashed the string read back — mismatch on every row, so every PG tenant chain reported invalid with `broken_at` on the first row. Found live on prod during the v0.2.49 issue #119 drill; tamper detection was unusable (a real tamper indistinguishable from the false invalid). InMemoryStore keeps dicts — all offline tests blind (recurring #39-class).
+- **Shipped with**: issue #119 enterprise controls (v0.2.49) — audit export + SIEM consumers get a working `chain.valid` verdict on PG.
 
 ## 0.2.49
 
